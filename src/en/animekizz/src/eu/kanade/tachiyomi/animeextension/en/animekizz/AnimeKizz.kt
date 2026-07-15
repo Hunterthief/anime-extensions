@@ -127,33 +127,52 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             
             val synopsis = document.select("p.line-clamp-4, .synopsis, div.synopsis").firstOrNull()?.text()?.trim() ?: ""
             
-            val metaBlocks = document.select("div.flex.flex-col.gap-1")
+            // Helper to extract metadata values cleanly
             fun getMeta(label: String): String {
-                return metaBlocks.firstOrNull { 
+                return document.select("div.flex.flex-col.gap-1").firstOrNull { 
                     it.select("span").firstOrNull()?.text()?.contains(label, ignoreCase = true) == true 
-                }?.select("span")?.lastOrNull()?.text()?.trim() ?: ""
+                }?.select("span")?.lastOrNull()?.text()?.trim()?.replace(Regex("\\s+"), " ") ?: ""
             }
             
-            val studio = getMeta("Studio")
+            // Extract Type, Status, and Score from the top badge container
+            val badgeContainer = document.select("div.flex.items-center.gap-3.mb-2.flex-wrap > span")
+            val type = badgeContainer.firstOrNull { 
+                it.text().trim().uppercase() in listOf("TV", "MOVIE", "OVA", "ONA", "SPECIAL", "MUSIC") 
+            }?.text()?.trim() ?: ""
+            
+            val status = badgeContainer.firstOrNull { 
+                it.text().trim().lowercase() in listOf("airing", "finished", "completed", "not yet aired", "cancelled") 
+            }?.text()?.trim() ?: ""
+            
+            val score = badgeContainer.firstOrNull { 
+                it.select("svg.lucide-star").isNotEmpty() 
+            }?.text()?.trim() ?: ""
+            
             val season = getMeta("Season")
-            val episodesCount = getMeta("Episodes")
+            val episodes = getMeta("Episodes")
+            val studio = getMeta("Studio")
             val source = getMeta("Source")
             
+            // Set dedicated fields
             author = studio
-            status = when {
-                document.text().contains("Airing", ignoreCase = true) || document.text().contains("Releasing", ignoreCase = true) -> SAnime.ONGOING
-                document.text().contains("Completed", ignoreCase = true) || document.text().contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
+            this.status = when {
+                status.contains("Airing", ignoreCase = true) || status.contains("Releasing", ignoreCase = true) -> SAnime.ONGOING
+                status.contains("Completed", ignoreCase = true) || status.contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
                 else -> SAnime.UNKNOWN
             }
             
+            // Build clean, formatted description
             val descBuilder = StringBuilder()
             if (synopsis.isNotBlank()) {
                 descBuilder.append(synopsis).append("\n\n")
             }
             
             val metaLines = mutableListOf<String>()
-            if (episodesCount.isNotBlank()) metaLines.add("Episodes: $episodesCount")
+            if (type.isNotBlank()) metaLines.add("Type: $type")
+            if (status.isNotBlank()) metaLines.add("Status: $status")
+            if (score.isNotBlank()) metaLines.add("Score: $score")
             if (season.isNotBlank()) metaLines.add("Aired: $season")
+            if (episodes.isNotBlank()) metaLines.add("Episodes: $episodes")
             if (studio.isNotBlank()) metaLines.add("Studio: $studio")
             if (source.isNotBlank()) metaLines.add("Source: $source")
             
@@ -167,11 +186,10 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
 
     // ==================== EPISODES (ADAPTIVE BATCH SCRAPING) ====================
     override fun episodeListParse(response: Response): List<SEpisode> {
-        val document = response.useAsJsoup()
         val episodes = mutableListOf<SEpisode>()
         
-        // 1. Get total episodes from metadata
-        val episodesCountStr = document.select("div.flex.flex-col.gap-1").firstOrNull { 
+        // 1. Get total episodes from metadata to know when to stop
+        val episodesCountStr = response.useAsJsoup().select("div.flex.flex-col.gap-1").firstOrNull { 
             it.select("span").firstOrNull()?.text()?.contains("Episodes", ignoreCase = true) == true 
         }?.select("span")?.lastOrNull()?.text()?.trim()?.replace(Regex("\\D"), "")
         
@@ -197,7 +215,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                 var maxEpFoundOnPage = 0
                 var validEpisodesFound = 0
                 
-                // Select ONLY <a> tags, completely ignoring any interleaved ad <div>s
+                // Select ONLY <a> tags for episodes
                 val pageEpisodes = watchDoc.select("a[href^='/watch/']").mapNotNull { element ->
                     val href = element.attr("href")
                     if (!href.contains("/watch/")) return@mapNotNull null
@@ -209,10 +227,10 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                         maxEpFoundOnPage = maxOf(maxEpFoundOnPage, epNum.toInt())
                     }
                     
-                    // FIX: Strictly scoped title extraction to target ONLY the episode title span.
-                    // This completely bypasses any span.truncate that might belong to server buttons or ads.
-                    val title = element.selectFirst("span.block.w-full.min-w-0.font-black.truncate")?.text()?.trim()
-                        ?: element.selectFirst("div.flex.min-w-0.flex-1.flex-col > span")?.text()?.trim()
+                    // FIX: Bulletproof title extraction. 
+                    // The title is always in a <span> with the "truncate" class inside the episode card.
+                    // This completely ignores the description <p> tag and any ad <div>s.
+                    val title = element.selectFirst("span.truncate")?.text()?.trim()
                         ?: "Episode ${epNum.toInt()}"
                     
                     validEpisodesFound++
@@ -235,21 +253,18 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                 if (validEpisodesFound > 0 && maxEpFoundOnPage > 0) {
                     currentEp = maxEpFoundOnPage + 1
                 } else {
-                    // If no valid episodes were found on this page, break to prevent an infinite loop
                     break
                 }
                 
             } catch (e: Exception) {
-                // If a page request fails, break to prevent an infinite loop
                 break
             }
         }
         
-        // Deduplicate by URL and sort by episode number ascending
         return episodes.distinctBy { it.url }.sortedBy { it.episode_number }
     }
 
-    // ==================== VIDEOS (DYNAMIC SERVER & SUB TYPE EXTRACTION) ====================
+    // ==================== VIDEOS ====================
     override fun videoListParse(response: Response): List<Video> {
         val document = response.useAsJsoup()
         val videoList = mutableListOf<Video>()
@@ -262,18 +277,17 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         val anilistId = if (anilistLink.isNotBlank()) anilistLink.substringAfterLast("/") else "0"
         val episodeId = if (anilistId != "0") "$slug-$anilistId:$epNum" else "$slug:$epNum"
         
-        // 1. Detect active sub type (Hard Sub, Soft Sub, or Dub) from the toggle group
+        // Detect active sub type (Hard Sub, Soft Sub, or Dub)
         val activeSubTypeButton = document.selectFirst("div[data-slot='toggle-group'] button[aria-pressed='true']")
         val subTypeText = activeSubTypeButton?.selectFirst("span")?.text()?.trim() ?: "Soft Sub"
         val apiSubType = if (subTypeText.equals("Dub", ignoreCase = true)) "dub" else "sub"
         
-        // 2. Extract available servers dynamically from the grid buttons
+        // Extract available servers dynamically
         val availableServers = document.select("button[data-slot='button'] span.truncate")
             .map { it.text().trim() }
             .filter { it.isNotBlank() }
             .distinct()
         
-        // Fallback to hardcoded list if dynamic extraction fails
         val serversToTry = if (availableServers.isNotEmpty()) {
             availableServers.map { "$it:$apiSubType" }
         } else {
@@ -318,8 +332,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                         }
                         
                         val finalVideoUrl = if (videoPath.startsWith("http")) videoPath else "$baseUrl$videoPath"
-                        
-                        // Append subTypeText to quality, e.g., "1080p (Soft Sub)"
                         val displayName = "${serverName.split(":")[0].replaceFirstChar { it.uppercase() }} - $quality ($subTypeText)"
                         
                         videoList.add(
