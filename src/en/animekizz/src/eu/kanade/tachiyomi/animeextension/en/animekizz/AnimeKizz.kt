@@ -6,14 +6,23 @@ import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
+import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.POST
 import keiyoushi.utils.addListPreference
+import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.useAsJsoup
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Headers
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 
 class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
@@ -44,7 +53,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             }
         }.distinctBy { it.url }
         
-        val hasNextPage = document.select("a[href*='page=${page + 1}'], button:contains(Next), .pagination a:contains(2)").isNotEmpty()
+        val hasNextPage = document.select("a:contains(Next), .pagination a:contains(2), button:contains(Next)").isNotEmpty()
         return AnimesPage(animes, hasNextPage)
     }
 
@@ -58,7 +67,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
     // ==================== SEARCH ====================
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         val filterList = if (filters.isEmpty()) getFilterList() else filters
-        val genreFilter = filterList.find { it is AnimeKizzFilters.GenreFilter } as? AnimeKizzFilters.GenreFilter
+        val genreFilter = filterList.firstInstanceOrNull<AnimeKizzFilters.GenreFilter>()
         val genre = genreFilter?.toUriPart() ?: ""
         val genreQuery = if (genre.isNotEmpty()) "&genre=$genre" else ""
         
@@ -107,56 +116,89 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         }.reversed().distinctBy { it.url }
     }
 
-    // ==================== VIDEOS ====================
+    // ==================== VIDEOS (API EXTRACTION) ====================
     override fun videoListParse(response: Response): List<Video> {
         val document = response.useAsJsoup()
         val videoList = mutableListOf<Video>()
-        val html = document.html()
-
-        // 1. Attempt to extract from iframes using parallel processing (standard framework pattern)
-        document.select("iframe").parallelCatchingFlatMapBlocking { iframe ->
-            val src = iframe.attr("abs:src")
-            if (src.isNotBlank()) {
-                when {
-                    src.contains("filemoon", ignoreCase = true) -> {
-                        // FilemoonExtractor(client).videosFromUrl(src, headers)
+        
+        // 1. Construct the episode_id dynamically from the URL and HTML
+        val currentUrl = response.request.url.toString()
+        val slug = currentUrl.substringAfter("/watch/").substringBeforeLast("-episode-")
+        val epNum = currentUrl.substringAfterLast("-episode-").substringBefore("/").substringBefore("?")
+        val anilistId = document.select("a[href*='anilist.co/anime/']").attr("href").substringAfterLast("/")
+        val episodeId = "$slug-$anilistId:$epNum"
+        
+        // 2. Define preferred servers (based on HAR log analysis)
+        val servers = listOf("mimi:sub", "yuki:sub", "sora:sub", "beep:sub", "uwu:sub", "kiwi:sub", "mimi:dub", "yuki:dub")
+        
+        // 3. Fetch video sources for each server via the site's resolve API
+        servers.forEach { serverId ->
+            try {
+                val resolveUrl = "$baseUrl/api/v1/video/resolve"
+                val jsonBody = """{"episode_id":"$episodeId","server_id":"$serverId"}"""
+                val requestBody = jsonBody.toRequestBody("application/json".toMediaType())
+                val resolveRequest = POST(resolveUrl, headers, requestBody)
+                val resolveResponse = client.newCall(resolveRequest).execute()
+                
+                if (resolveResponse.isSuccessful) {
+                    val json = Json.parseToJsonElement(resolveResponse.body.string()).jsonObject
+                    val sources = json["sources"]?.jsonArray
+                    
+                    sources?.forEach { sourceElement ->
+                        val source = sourceElement.jsonObject
+                        val videoPath = source["url"]?.jsonPrimitive?.content ?: return@forEach
+                        val quality = source["quality"]?.jsonPrimitive?.content ?: "Auto"
+                        val serverName = source["server"]?.jsonPrimitive?.content ?: serverId
+                        
+                        // Extract subtitles
+                        val subtitleTracks = mutableListOf<Track>()
+                        val subtitles = source["subtitles"]?.jsonArray
+                        subtitles?.forEach { subElement ->
+                            val sub = subElement.jsonObject
+                            val subPath = sub["url"]?.jsonPrimitive?.content ?: ""
+                            val subLang = sub["label"]?.jsonPrimitive?.content ?: "Unknown"
+                            if (subPath.isNotBlank()) {
+                                subtitleTracks.add(Track("$baseUrl$subPath", subLang))
+                            }
+                        }
+                        
+                        // Extract required headers (e.g., Referer)
+                        val sourceHeaders = headers.newBuilder()
+                        val headersObj = source["headers"]?.jsonObject
+                        headersObj?.let {
+                            it["Referer"]?.jsonPrimitive?.content?.let { ref ->
+                                sourceHeaders.set("Referer", ref)
+                            }
+                        }
+                        
+                        val finalVideoUrl = if (videoPath.startsWith("http")) videoPath else "$baseUrl$videoPath"
+                        val displayName = "${serverName.split(":")[0].replaceFirstChar { it.uppercase() }} - $quality"
+                        
+                        videoList.add(
+                            Video(
+                                url = finalVideoUrl,
+                                quality = displayName,
+                                videoUrl = finalVideoUrl,
+                                headers = sourceHeaders.build(),
+                                subtitleTracks = subtitleTracks
+                            )
+                        )
                     }
-                    src.contains("streamwish", ignoreCase = true) -> {
-                        // StreamWishExtractor(client).videosFromUrl(src, headers)
-                    }
-                    else -> emptyList()
                 }
-            } else {
-                emptyList()
+            } catch (e: Exception) {
+                // Ignore failed server resolutions and try the next one
             }
-        }.let { videoList.addAll(it) }
-
-        // 2. Fallback: Regex search for direct m3u8/mp4 in page source
+        }
+        
+        // 4. Fallback: Regex search for direct m3u8 in page source if API fails completely
         if (videoList.isEmpty()) {
+            val html = document.html()
             val m3u8Regex = Regex("""(https?://[^\s"']+\.m3u8[^\s"']*)""")
-            val mp4Regex = Regex("""(https?://[^\s"']+\.mp4[^\s"']*)""")
-
             m3u8Regex.findAll(html).map { it.groupValues[1] }.distinct().forEach { url ->
-                videoList.add(Video(url, "m3u8", url, headers))
-            }
-
-            mp4Regex.findAll(html).map { it.groupValues[1] }.distinct().forEach { url ->
-                videoList.add(Video(url, "mp4", url, headers))
+                videoList.add(Video(url = url, quality = "m3u8", videoUrl = url, headers = headers))
             }
         }
-
-        // 3. Descriptive placeholder if dynamic JS player hides all sources
-        if (videoList.isEmpty()) {
-            videoList.add(
-                Video(
-                    url = "https://example.com/placeholder.m3u8",
-                    quality = "Dynamic Player (Requires API reverse-engineering)",
-                    videoUrl = "https://example.com/placeholder.m3u8",
-                    headers = headers
-                )
-            )
-        }
-
+        
         return videoList
     }
 
@@ -164,8 +206,9 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         val quality = preferences.getString("pref_quality", "1080") ?: "1080"
         return this.sortedWith(
             compareBy(
-                { it.quality.contains(quality) },
-                { it.quality.contains("m3u8", true) },
+                { it.quality.contains(quality, ignoreCase = true) },
+                { it.quality.contains("mimi", ignoreCase = true) }, // Prefer mimi server
+                { it.quality.contains("hls", ignoreCase = true) || it.quality.contains("m3u8", ignoreCase = true) },
             ),
         ).reversed()
     }
@@ -177,8 +220,8 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         screen.addListPreference(
             key = "pref_quality",
             title = "Preferred quality",
-            entries = arrayOf("1080", "720", "480", "360"),
-            entryValues = arrayOf("1080", "720", "480", "360"),
+            entries = listOf("1080", "720", "480", "360", "Auto"),
+            entryValues = listOf("1080", "720", "480", "360", "Auto"),
             default = "1080",
             summary = "%s",
         )
