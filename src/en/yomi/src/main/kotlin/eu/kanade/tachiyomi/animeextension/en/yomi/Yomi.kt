@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.animeextension.en.yomi
 
-import android.content.Context
 import androidx.preference.PreferenceScreen
 import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import aniyomi.lib.playlistutils.PlaylistUtils
@@ -19,8 +18,7 @@ import keiyoushi.utils.useAsJsoup
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
+import org.jsoup.nodes.Document
 import java.net.URLEncoder
 
 class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
@@ -32,16 +30,24 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
     private val preferences by getPreferencesLazy()
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
-    private val context: Context by lazy { Injekt.get() }
 
-    // 1. Cloudflare Interceptor to handle silent anti-bot challenges
-    override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor(CloudflareInterceptor(context, network.client))
-        .build()
+    // CORRECT CloudflareInterceptor initialization: (OkHttpClient, String)
+    override val client: OkHttpClient =
+        super.client.newBuilder()
+            .addInterceptor(
+                CloudflareInterceptor(
+                    super.client,
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                )
+            )
+            .build()
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
         .add("Origin", baseUrl)
+        .add("Cache-Control", "no-cache, no-store, must-revalidate")
+        .add("Pragma", "no-cache")
+        .add("Expires", "0")
         .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
         .add("Accept-Language", "en-US,en;q=0.9")
         .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -65,26 +71,28 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
     override fun latestUpdatesParse(response: Response): AnimesPage {
         val document = response.useAsJsoup()
-        val animes = document.select("a.new-ep-card").mapNotNull { element ->
+        val animes = document.select("a[href*='/watch/'], a[href*='/anime/']").mapNotNull { element ->
             runCatching {
                 val url = element.attr("href")
-                val animeId = url.substringAfter("/watch/").substringBefore("/")
-                val detailUrl = "/anime/$animeId"
+                if (url.isBlank() || url == "/") return@runCatching null
                 
                 val img = element.selectFirst("img")
                 val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
-                    ?: element.selectFirst("p")?.text()?.trim()
+                    ?: element.selectFirst("p, h3, .title")?.text()?.trim()
                     ?: "Unknown"
-                
+                    
                 if (title.isBlank() || title.length < 3) return@runCatching null
+                
+                val animeId = url.substringAfter("/watch/").substringAfter("/anime/").substringBefore("/")
+                val detailUrl = if (url.contains("/watch/")) "/anime/$animeId" else url
                 
                 SAnime.create().apply {
                     this.title = title
                     setUrlWithoutDomain(detailUrl)
-                    this.thumbnail_url = img?.attr("abs:src") ?: ""
+                    this.thumbnail_url = img?.attr("abs:src") ?: img?.attr("data-src") ?: ""
                 }
             }.getOrNull()
-        }.distinctBy { it.url }
+        }.distinctBy { it.url }.take(50)
         
         return AnimesPage(animes, false)
     }
@@ -106,8 +114,8 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         return parseAnimeList(document)
     }
 
-    // ==================== SHARED PARSER (Resilient) ====================
-    private fun parseAnimeList(document: org.jsoup.nodes.Document): AnimesPage {
+    // ==================== SHARED PARSER ====================
+    private fun parseAnimeList(document: Document): AnimesPage {
         val animes = document.select("a[href^='/anime/']").mapNotNull { element ->
             runCatching {
                 val url = element.attr("href")
@@ -115,24 +123,42 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
                 
                 val img = element.selectFirst("img")
                 val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
-                    ?: element.selectFirst("h3")?.text()?.trim()
+                    ?: element.selectFirst("h3, p, .title")?.text()?.trim()
                     ?: element.text().trim().take(50)
-                
+                    
                 if (title.isBlank() || title.length < 3) return@runCatching null
+                
+                val thumbnail = img?.attr("abs:src") ?: img?.attr("data-src") ?: ""
                 
                 SAnime.create().apply {
                     this.title = title
                     setUrlWithoutDomain(url)
-                    this.thumbnail_url = img?.attr("abs:src") ?: img?.attr("data-src") ?: ""
+                    this.thumbnail_url = thumbnail
                 }
             }.getOrNull()
         }.distinctBy { it.url }
         
-        val currentPage = document.select("a[href*='page=']").lastOrNull()?.attr("href")
-            ?.substringAfter("page=")?.substringBefore("&")?.toIntOrNull() ?: 1
+        // Fallback detection if primary selector yields nothing but page has anime links
+        if (animes.isEmpty()) {
+            val fallbackAnimes = document.select("a").mapNotNull { element ->
+                runCatching {
+                    val url = element.attr("href")
+                    if (url.contains("/anime/")) {
+                        val title = element.text().trim().take(50)
+                        if (title.length >= 3) {
+                            SAnime.create().apply {
+                                this.title = "[FALLBACK] $title"
+                                setUrlWithoutDomain(url)
+                            }
+                        } else null
+                    } else null
+                }.getOrNull()
+            }.distinctBy { it.url }.take(10)
             
-        val hasNextPage = document.select("a[href*='page=${currentPage + 1}']").isNotEmpty() ||
-                          document.select("button:contains(Next), a:contains(Next)").isNotEmpty() ||
+            if (fallbackAnimes.isNotEmpty()) return AnimesPage(fallbackAnimes, false)
+        }
+        
+        val hasNextPage = document.select("a[href*='page=2'], button:contains(Next), a:contains(Next)").isNotEmpty() ||
                           (animes.isNotEmpty() && animes.size >= 18)
         
         return AnimesPage(animes, hasNextPage)
