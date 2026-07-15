@@ -1,21 +1,14 @@
-apply plugin: 'com.android.application'
-apply plugin: 'kotlinx-serialization'
-
 ext {
     extName = 'AnimeKizz'
-    pkgNameSuffix = 'en.animekizz'
     extClass = '.AnimeKizz'
     extVersionCode = 1
+    isNsfw = false
 }
 
+apply plugin: "kei.plugins.extension.legacy"
+
 dependencies {
-    // Core framework utilities
-    implementation(project(':core'))
-    
-    // Corrected library dependency syntax (use ':' instead of '-')
     implementation(project(':lib:playlistutils'))
     implementation(project(':lib:filemoonextractor'))
     implementation(project(':lib:streamwishextractor'))
 }
-
-apply from: "$rootProject.projectDir/gradle/common.gradle"
