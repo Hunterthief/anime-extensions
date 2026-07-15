@@ -23,6 +23,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import org.jsoup.nodes.Document
 
 class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
 
@@ -65,7 +66,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         val genre = genreFilter?.toUriPart() ?: ""
         val genreQuery = if (genre.isNotEmpty()) "&genre=$genre" else ""
         
-        // FIX: Use 'q' instead of 'search' for the query parameter
+        // FIX: Uses 'q' instead of 'search' to match the site's actual routing
         return GET("$baseUrl/catalog?q=${query.encodeUri()}$genreQuery&page=$page", headers)
     }
 
@@ -75,12 +76,13 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
     }
 
     // ==================== SHARED PARSER ====================
-    private fun parseAnimeList(document: eu.kanade.tachiyomi.util.asJsoup.Document): AnimesPage {
+    private fun parseAnimeList(document: Document): AnimesPage {
         val animes = document.select("a[href^='/anime/']").mapNotNull { aTag ->
             val url = aTag.attr("href")
             if (url.isBlank() || url == "/anime/") return@mapNotNull null
             
             val img = aTag.selectFirst("img")
+            // Prioritizes the img 'alt' attribute, then falls back to the h3 text
             val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
                 ?: aTag.selectFirst("h3")?.text()?.trim()
                 ?: aTag.parent()?.selectFirst("h3")?.text()?.trim()
@@ -90,18 +92,15 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             
             val thumbnail = img?.attr("abs:src") ?: ""
             
-            eu.kanade.tachiyomi.animesource.model.SAnime.create().apply {
+            SAnime.create().apply {
                 this.title = title
                 setUrlWithoutDomain(url)
                 this.thumbnail_url = thumbnail
             }
         }.distinctBy { it.url }
         
-        val currentUrl = document.location()
-        val currentPage = Regex("page=(\\d+)").find(currentUrl)?.groupValues?.get(1)?.toIntOrNull() ?: 1
-        val hasNextPage = document.select("a[href*='page=${currentPage + 1}']").isNotEmpty() || 
-                          document.select("a:contains(Next), button:contains(Next)").isNotEmpty()
-        
+        // Checks for pagination buttons or links
+        val hasNextPage = document.select("a[href*='page=2'], a:contains(Next), button:contains(Next)").isNotEmpty()
         return AnimesPage(animes, hasNextPage)
     }
 
