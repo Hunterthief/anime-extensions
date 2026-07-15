@@ -66,7 +66,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         val genre = genreFilter?.toUriPart() ?: ""
         val genreQuery = if (genre.isNotEmpty()) "&genre=$genre" else ""
         
-        // FIX: Uses 'q' instead of 'search' to match the site's actual routing
         return GET("$baseUrl/catalog?q=${query.encodeUri()}$genreQuery&page=$page", headers)
     }
 
@@ -82,7 +81,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             if (url.isBlank() || url == "/anime/") return@mapNotNull null
             
             val img = aTag.selectFirst("img")
-            // Prioritizes the img 'alt' attribute, then falls back to the h3 text
             val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
                 ?: aTag.selectFirst("h3")?.text()?.trim()
                 ?: aTag.parent()?.selectFirst("h3")?.text()?.trim()
@@ -99,7 +97,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             }
         }.distinctBy { it.url }
         
-        // Checks for pagination buttons or links
         val hasNextPage = document.select("a[href*='page=2'], a:contains(Next), button:contains(Next)").isNotEmpty()
         return AnimesPage(animes, hasNextPage)
     }
@@ -119,7 +116,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             
             val synopsis = document.select("p.line-clamp-4, .synopsis, div.synopsis").firstOrNull()?.text()?.trim() ?: ""
             
-            // Robust metadata extraction targeting common label structures
+            // Extract metadata blocks
             val metaBlocks = document.select("div.flex.flex-col.gap-1, div.grid > div, .metadata-item")
             
             fun getMeta(label: String): String {
@@ -131,12 +128,11 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                   }?.select("span")?.lastOrNull()?.text()?.trim() ?: ""
             }
             
-            val statusStr = getMeta("Status")
-            status = when {
-                statusStr.contains("Airing", ignoreCase = true) || statusStr.contains("Releasing", ignoreCase = true) -> SAnime.ONGOING
-                statusStr.contains("Completed", ignoreCase = true) || statusStr.contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
-                else -> SAnime.UNKNOWN
-            }
+            // Extract top badges (Type, Status, Score)
+            val badgeContainer = document.selectFirst("div.flex.items-center.gap-3.mb-2.flex-wrap")
+            val type = badgeContainer?.select("span")?.getOrNull(0)?.text()?.trim() ?: ""
+            val statusBadge = badgeContainer?.select("span")?.getOrNull(1)?.text()?.trim() ?: ""
+            val score = badgeContainer?.select("span")?.getOrNull(2)?.text()?.replace(Regex("\\s+"), " ")?.trim() ?: ""
             
             val studio = getMeta("Studio")
             val episodes = getMeta("Episodes")
@@ -144,19 +140,34 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             val rating = getMeta("Rating")
             val duration = getMeta("Duration") ?: getMeta("Average Length") ?: getMeta("Length") ?: getMeta("Avg Length")
             
-            // Build a clean, formatted description
-            val descBuilder = StringBuilder()
-            if (statusStr.isNotBlank() && !statusStr.contains("Airing", ignoreCase = true) && !statusStr.contains("Completed", ignoreCase = true)) {
-                descBuilder.append("Status: $statusStr\n")
-            }
-            if (studio.isNotBlank()) descBuilder.append("Studio: $studio\n")
-            if (season.isNotBlank()) descBuilder.append("Season: $season\n")
-            if (episodes.isNotBlank()) descBuilder.append("Episodes: $episodes\n")
-            if (rating.isNotBlank()) descBuilder.append("Rating: $rating\n")
-            if (duration.isNotBlank()) descBuilder.append("Duration: $duration\n")
+            // Set Studio to the author field as requested
+            author = studio
             
-            if (descBuilder.isNotEmpty()) descBuilder.append("\n")
-            descBuilder.append(synopsis)
+            // Set Status field
+            status = when {
+                statusBadge.contains("Airing", ignoreCase = true) || statusBadge.contains("Releasing", ignoreCase = true) -> SAnime.ONGOING
+                statusBadge.contains("Completed", ignoreCase = true) || statusBadge.contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
+                else -> SAnime.UNKNOWN
+            }
+            
+            // Build a clean, formatted description with metadata ALWAYS at the end
+            val descBuilder = StringBuilder()
+            if (synopsis.isNotBlank()) {
+                descBuilder.append(synopsis).append("\n\n")
+            }
+            
+            val metaLines = mutableListOf<String>()
+            if (type.isNotBlank()) metaLines.add("Type: $type")
+            if (statusBadge.isNotBlank()) metaLines.add("Status: $statusBadge")
+            if (score.isNotBlank()) metaLines.add("Score: $score")
+            if (season.isNotBlank()) metaLines.add("Aired: $season")
+            if (duration.isNotBlank()) metaLines.add("Duration: $duration")
+            if (episodes.isNotBlank()) metaLines.add("Episodes: $episodes")
+            if (rating.isNotBlank()) metaLines.add("Rating: $rating")
+            
+            if (metaLines.isNotEmpty()) {
+                descBuilder.append(metaLines.joinToString("\n"))
+            }
             
             description = descBuilder.toString().trim()
         }
