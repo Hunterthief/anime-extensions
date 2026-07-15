@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.animeextension.en.animekizz
 
-import android.app.Application
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -9,14 +8,12 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
-import keiyoushi.utils.getPreference
+import keiyoushi.utils.firstInstanceOrNull
+import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.preferenceScreen
 import keiyoushi.utils.switchPreference
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.nodes.Document
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 
 class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
 
@@ -25,14 +22,14 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
     override val lang = "en"
     override val supportsLatest = true
 
-    private val preferences by lazy {
-        Injekt.get<Application>().getPreference("animekizz_prefs")
-    }
+    private val preferences by getPreferencesLazy()
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
-        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
+    override fun getFilterList() = AnimeKizzFilters.getFilterList()
+
+    // ==================== Popular ====================
     override fun popularAnimeRequest(page: Int): Request {
         return GET("$baseUrl/catalog?page=$page", headers)
     }
@@ -51,14 +48,16 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         return AnimesPage(animes, hasNextPage)
     }
 
+    // ==================== Latest ====================
     override fun latestUpdatesRequest(page: Int): Request {
         return GET("$baseUrl/catalog?sort=recently_updated&page=$page", headers)
     }
 
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
 
+    // ==================== Search ====================
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
-        val genreFilter = filters.find { it is AnimeKizzFilters.GenreFilter } as? AnimeKizzFilters.GenreFilter
+        val genreFilter = filters.firstInstanceOrNull<AnimeKizzFilters.GenreFilter>()
         val genre = genreFilter?.selectedValue ?: ""
         val genreQuery = if (genre.isNotEmpty()) "&genre=$genre" else ""
         
@@ -67,11 +66,12 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
 
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
+    // ==================== Details ====================
     override fun animeDetailsParse(response: Response): SAnime {
         val document = response.asJsoup()
         return SAnime.create().apply {
-            title = document.select("h1, h2.text-2xl, h2.text-3xl").firstOrNull()?.text() ?: document.title()
-            genre = document.select("a[href^='/catalog?genre=']").joinToString(", ") { it.text() }
+            title = document.select("h1, h2").firstOrNull()?.text() ?: document.title()
+            genre = document.select("a[href^='/catalog?genre=']").joinToString { it.text() }
             description = document.select("p.line-clamp-4, .synopsis, div.synopsis").text()
             thumbnail_url = document.select("img[referrerpolicy='no-referrer']").absUrl("src").ifBlank {
                 document.select("img").absUrl("src")
@@ -81,13 +81,15 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
     }
 
     private fun parseStatus(text: String): Int {
+        val lowerText = text.lowercase()
         return when {
-            text.contains("Airing", ignoreCase = true) || text.contains("Releasing", ignoreCase = true) -> SAnime.ONGOING
-            text.contains("Completed", ignoreCase = true) || text.contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
+            lowerText.contains("airing") || lowerText.contains("releasing") -> SAnime.ONGOING
+            lowerText.contains("completed") || lowerText.contains("finished") -> SAnime.COMPLETED
             else -> SAnime.UNKNOWN
         }
     }
 
+    // ==================== Episodes ====================
     override fun episodeListParse(response: Response): List<SEpisode> {
         val document = response.asJsoup()
         return document.select("a[href^='/watch/']").map { element ->
@@ -99,48 +101,46 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                 val epNum = Regex("EP\\s*(\\d+)|Episode\\s*(\\d+)", RegexOption.IGNORE_CASE)
                     .find(name)?.groupValues?.filter { it.isNotEmpty() }?.lastOrNull()?.toFloatOrNull() ?: 0F
                 episode_number = epNum
-                date_upload = -1L
+                date_upload = 0L
             }
         }.reversed().distinctBy { it.url }
     }
 
+    // ==================== Videos ====================
     override fun videoListParse(response: Response): List<Video> {
         val document = response.asJsoup()
         val videoList = mutableListOf<Video>()
-        val html = response.body.string()
+        val html = document.html()
 
         // 1. Try to find iframes (in case the dynamic player injects them or falls back to them)
         document.select("iframe").forEach { iframe ->
             val src = iframe.absUrl("src")
             if (src.isNotBlank()) {
-                if (src.contains("filemoon", ignoreCase = true)) {
-                    // videoList.addAll(FilemoonExtractor(client).videosFromUrl(src, headers))
-                } else if (src.contains("streamwish", ignoreCase = true)) {
-                    // videoList.addAll(StreamWishExtractor(client).videosFromUrl(src, headers))
-                }
+                // Extractors can be integrated here if the site falls back to standard iframes
+                // e.g., if (src.contains("filemoon", ignoreCase = true)) { ... }
             }
         }
 
-        // 2. Fallback: Regex search for m3u8 or mp4 in the page source or JS variables
+        // 2. Fallback: Regex search for m3u8 or mp4 in the page source
         val m3u8Regex = Regex("""(https?://[^\s"']+\.m3u8[^\s"']*)""")
         val mp4Regex = Regex("""(https?://[^\s"']+\.mp4[^\s"']*)""")
 
         m3u8Regex.findAll(html).map { it.groupValues[1] }.distinct().forEach { url ->
-            videoList.add(Video(url, "m3u8", url, headers))
+            videoList.add(Video(url = url, quality = "m3u8", videoUrl = url, headers = headers))
         }
 
         mp4Regex.findAll(html).map { it.groupValues[1] }.distinct().forEach { url ->
-            videoList.add(Video(url, "mp4", url, headers))
+            videoList.add(Video(url = url, quality = "mp4", videoUrl = url, headers = headers))
         }
 
         // 3. If no direct links found, provide a descriptive placeholder
         if (videoList.isEmpty()) {
             videoList.add(
                 Video(
-                    "https://example.com/placeholder.m3u8",
-                    "Dynamic Player (Requires manual extraction update)",
-                    "https://example.com/placeholder.m3u8",
-                    headers
+                    url = "https://example.com/placeholder.m3u8",
+                    quality = "Dynamic Player (Requires manual extraction update)",
+                    videoUrl = "https://example.com/placeholder.m3u8",
+                    headers = headers
                 )
             )
         }
@@ -148,6 +148,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         return videoList
     }
 
+    // ==================== Preferences ====================
     override fun setupPreferenceScreen(screen: androidx.preference.PreferenceScreen) {
         screen.preferenceScreen {
             switchPreference {
