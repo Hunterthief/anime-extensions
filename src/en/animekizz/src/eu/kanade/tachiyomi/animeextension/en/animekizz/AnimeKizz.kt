@@ -209,9 +209,9 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                         maxEpFoundOnPage = maxOf(maxEpFoundOnPage, epNum.toInt())
                     }
                     
-                    // FIX: Strictly scoped title extraction inside the <a> tag. 
-                    // This guarantees the ad div between episodes does not interfere.
-                    val title = element.selectFirst("span.truncate")?.text()?.trim()
+                    // FIX: Strictly scoped title extraction to target ONLY the episode title span.
+                    // This completely bypasses any span.truncate that might belong to server buttons or ads.
+                    val title = element.selectFirst("span.block.w-full.min-w-0.font-black.truncate")?.text()?.trim()
                         ?: element.selectFirst("div.flex.min-w-0.flex-1.flex-col > span")?.text()?.trim()
                         ?: "Episode ${epNum.toInt()}"
                     
@@ -232,7 +232,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                 episodes.addAll(pageEpisodes)
                 
                 // ADAPTIVE LOGIC: Jump to the episode immediately following the highest one found on this page.
-                // If the site loads 12, 50, or 100 at a time, this automatically adapts.
                 if (validEpisodesFound > 0 && maxEpFoundOnPage > 0) {
                     currentEp = maxEpFoundOnPage + 1
                 } else {
@@ -250,7 +249,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         return episodes.distinctBy { it.url }.sortedBy { it.episode_number }
     }
 
-    // ==================== VIDEOS ====================
+    // ==================== VIDEOS (DYNAMIC SERVER & SUB TYPE EXTRACTION) ====================
     override fun videoListParse(response: Response): List<Video> {
         val document = response.useAsJsoup()
         val videoList = mutableListOf<Video>()
@@ -263,9 +262,25 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         val anilistId = if (anilistLink.isNotBlank()) anilistLink.substringAfterLast("/") else "0"
         val episodeId = if (anilistId != "0") "$slug-$anilistId:$epNum" else "$slug:$epNum"
         
-        val servers = listOf("mimi:sub", "yuki:sub", "sora:sub", "beep:sub", "uwu:sub", "kiwi:sub", "mimi:dub", "yuki:dub")
+        // 1. Detect active sub type (Hard Sub, Soft Sub, or Dub) from the toggle group
+        val activeSubTypeButton = document.selectFirst("div[data-slot='toggle-group'] button[aria-pressed='true']")
+        val subTypeText = activeSubTypeButton?.selectFirst("span")?.text()?.trim() ?: "Soft Sub"
+        val apiSubType = if (subTypeText.equals("Dub", ignoreCase = true)) "dub" else "sub"
         
-        servers.forEach { serverId ->
+        // 2. Extract available servers dynamically from the grid buttons
+        val availableServers = document.select("button[data-slot='button'] span.truncate")
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+        
+        // Fallback to hardcoded list if dynamic extraction fails
+        val serversToTry = if (availableServers.isNotEmpty()) {
+            availableServers.map { "$it:$apiSubType" }
+        } else {
+            listOf("mimi:sub", "yuki:sub", "sora:sub", "beep:sub", "uwu:sub", "kiwi:sub", "mimi:dub", "yuki:dub")
+        }
+        
+        serversToTry.forEach { serverId ->
             try {
                 val resolveUrl = "$baseUrl/api/v1/video/resolve"
                 val jsonBody = """{"episode_id":"$episodeId","server_id":"$serverId"}"""
@@ -303,7 +318,9 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                         }
                         
                         val finalVideoUrl = if (videoPath.startsWith("http")) videoPath else "$baseUrl$videoPath"
-                        val displayName = "${serverName.split(":")[0].replaceFirstChar { it.uppercase() }} - $quality"
+                        
+                        // Append subTypeText to quality, e.g., "1080p (Soft Sub)"
+                        val displayName = "${serverName.split(":")[0].replaceFirstChar { it.uppercase() }} - $quality ($subTypeText)"
                         
                         videoList.add(
                             Video(
