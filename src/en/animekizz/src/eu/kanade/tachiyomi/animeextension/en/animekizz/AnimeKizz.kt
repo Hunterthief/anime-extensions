@@ -165,7 +165,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         }
     }
 
-    // ==================== EPISODES (BATCH SCRAPING) ====================
+    // ==================== EPISODES (ADAPTIVE BATCH SCRAPING) ====================
     override fun episodeListParse(response: Response): List<SEpisode> {
         val document = response.useAsJsoup()
         val episodes = mutableListOf<SEpisode>()
@@ -183,25 +183,39 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             .substringBefore("?")
             .trim()
         
-        // 3. Loop through batches of 50 episodes
-        for (startEp in 1..totalEps step 50) {
-            val watchUrl = "$baseUrl/watch/$slug-episode-$startEp"
+        var currentEp = 1
+        val maxIterations = 100 // Safety break to prevent infinite loops
+        
+        for (iteration in 1..maxIterations) {
+            if (currentEp > totalEps) break
+            
+            val watchUrl = "$baseUrl/watch/$slug-episode-$currentEp"
             try {
                 val watchResponse = client.newCall(GET(watchUrl, headers)).execute()
                 val watchDoc = watchResponse.useAsJsoup()
                 
-                val batchEpisodes = watchDoc.select("a[href^='/watch/']").mapNotNull { element ->
+                var maxEpFoundOnPage = 0
+                var validEpisodesFound = 0
+                
+                // Select ONLY <a> tags, completely ignoring any interleaved ad <div>s
+                val pageEpisodes = watchDoc.select("a[href^='/watch/']").mapNotNull { element ->
                     val href = element.attr("href")
                     if (!href.contains("/watch/")) return@mapNotNull null
                     
-                    // Extract episode number from href: /watch/slug-episode-123
                     val epMatch = Regex("episode-(\\d+)", RegexOption.IGNORE_CASE).find(href)
                     val epNum = epMatch?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 0f
                     
-                    // Extract title from the specific span, fallback to generic truncate
-                    val title = element.selectFirst("span.block.w-full.min-w-0.font-black.truncate")?.text()?.trim()
-                        ?: element.selectFirst("span.truncate")?.text()?.trim()
+                    if (epNum > 0) {
+                        maxEpFoundOnPage = maxOf(maxEpFoundOnPage, epNum.toInt())
+                    }
+                    
+                    // FIX: Strictly scoped title extraction inside the <a> tag. 
+                    // This guarantees the ad div between episodes does not interfere.
+                    val title = element.selectFirst("span.truncate")?.text()?.trim()
+                        ?: element.selectFirst("div.flex.min-w-0.flex-1.flex-col > span")?.text()?.trim()
                         ?: "Episode ${epNum.toInt()}"
+                    
+                    validEpisodesFound++
                     
                     SEpisode.create().apply {
                         setUrlWithoutDomain(href)
@@ -215,13 +229,24 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                     }
                 }
                 
-                episodes.addAll(batchEpisodes)
+                episodes.addAll(pageEpisodes)
+                
+                // ADAPTIVE LOGIC: Jump to the episode immediately following the highest one found on this page.
+                // If the site loads 12, 50, or 100 at a time, this automatically adapts.
+                if (validEpisodesFound > 0 && maxEpFoundOnPage > 0) {
+                    currentEp = maxEpFoundOnPage + 1
+                } else {
+                    // If no valid episodes were found on this page, break to prevent an infinite loop
+                    break
+                }
+                
             } catch (e: Exception) {
-                // If a specific batch page fails to load, we skip it and continue to the next batch
+                // If a page request fails, break to prevent an infinite loop
+                break
             }
         }
         
-        // 4. Deduplicate by URL and sort by episode number ascending
+        // Deduplicate by URL and sort by episode number ascending
         return episodes.distinctBy { it.url }.sortedBy { it.episode_number }
     }
 
