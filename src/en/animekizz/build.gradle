@@ -1,19 +1,15 @@
 apply plugin: 'com.android.application'
-apply plugin: 'kotlin-android'
 apply plugin: 'kotlinx-serialization'
 
 ext {
     extName = 'AnimeKizz'
-    pkgName = 'eu.kanade.tachiyomi.animeextension.en.animekizz'
+    pkgNameSuffix = 'en.animekizz'
     extClass = '.AnimeKizz'
     extVersionCode = 1
 }
 
 dependencies {
-    // Core framework utilities
     implementation(project(':core'))
-
-    // Extractors and utilities for video resolution
     implementation(project(':lib-playlistutils'))
     implementation(project(':lib-filemoonextractor'))
     implementation(project(':lib-streamwishextractor'))
