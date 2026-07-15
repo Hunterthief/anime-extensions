@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.yomi
 
 import androidx.preference.PreferenceScreen
-import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
@@ -15,7 +14,6 @@ import keiyoushi.utils.addListPreference
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.useAsJsoup
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
@@ -29,17 +27,6 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
     private val preferences by getPreferencesLazy()
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
-    
-    // Cloudflare Interceptor setup (Takes OkHttpClient and User-Agent String)
-    override val client: OkHttpClient =
-        super.client.newBuilder()
-            .addInterceptor(
-                CloudflareInterceptor(
-                    super.client,
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                )
-            )
-            .build()
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
@@ -110,14 +97,10 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         return parseAnimeList(response, document)
     }
 
-    // ==================== SHARED PARSER ====================
+    // ==================== SHARED PARSER (WITH DIAGNOSTIC FALLBACK) ====================
     private fun parseAnimeList(response: Response, document: Document): AnimesPage {
-        if (document.title().contains("Just a moment", ignoreCase = true) || 
-            (document.selectFirst("script[src*='cloudflare']") != null && document.select("a[href*='/anime/']").isEmpty())) {
-            // Cloudflare block detected, interceptor will handle it on automatic retry
-        }
-
-        val animes = document.select("a[href*='/anime/']").mapNotNull { aTag ->
+        // 1. Primary Selector
+        var animes = document.select("a[href^='/anime/']").mapNotNull { aTag ->
             val url = aTag.attr("href")
             if (url.isBlank() || url == "/anime/" || url == "/") return@mapNotNull null
             
@@ -137,6 +120,23 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
                 this.thumbnail_url = thumbnail
             }
         }.distinctBy { it.url }
+
+        // 2. DIAGNOSTIC FALLBACK: If primary fails, grab ANY link containing /anime/
+        if (animes.isEmpty()) {
+            animes = document.select("a").mapNotNull { aTag ->
+                val url = aTag.attr("href")
+                if (url.contains("/anime/")) {
+                    val title = aTag.text().trim().take(50)
+                    if (title.length >= 3) {
+                        SAnime.create().apply {
+                            this.title = "[FALLBACK] $title"
+                            setUrlWithoutDomain(url)
+                            this.thumbnail_url = ""
+                        }
+                    } else null
+                } else null
+            }.distinctBy { it.url }.take(10)
+        }
         
         val currentUrl = response.request.url.toString()
         val currentPage = Regex("page=(\\d+)").find(currentUrl)?.groupValues?.get(1)?.toIntOrNull() ?: 1
