@@ -8,5 +8,5 @@ apply plugin: "kei.plugins.extension.legacy"
 
 dependencies {
     implementation(project(':lib:playlistutils'))
-    implementation(project(':lib:cloudflareinterceptor')) // Required to bypass Cloudflare
+    implementation(project(':lib:cloudflareinterceptor')) // Crucial for bypassing silent blocks
 }
