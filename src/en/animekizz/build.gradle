@@ -9,10 +9,13 @@ ext {
 }
 
 dependencies {
+    // Core framework utilities
     implementation(project(':core'))
-    implementation(project(':lib-playlistutils'))
-    implementation(project(':lib-filemoonextractor'))
-    implementation(project(':lib-streamwishextractor'))
+    
+    // Corrected library dependency syntax (use ':' instead of '-')
+    implementation(project(':lib:playlistutils'))
+    implementation(project(':lib:filemoonextractor'))
+    implementation(project(':lib:streamwishextractor'))
 }
 
 apply from: "$rootProject.projectDir/gradle/common.gradle"
