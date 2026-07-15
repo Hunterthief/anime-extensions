@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.animeextension.en.yomi
 
-import android.app.Application
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
@@ -15,8 +14,6 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.getPreferencesLazy
 import okhttp3.Request
 import okhttp3.Response
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 import aniyomi.lib.playlistutils.PlaylistUtils
 
 class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
@@ -145,8 +142,8 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         }.reversed()
     }
 
-    override fun extractVideos(episode: SEpisode): List<Video> {
-        val document = client.newCall(GET(episode.url, headers)).execute().asJsoup()
+    override fun videoListParse(response: Response): List<Video> {
+        val document = response.asJsoup()
         val videoList = mutableListOf<Video>()
 
         // Dynamic Subtype Extraction
@@ -156,11 +153,16 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         // Extract iframe sources
         document.select("iframe").forEach { iframe ->
             val src = iframe.absUrl("src")
-            if (src.isNotBlank() && src.contains(".m3u8", ignoreCase = true)) {
+            if (src.isNotBlank()) {
                 try {
-                    videoList.addAll(
-                        playlistUtils.extractFromHls(src, headers, headers)
+                    val extracted = playlistUtils.extractFromHls(
+                        playlistUrl = src,
+                        masterHeaders = headers,
+                        videoHeaders = headers
                     )
+                    extracted.forEach { video ->
+                        videoList.add(Video(video.url, "${video.quality}$qualitySuffix", video.url, video.headers))
+                    }
                 } catch (e: Exception) {
                     // Ignore extraction errors
                 }
@@ -174,9 +176,14 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
             m3u8Regex.findAll(scriptData).forEach { match ->
                 val url = match.groupValues[1]
                 try {
-                    videoList.addAll(
-                        playlistUtils.extractFromHls(url, headers, headers)
+                    val extracted = playlistUtils.extractFromHls(
+                        playlistUrl = url,
+                        masterHeaders = headers,
+                        videoHeaders = headers
                     )
+                    extracted.forEach { video ->
+                        videoList.add(Video(video.url, "${video.quality}$qualitySuffix", video.url, video.headers))
+                    }
                 } catch (e: Exception) {
                     // Ignore
                 }
@@ -187,10 +194,11 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        SwitchPreferenceCompat(screen.context).apply {
+        val pref = SwitchPreferenceCompat(screen.context).apply {
             key = "prefer_1080p"
             title = "Prefer 1080p quality"
             setDefaultValue(true)
-        }.also { screen.addPreference(it) }
+        }
+        screen.addPreference(pref)
     }
 }
