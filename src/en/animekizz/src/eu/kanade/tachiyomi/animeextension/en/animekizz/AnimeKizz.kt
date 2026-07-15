@@ -38,20 +38,48 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         .add("Origin", baseUrl)
         .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-    // ==================== POPULAR & SEARCH ====================
+    // ==================== POPULAR ====================
     override fun popularAnimeRequest(page: Int): Request {
         return GET("$baseUrl/catalog?page=$page", headers)
     }
 
     override fun popularAnimeParse(response: Response): AnimesPage {
         val document = response.useAsJsoup()
+        return parseAnimeList(document)
+    }
+
+    // ==================== LATEST ====================
+    override fun latestUpdatesRequest(page: Int): Request {
+        return GET("$baseUrl/catalog?sort=recently_updated&page=$page", headers)
+    }
+
+    override fun latestUpdatesParse(response: Response): AnimesPage {
+        val document = response.useAsJsoup()
+        return parseAnimeList(document)
+    }
+
+    // ==================== SEARCH ====================
+    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
+        val filterList = if (filters.isEmpty()) getFilterList() else filters
+        val genreFilter = filterList.firstInstanceOrNull<AnimeKizzFilters.GenreFilter>()
+        val genre = genreFilter?.toUriPart() ?: ""
+        val genreQuery = if (genre.isNotEmpty()) "&genre=$genre" else ""
         
-        // FIX: Robustly select all anime links, regardless of the exact grid container structure
+        // FIX: Use 'q' instead of 'search' for the query parameter
+        return GET("$baseUrl/catalog?q=${query.encodeUri()}$genreQuery&page=$page", headers)
+    }
+
+    override fun searchAnimeParse(response: Response): AnimesPage {
+        val document = response.useAsJsoup()
+        return parseAnimeList(document)
+    }
+
+    // ==================== SHARED PARSER ====================
+    private fun parseAnimeList(document: eu.kanade.tachiyomi.util.asJsoup.Document): AnimesPage {
         val animes = document.select("a[href^='/anime/']").mapNotNull { aTag ->
             val url = aTag.attr("href")
             if (url.isBlank() || url == "/anime/") return@mapNotNull null
             
-            // Get title from img alt (works for recommendations) or h3 inside/next to the link
             val img = aTag.selectFirst("img")
             val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
                 ?: aTag.selectFirst("h3")?.text()?.trim()
@@ -62,14 +90,14 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             
             val thumbnail = img?.attr("abs:src") ?: ""
             
-            SAnime.create().apply {
+            eu.kanade.tachiyomi.animesource.model.SAnime.create().apply {
                 this.title = title
                 setUrlWithoutDomain(url)
                 this.thumbnail_url = thumbnail
             }
         }.distinctBy { it.url }
         
-        val currentUrl = response.request.url.toString()
+        val currentUrl = document.location()
         val currentPage = Regex("page=(\\d+)").find(currentUrl)?.groupValues?.get(1)?.toIntOrNull() ?: 1
         val hasNextPage = document.select("a[href*='page=${currentPage + 1}']").isNotEmpty() || 
                           document.select("a:contains(Next), button:contains(Next)").isNotEmpty()
@@ -77,64 +105,61 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         return AnimesPage(animes, hasNextPage)
     }
 
-    override fun latestUpdatesRequest(page: Int): Request {
-        return GET("$baseUrl/catalog?sort=recently_updated&page=$page", headers)
-    }
-
-    override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
-
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
-        val filterList = if (filters.isEmpty()) getFilterList() else filters
-        val genreFilter = filterList.firstInstanceOrNull<AnimeKizzFilters.GenreFilter>()
-        val genre = genreFilter?.toUriPart() ?: ""
-        val genreQuery = if (genre.isNotEmpty()) "&genre=$genre" else ""
-        
-        return GET("$baseUrl/catalog?search=${query.encodeUri()}$genreQuery&page=$page", headers)
-    }
-
-    override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
-
     // ==================== DETAILS ====================
     override fun animeDetailsParse(response: Response): SAnime {
         val document = response.useAsJsoup()
         return SAnime.create().apply {
-            title = document.select("h2.text-2xl, h2.text-3xl, h1").firstOrNull()?.text()?.trim() ?: document.title()
+            title = document.select("h1, h2.text-2xl, h2.text-3xl").firstOrNull()?.text()?.trim() ?: document.title()
+            
+            // Cover image (prioritize /cover/ paths to avoid wide banners)
+            thumbnail_url = document.select("img[src*='/cover/']").firstOrNull()?.attr("abs:src")
+                ?: document.select("img").firstOrNull { it.attr("src").contains("anilist.co", ignoreCase = true) }?.attr("abs:src")
+                ?: document.select("img").firstOrNull()?.attr("abs:src")
             
             genre = document.select("a[href*='/catalog?genre=']").joinToString { it.text() }
             
-            // FIX: Explicitly target the cover image (contains /cover/) to avoid the wide banner image
-            thumbnail_url = document.select("img[src*='/cover/']").firstOrNull()?.attr("abs:src")
-                ?: document.select("img").firstOrNull()?.attr("abs:src")
+            val synopsis = document.select("p.line-clamp-4, .synopsis, div.synopsis").firstOrNull()?.text()?.trim() ?: ""
             
-            val synopsis = document.select("p.line-clamp-4").firstOrNull()?.text()?.trim() ?: ""
+            // Robust metadata extraction targeting common label structures
+            val metaBlocks = document.select("div.flex.flex-col.gap-1, div.grid > div, .metadata-item")
             
-            // Extract metadata (Season, Episodes)
-            val metaBlocks = document.select("div.flex.flex-col.gap-1")
-            val season = metaBlocks.firstOrNull { 
-                it.select("span").first()?.text()?.contains("Season", ignoreCase = true) == true 
-            }?.select("span.font-bold, span.text-sm")?.text()?.trim() ?: ""
+            fun getMeta(label: String): String {
+                return metaBlocks.firstOrNull { 
+                    it.selectFirst("span")?.text()?.contains(label, ignoreCase = true) == true 
+                }?.select("span.font-bold, span.text-sm, span")?.lastOrNull()?.text()?.trim() 
+                  ?: metaBlocks.firstOrNull { 
+                      it.text().contains(label, ignoreCase = true) 
+                  }?.select("span")?.lastOrNull()?.text()?.trim() ?: ""
+            }
             
-            val episodes = metaBlocks.firstOrNull { 
-                it.select("span").first()?.text()?.contains("Episodes", ignoreCase = true) == true 
-            }?.select("span.font-bold, span.text-sm")?.text()?.trim() ?: ""
+            val statusStr = getMeta("Status")
+            status = when {
+                statusStr.contains("Airing", ignoreCase = true) || statusStr.contains("Releasing", ignoreCase = true) -> SAnime.ONGOING
+                statusStr.contains("Completed", ignoreCase = true) || statusStr.contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
+                else -> SAnime.UNKNOWN
+            }
             
+            val studio = getMeta("Studio")
+            val episodes = getMeta("Episodes")
+            val season = getMeta("Season")
+            val rating = getMeta("Rating")
+            val duration = getMeta("Duration") ?: getMeta("Average Length") ?: getMeta("Length") ?: getMeta("Avg Length")
+            
+            // Build a clean, formatted description
             val descBuilder = StringBuilder()
+            if (statusStr.isNotBlank() && !statusStr.contains("Airing", ignoreCase = true) && !statusStr.contains("Completed", ignoreCase = true)) {
+                descBuilder.append("Status: $statusStr\n")
+            }
+            if (studio.isNotBlank()) descBuilder.append("Studio: $studio\n")
             if (season.isNotBlank()) descBuilder.append("Season: $season\n")
             if (episodes.isNotBlank()) descBuilder.append("Episodes: $episodes\n")
+            if (rating.isNotBlank()) descBuilder.append("Rating: $rating\n")
+            if (duration.isNotBlank()) descBuilder.append("Duration: $duration\n")
+            
             if (descBuilder.isNotEmpty()) descBuilder.append("\n")
             descBuilder.append(synopsis)
             
             description = descBuilder.toString().trim()
-            status = parseStatus(document.text())
-        }
-    }
-
-    private fun parseStatus(text: String): Int {
-        val lowerText = text.lowercase()
-        return when {
-            lowerText.contains("airing") || lowerText.contains("releasing") -> SAnime.ONGOING
-            lowerText.contains("completed") || lowerText.contains("finished") -> SAnime.COMPLETED
-            else -> SAnime.UNKNOWN
         }
     }
 
@@ -148,12 +173,11 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             SEpisode.create().apply {
                 setUrlWithoutDomain(href)
                 
-                // FIX: Extract episode number strictly from the URL (e.g., "episode-14")
+                // Extract episode number directly from the URL (e.g., "episode-14")
                 val epMatch = Regex("episode-(\\d+)", RegexOption.IGNORE_CASE).find(href)
                 val epNum = epMatch?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 0f
                 episode_number = epNum
                 
-                // Extract title from the span inside the episode card
                 val title = element.select("span.truncate, span.block").firstOrNull()?.text()?.trim() 
                     ?: element.select("button[aria-label*='episode']").text().replace(Regex("EP\\s*", RegexOption.IGNORE_CASE), "").trim()
                 
@@ -235,7 +259,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                     }
                 }
             } catch (e: Exception) {
-                // Ignore failed server resolutions
+                // Ignore failed server resolutions and try the next one
             }
         }
         
