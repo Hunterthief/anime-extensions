@@ -1,7 +1,8 @@
 package eu.kanade.tachiyomi.animeextension.en.yomi
 
+import android.content.Context
 import androidx.preference.PreferenceScreen
-import aniyomi.lib.playlistutils.PlaylistUtils
+import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -14,9 +15,12 @@ import keiyoushi.utils.addListPreference
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.useAsJsoup
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 
 class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
@@ -26,14 +30,18 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
     override val supportsLatest = true
 
     private val preferences by getPreferencesLazy()
-    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
+    
+    // 1. Inject Context for CloudflareInterceptor
+    private val context: Context by lazy { Injekt.get() }
+    
+    // 2. Override the client to include the Cloudflare Interceptor
+    override val client: OkHttpClient = super.client.newBuilder()
+        .addInterceptor(CloudflareInterceptor(context, super.client))
+        .build()
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
         .add("Origin", baseUrl)
-        .add("Cache-Control", "no-cache, no-store, must-revalidate")
-        .add("Pragma", "no-cache")
-        .add("Expires", "0")
         .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
         .add("Accept-Language", "en-US,en;q=0.9")
         .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -57,28 +65,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
     override fun latestUpdatesParse(response: Response): AnimesPage {
         val document = response.useAsJsoup()
-        val animes = document.select("a[href*='/watch/'], a[href*='/anime/']").mapNotNull { aTag ->
-            val url = aTag.attr("href")
-            if (url.isBlank() || url == "/") return@mapNotNull null
-            
-            val img = aTag.selectFirst("img")
-            val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
-                ?: aTag.selectFirst("p, h3, .title")?.text()?.trim()
-                ?: "Unknown"
-                
-            if (title.isBlank() || title.length < 3) return@mapNotNull null
-            
-            val animeId = url.substringAfter("/watch/").substringAfter("/anime/").substringBefore("/")
-            val detailUrl = if (url.contains("/watch/")) "/anime/$animeId" else url
-            
-            SAnime.create().apply {
-                this.title = title
-                setUrlWithoutDomain(detailUrl)
-                this.thumbnail_url = img?.attr("abs:src") ?: img?.attr("data-src") ?: ""
-            }
-        }.distinctBy { it.url }.take(50)
-        
-        return AnimesPage(animes, false) 
+        return parseAnimeList(response, document)
     }
 
     // ==================== SEARCH ====================
@@ -97,10 +84,14 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         return parseAnimeList(response, document)
     }
 
-    // ==================== SHARED PARSER (WITH DIAGNOSTIC FALLBACK) ====================
+    // ==================== SHARED PARSER ====================
     private fun parseAnimeList(response: Response, document: Document): AnimesPage {
-        // 1. Primary Selector
-        var animes = document.select("a[href^='/anime/']").mapNotNull { aTag ->
+        // Safety check: If Cloudflare challenge is somehow still present, return empty to prevent crashes
+        if (document.title().contains("Just a moment", ignoreCase = true)) {
+            return AnimesPage(emptyList(), false)
+        }
+
+        val animes = document.select("a[href^='/anime/']").mapNotNull { aTag ->
             val url = aTag.attr("href")
             if (url.isBlank() || url == "/anime/" || url == "/") return@mapNotNull null
             
@@ -120,23 +111,6 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
                 this.thumbnail_url = thumbnail
             }
         }.distinctBy { it.url }
-
-        // 2. DIAGNOSTIC FALLBACK: If primary fails, grab ANY link containing /anime/
-        if (animes.isEmpty()) {
-            animes = document.select("a").mapNotNull { aTag ->
-                val url = aTag.attr("href")
-                if (url.contains("/anime/")) {
-                    val title = aTag.text().trim().take(50)
-                    if (title.length >= 3) {
-                        SAnime.create().apply {
-                            this.title = "[FALLBACK] $title"
-                            setUrlWithoutDomain(url)
-                            this.thumbnail_url = ""
-                        }
-                    } else null
-                } else null
-            }.distinctBy { it.url }.take(10)
-        }
         
         val currentUrl = response.request.url.toString()
         val currentPage = Regex("page=(\\d+)").find(currentUrl)?.groupValues?.get(1)?.toIntOrNull() ?: 1
@@ -225,7 +199,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
             val src = iframe.absUrl("src")
             if (src.isNotBlank()) {
                 try {
-                    val extracted = playlistUtils.extractFromHls(
+                    val extracted = aniyomi.lib.playlistutils.PlaylistUtils(client, headers).extractFromHls(
                         playlistUrl = src,
                         masterHeaders = headers,
                         videoHeaders = headers
@@ -233,7 +207,9 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
                     extracted.forEach { video ->
                         videoList.add(Video(video.url, "${video.quality}$qualitySuffix", video.url, video.headers))
                     }
-                } catch (e: Exception) { /* Ignore */ }
+                } catch (e: Exception) {
+                    // Ignore extraction errors
+                }
             }
         }
 
@@ -243,7 +219,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
             m3u8Regex.findAll(scriptData).forEach { match ->
                 val url = match.groupValues[1]
                 try {
-                    val extracted = playlistUtils.extractFromHls(
+                    val extracted = aniyomi.lib.playlistutils.PlaylistUtils(client, headers).extractFromHls(
                         playlistUrl = url,
                         masterHeaders = headers,
                         videoHeaders = headers
@@ -251,7 +227,9 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
                     extracted.forEach { video ->
                         videoList.add(Video(video.url, "${video.quality}$qualitySuffix", video.url, video.headers))
                     }
-                } catch (e: Exception) { /* Ignore */ }
+                } catch (e: Exception) {
+                    // Ignore
+                }
             }
         }
 
