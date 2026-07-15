@@ -21,7 +21,7 @@ import uy.kohesive.injekt.api.get
 class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
 
     override val name = "AnimeKizz"
-    override val baseUrl = "https://animekizz.online"
+    override val baseUrl = "https://animekizz.live"
     override val lang = "en"
     override val supportsLatest = true
 
