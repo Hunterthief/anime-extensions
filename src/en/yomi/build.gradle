@@ -8,5 +8,5 @@ apply plugin: "kei.plugins.extension.legacy"
 
 dependencies {
     implementation(project(':lib:playlistutils'))
-    // Removed cloudflareinterceptor to test raw connectivity
+    implementation(project(':lib:cloudflareinterceptor')) // Required to bypass Cloudflare
 }
