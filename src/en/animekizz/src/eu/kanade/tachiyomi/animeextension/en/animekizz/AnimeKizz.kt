@@ -19,7 +19,6 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.Headers
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -121,17 +120,14 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         val document = response.useAsJsoup()
         val videoList = mutableListOf<Video>()
         
-        // 1. Construct the episode_id dynamically from the URL and HTML
         val currentUrl = response.request.url.toString()
         val slug = currentUrl.substringAfter("/watch/").substringBeforeLast("-episode-")
         val epNum = currentUrl.substringAfterLast("-episode-").substringBefore("/").substringBefore("?")
         val anilistId = document.select("a[href*='anilist.co/anime/']").attr("href").substringAfterLast("/")
         val episodeId = "$slug-$anilistId:$epNum"
         
-        // 2. Define preferred servers (based on HAR log analysis)
         val servers = listOf("mimi:sub", "yuki:sub", "sora:sub", "beep:sub", "uwu:sub", "kiwi:sub", "mimi:dub", "yuki:dub")
         
-        // 3. Fetch video sources for each server via the site's resolve API
         servers.forEach { serverId ->
             try {
                 val resolveUrl = "$baseUrl/api/v1/video/resolve"
@@ -150,7 +146,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                         val quality = source["quality"]?.jsonPrimitive?.content ?: "Auto"
                         val serverName = source["server"]?.jsonPrimitive?.content ?: serverId
                         
-                        // Extract subtitles
                         val subtitleTracks = mutableListOf<Track>()
                         val subtitles = source["subtitles"]?.jsonArray
                         subtitles?.forEach { subElement ->
@@ -162,7 +157,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                             }
                         }
                         
-                        // Extract required headers (e.g., Referer)
                         val sourceHeaders = headers.newBuilder()
                         val headersObj = source["headers"]?.jsonObject
                         headersObj?.let {
@@ -190,7 +184,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             }
         }
         
-        // 4. Fallback: Regex search for direct m3u8 in page source if API fails completely
         if (videoList.isEmpty()) {
             val html = document.html()
             val m3u8Regex = Regex("""(https?://[^\s"']+\.m3u8[^\s"']*)""")
@@ -207,7 +200,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         return this.sortedWith(
             compareBy(
                 { it.quality.contains(quality, ignoreCase = true) },
-                { it.quality.contains("mimi", ignoreCase = true) }, // Prefer mimi server
+                { it.quality.contains("mimi", ignoreCase = true) },
                 { it.quality.contains("hls", ignoreCase = true) || it.quality.contains("m3u8", ignoreCase = true) },
             ),
         ).reversed()
