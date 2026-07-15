@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.animeextension.en.yomi
 import android.content.Context
 import androidx.preference.PreferenceScreen
 import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
+import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -18,9 +19,9 @@ import keiyoushi.utils.useAsJsoup
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.nodes.Document
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import java.net.URLEncoder
 
 class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
@@ -30,13 +31,12 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
     override val supportsLatest = true
 
     private val preferences by getPreferencesLazy()
-    
-    // 1. Inject Context for CloudflareInterceptor
+    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
     private val context: Context by lazy { Injekt.get() }
-    
-    // 2. Override the client to include the Cloudflare Interceptor
-    override val client: OkHttpClient = super.client.newBuilder()
-        .addInterceptor(CloudflareInterceptor(context, super.client))
+
+    // 1. Cloudflare Interceptor to handle silent anti-bot challenges
+    override val client: OkHttpClient = network.client.newBuilder()
+        .addInterceptor(CloudflareInterceptor(context, network.client))
         .build()
 
     override fun headersBuilder() = super.headersBuilder()
@@ -54,7 +54,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
     override fun popularAnimeParse(response: Response): AnimesPage {
         val document = response.useAsJsoup()
-        return parseAnimeList(response, document)
+        return parseAnimeList(document)
     }
 
     // ==================== LATEST ====================
@@ -65,7 +65,28 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
     override fun latestUpdatesParse(response: Response): AnimesPage {
         val document = response.useAsJsoup()
-        return parseAnimeList(response, document)
+        val animes = document.select("a.new-ep-card").mapNotNull { element ->
+            runCatching {
+                val url = element.attr("href")
+                val animeId = url.substringAfter("/watch/").substringBefore("/")
+                val detailUrl = "/anime/$animeId"
+                
+                val img = element.selectFirst("img")
+                val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
+                    ?: element.selectFirst("p")?.text()?.trim()
+                    ?: "Unknown"
+                
+                if (title.isBlank() || title.length < 3) return@runCatching null
+                
+                SAnime.create().apply {
+                    this.title = title
+                    setUrlWithoutDomain(detailUrl)
+                    this.thumbnail_url = img?.attr("abs:src") ?: ""
+                }
+            }.getOrNull()
+        }.distinctBy { it.url }
+        
+        return AnimesPage(animes, false)
     }
 
     // ==================== SEARCH ====================
@@ -76,47 +97,42 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         val genreQuery = if (genre.isNotEmpty()) "&genre=$genre" else ""
         val timestamp = System.currentTimeMillis()
         
-        return GET("$baseUrl/search?q=${query.encodeUri()}$genreQuery&page=$page&_t=$timestamp", headers)
+        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        return GET("$baseUrl/search?q=$encodedQuery$genreQuery&page=$page&_t=$timestamp", headers)
     }
 
     override fun searchAnimeParse(response: Response): AnimesPage {
         val document = response.useAsJsoup()
-        return parseAnimeList(response, document)
+        return parseAnimeList(document)
     }
 
-    // ==================== SHARED PARSER ====================
-    private fun parseAnimeList(response: Response, document: Document): AnimesPage {
-        // Safety check: If Cloudflare challenge is somehow still present, return empty to prevent crashes
-        if (document.title().contains("Just a moment", ignoreCase = true)) {
-            return AnimesPage(emptyList(), false)
-        }
-
-        val animes = document.select("a[href^='/anime/']").mapNotNull { aTag ->
-            val url = aTag.attr("href")
-            if (url.isBlank() || url == "/anime/" || url == "/") return@mapNotNull null
-            
-            val img = aTag.selectFirst("img")
-            val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
-                ?: aTag.selectFirst("h3, p, .title")?.text()?.trim()
-                ?: aTag.parent()?.selectFirst("h3, p, .title")?.text()?.trim()
-                ?: aTag.text().trim().take(50)
+    // ==================== SHARED PARSER (Resilient) ====================
+    private fun parseAnimeList(document: org.jsoup.nodes.Document): AnimesPage {
+        val animes = document.select("a[href^='/anime/']").mapNotNull { element ->
+            runCatching {
+                val url = element.attr("href")
+                if (url.isBlank() || url == "/anime/" || url == "/") return@runCatching null
                 
-            if (title.isBlank() || title.length < 3) return@mapNotNull null
-            
-            val thumbnail = img?.attr("abs:src") ?: img?.attr("data-src") ?: ""
-            
-            SAnime.create().apply {
-                this.title = title
-                setUrlWithoutDomain(url)
-                this.thumbnail_url = thumbnail
-            }
+                val img = element.selectFirst("img")
+                val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
+                    ?: element.selectFirst("h3")?.text()?.trim()
+                    ?: element.text().trim().take(50)
+                
+                if (title.isBlank() || title.length < 3) return@runCatching null
+                
+                SAnime.create().apply {
+                    this.title = title
+                    setUrlWithoutDomain(url)
+                    this.thumbnail_url = img?.attr("abs:src") ?: img?.attr("data-src") ?: ""
+                }
+            }.getOrNull()
         }.distinctBy { it.url }
         
-        val currentUrl = response.request.url.toString()
-        val currentPage = Regex("page=(\\d+)").find(currentUrl)?.groupValues?.get(1)?.toIntOrNull() ?: 1
-        
+        val currentPage = document.select("a[href*='page=']").lastOrNull()?.attr("href")
+            ?.substringAfter("page=")?.substringBefore("&")?.toIntOrNull() ?: 1
+            
         val hasNextPage = document.select("a[href*='page=${currentPage + 1}']").isNotEmpty() ||
-                          document.select("button:contains(Next), a:contains(Next), [aria-label*='next' i]").isNotEmpty() ||
+                          document.select("button:contains(Next), a:contains(Next)").isNotEmpty() ||
                           (animes.isNotEmpty() && animes.size >= 18)
         
         return AnimesPage(animes, hasNextPage)
@@ -166,24 +182,26 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         val document = response.useAsJsoup()
         
         return document.select("div.grid a[href^='/watch/']").mapNotNull { element ->
-            val href = element.attr("href")
-            if (!href.contains("/watch/")) return@mapNotNull null
-            
-            val epNum = href.substringAfterLast("/").toFloatOrNull() ?: 0f
-            if (epNum <= 0f) return@mapNotNull null
-            
-            val title = element.attr("title").ifBlank { "Episode ${epNum.toInt()}" }
-            
-            SEpisode.create().apply {
-                setUrlWithoutDomain(href)
-                episode_number = epNum
-                name = if (title.isNotBlank() && !title.startsWith("Episode", ignoreCase = true) && !title.startsWith("Ep", ignoreCase = true)) {
-                    "Episode ${epNum.toInt()}: $title"
-                } else {
-                    title
+            runCatching {
+                val href = element.attr("href")
+                if (!href.contains("/watch/")) return@runCatching null
+                
+                val epNum = href.substringAfterLast("/").toFloatOrNull() ?: 0f
+                if (epNum <= 0f) return@runCatching null
+                
+                val title = element.attr("title").ifBlank { "Episode ${epNum.toInt()}" }
+                
+                SEpisode.create().apply {
+                    setUrlWithoutDomain(href)
+                    episode_number = epNum
+                    name = if (title.isNotBlank() && !title.startsWith("Episode", ignoreCase = true) && !title.startsWith("Ep", ignoreCase = true)) {
+                        "Episode ${epNum.toInt()}: $title"
+                    } else {
+                        title
+                    }
+                    date_upload = 0L
                 }
-                date_upload = 0L
-            }
+            }.getOrNull()
         }.distinctBy { it.url }.sortedBy { it.episode_number }
     }
 
@@ -198,8 +216,8 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         document.select("iframe").forEach { iframe ->
             val src = iframe.absUrl("src")
             if (src.isNotBlank()) {
-                try {
-                    val extracted = aniyomi.lib.playlistutils.PlaylistUtils(client, headers).extractFromHls(
+                runCatching {
+                    val extracted = playlistUtils.extractFromHls(
                         playlistUrl = src,
                         masterHeaders = headers,
                         videoHeaders = headers
@@ -207,8 +225,6 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
                     extracted.forEach { video ->
                         videoList.add(Video(video.url, "${video.quality}$qualitySuffix", video.url, video.headers))
                     }
-                } catch (e: Exception) {
-                    // Ignore extraction errors
                 }
             }
         }
@@ -218,8 +234,8 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
             val m3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
             m3u8Regex.findAll(scriptData).forEach { match ->
                 val url = match.groupValues[1]
-                try {
-                    val extracted = aniyomi.lib.playlistutils.PlaylistUtils(client, headers).extractFromHls(
+                runCatching {
+                    val extracted = playlistUtils.extractFromHls(
                         playlistUrl = url,
                         masterHeaders = headers,
                         videoHeaders = headers
@@ -227,8 +243,6 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
                     extracted.forEach { video ->
                         videoList.add(Video(video.url, "${video.quality}$qualitySuffix", video.url, video.headers))
                     }
-                } catch (e: Exception) {
-                    // Ignore
                 }
             }
         }
@@ -249,6 +263,4 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
             summary = "%s",
         )
     }
-
-    private fun String.encodeUri(): String = java.net.URLEncoder.encode(this, "UTF-8")
 }
