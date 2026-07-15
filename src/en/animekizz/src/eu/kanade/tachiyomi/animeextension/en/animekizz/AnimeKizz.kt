@@ -35,29 +35,29 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
+        .add("Origin", baseUrl)
         .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-    // ==================== POPULAR ====================
+    // ==================== POPULAR & SEARCH ====================
     override fun popularAnimeRequest(page: Int): Request {
         return GET("$baseUrl/catalog?page=$page", headers)
     }
 
     override fun popularAnimeParse(response: Response): AnimesPage {
         val document = response.useAsJsoup()
-        val animes = document.select("a[href^='/anime/']").mapNotNull { element ->
+        
+        // FIX: Target the exact card container structure seen in the HTML
+        val animes = document.select("div.group.relative.flex-none").mapNotNull { card ->
+            val link = card.select("a[href^='/anime/']").attr("href")
+            val title = card.select("h3").text().trim()
+            val thumbnail = card.select("img").attr("abs:src")
+            
+            if (link.isBlank() || title.isBlank()) return@mapNotNull null
+            
             SAnime.create().apply {
-                // Fix: Explicitly target h3 or truncate classes to ensure names display below posters
-                title = element.select("h3").firstOrNull()?.text()?.trim() 
-                    ?: element.select(".font-bold, .truncate").firstOrNull()?.text()?.trim() 
-                    ?: element.text().trim()
-                
-                setUrlWithoutDomain(element.attr("href"))
-                
-                // Fix: Prioritize high-res poster images to prevent "zoomed in" tiny icons
-                thumbnail_url = element.select("img").firstOrNull { img -> 
-                    val src = img.attr("abs:src")
-                    src.contains("anilist.co", ignoreCase = true) || src.contains("thetvdb.com", ignoreCase = true) || src.length > 50
-                }?.attr("abs:src") ?: element.select("img").firstOrNull()?.attr("abs:src")
+                this.title = title
+                setUrlWithoutDomain(link)
+                this.thumbnail_url = thumbnail
             }
         }.distinctBy { it.url }
         
@@ -65,14 +65,12 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         return AnimesPage(animes, hasNextPage)
     }
 
-    // ==================== LATEST ====================
     override fun latestUpdatesRequest(page: Int): Request {
         return GET("$baseUrl/catalog?sort=recently_updated&page=$page", headers)
     }
 
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
 
-    // ==================== SEARCH ====================
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         val filterList = if (filters.isEmpty()) getFilterList() else filters
         val genreFilter = filterList.firstInstanceOrNull<AnimeKizzFilters.GenreFilter>()
@@ -88,21 +86,36 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
     override fun animeDetailsParse(response: Response): SAnime {
         val document = response.useAsJsoup()
         return SAnime.create().apply {
-            title = document.select("h1, h2.text-2xl, h2.text-3xl").firstOrNull()?.text() ?: document.title()
-            genre = document.select("a[href^='/catalog?genre=']").joinToString { it.text() }
+            title = document.select("h2.text-2xl, h2.text-3xl").firstOrNull()?.text()?.trim() ?: document.title()
             
-            // Fix: Extract total episodes and append to description since Author/Studio is missing from HTML
-            val episodes = document.select("div").firstOrNull { it.text().contains("Episodes", ignoreCase = true) }
-                ?.text()?.replace("Episodes", "", ignoreCase = true)?.trim() ?: "Unknown"
+            // Genres
+            genre = document.select("div.flex.flex-wrap.gap-2 a[href*='/catalog?genre=']").joinToString { it.text() }
             
-            val desc = document.select("p.line-clamp-4, .synopsis, div.synopsis").text()
-            description = "$desc\n\nTotal Episodes: $episodes"
+            // FIX: Explicitly target the tall poster container, ignoring the wide banner
+            thumbnail_url = document.select("div.group.relative img").firstOrNull()?.attr("abs:src") 
+                ?: document.select("img[src*='anilist.co/file/anilistcdn/media/anime/cover']").firstOrNull()?.attr("abs:src")
             
-            // Fix: Ensure we get the main poster, not a cropped banner
-            thumbnail_url = document.select("img[referrerpolicy='no-referrer']").firstOrNull()?.attr("abs:src") 
-                ?: document.select("img").firstOrNull { it.attr("src").contains("anilist.co", ignoreCase = true) }?.attr("abs:src")
-                ?: document.select("img").firstOrNull()?.attr("abs:src")
-                
+            // Synopsis
+            val synopsis = document.select("p.line-clamp-4").firstOrNull()?.text()?.trim() ?: ""
+            
+            // FIX: Extract Season and Episodes from the exact metadata grid structure
+            val metaBlocks = document.select("div.flex.flex-col.gap-1")
+            val season = metaBlocks.firstOrNull { 
+                it.select("span").first()?.text()?.contains("Season", ignoreCase = true) == true 
+            }?.select("span.font-bold")?.text()?.trim() ?: ""
+            
+            val episodes = metaBlocks.firstOrNull { 
+                it.select("span").first()?.text()?.contains("Episodes", ignoreCase = true) == true 
+            }?.select("span.font-bold")?.text()?.trim() ?: ""
+            
+            // Combine description with Season and Episode count
+            val descBuilder = StringBuilder()
+            if (season.isNotBlank()) descBuilder.append("Season: $season\n")
+            if (episodes.isNotBlank()) descBuilder.append("Episodes: $episodes\n")
+            if (descBuilder.isNotEmpty()) descBuilder.append("\n")
+            descBuilder.append(synopsis)
+            
+            description = descBuilder.toString().trim()
             status = parseStatus(document.text())
         }
     }
@@ -121,19 +134,21 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         val document = response.useAsJsoup()
         return document.select("a[href^='/watch/']").map { element ->
             SEpisode.create().apply {
-                // Fix: Directly target the "EP 1" badge and the title span for 100% accuracy
-                val epBadge = element.select("button[aria-label^='Open details for episode']").text()
-                val epNumStr = Regex("EP\\s*(\\d+)", RegexOption.IGNORE_CASE).find(epBadge)?.groupValues?.getOrNull(1) ?: "0"
-                episode_number = epNumStr.toFloatOrNull() ?: 0F
+                val href = element.attr("href")
+                setUrlWithoutDomain(href)
+                
+                // Extract episode number directly from the URL (e.g., "episode-14")
+                val epMatch = Regex("episode-(\\d+)", RegexOption.IGNORE_CASE).find(href)
+                val epNum = epMatch?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 0f
+                episode_number = epNum
                 
                 val title = element.select("span.truncate, span.block").firstOrNull()?.text()?.trim() ?: ""
                 name = if (title.isNotBlank() && !title.startsWith("Episode", ignoreCase = true)) {
-                    "Episode $epNumStr: $title"
+                    "Episode ${epNum.toInt()}: $title"
                 } else {
-                    "Episode $epNumStr"
+                    "Episode ${epNum.toInt()}"
                 }
                 
-                setUrlWithoutDomain(element.attr("href"))
                 date_upload = 0L
             }
         }.reversed().distinctBy { it.url }
@@ -144,14 +159,12 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         val document = response.useAsJsoup()
         val videoList = mutableListOf<Video>()
         
-        // Fix: Robustly construct the episode_id required by the site's API
         val currentUrl = response.request.url.toString()
         val slug = currentUrl.substringAfter("/watch/").substringBeforeLast("-episode-")
         val epNum = currentUrl.substringAfterLast("-episode-").substringBefore("/").substringBefore("?")
         
         val anilistLink = document.select("a[href*='anilist.co/anime/']").attr("href")
         val anilistId = if (anilistLink.isNotBlank()) anilistLink.substringAfterLast("/") else "0"
-        
         val episodeId = if (anilistId != "0") "$slug-$anilistId:$epNum" else "$slug:$epNum"
         
         val servers = listOf("mimi:sub", "yuki:sub", "sora:sub", "beep:sub", "uwu:sub", "kiwi:sub", "mimi:dub", "yuki:dub")
@@ -174,6 +187,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                         val quality = source["quality"]?.jsonPrimitive?.content ?: "Auto"
                         val serverName = source["server"]?.jsonPrimitive?.content ?: serverId
                         
+                        // Extract subtitles
                         val subtitleTracks = mutableListOf<Track>()
                         val subtitles = source["subtitles"]?.jsonArray
                         subtitles?.forEach { subElement ->
@@ -185,6 +199,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                             }
                         }
                         
+                        // FIX: Extract headers from the API response (crucial for downloads/streaming)
                         val sourceHeaders = headers.newBuilder()
                         val headersObj = source["headers"]?.jsonObject
                         headersObj?.let {
@@ -209,15 +224,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                 }
             } catch (e: Exception) {
                 // Ignore failed server resolutions and try the next one
-            }
-        }
-        
-        // Fallback: Regex search for direct m3u8 in page source if API fails completely
-        if (videoList.isEmpty()) {
-            val html = document.html()
-            val m3u8Regex = Regex("""(https?://[^\s"']+\.m3u8[^\s"']*)""")
-            m3u8Regex.findAll(html).map { it.groupValues[1] }.distinct().forEach { url ->
-                videoList.add(Video(url = url, quality = "m3u8", videoUrl = url, headers = headers))
             }
         }
         
