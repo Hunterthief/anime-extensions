@@ -9,7 +9,8 @@ object AnimeKizzFilters {
         GenreFilter()
     )
 
-    private class GenreFilter : UriPartFilter(
+    // Must be public (no 'private' modifier) so AnimeKizz.kt can access it
+    class GenreFilter : UriPartFilter(
         "Genre",
         arrayOf(
             Pair("All", ""),
@@ -22,8 +23,9 @@ object AnimeKizzFilters {
         )
     )
 
-    private open class UriPartFilter(displayName: String, val vals: Array<Pair<String, String>>) : 
-        AnimeFilter.Select(displayName, vals.map { it.first }.toTypedArray()) {
+    // Must explicitly inherit from AnimeFilter.Select<String>
+    open class UriPartFilter(displayName: String, private val vals: Array<Pair<String, String>>) :
+        AnimeFilter.Select<String>(displayName, vals.map { it.first }.toTypedArray()) {
         fun toUriPart() = vals[state].second
     }
 }
