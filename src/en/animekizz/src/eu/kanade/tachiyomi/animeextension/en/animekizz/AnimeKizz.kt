@@ -37,12 +37,15 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
         .add("Origin", baseUrl)
-        .add("Cache-Control", "no-cache") // Prevents aggressive CDN caching
+        .add("Cache-Control", "no-cache, no-store, must-revalidate")
+        .add("Pragma", "no-cache")
+        .add("Expires", "0")
         .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     // ==================== POPULAR ====================
     override fun popularAnimeRequest(page: Int): Request {
-        return GET("$baseUrl/catalog?page=$page", headers)
+        val timestamp = System.currentTimeMillis()
+        return GET("$baseUrl/catalog?page=$page&_t=$timestamp", headers)
     }
 
     override fun popularAnimeParse(response: Response): AnimesPage {
@@ -52,7 +55,8 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
 
     // ==================== LATEST ====================
     override fun latestUpdatesRequest(page: Int): Request {
-        return GET("$baseUrl/catalog?sort=recently_updated&page=$page", headers)
+        val timestamp = System.currentTimeMillis()
+        return GET("$baseUrl/catalog?sort=recently_updated&page=$page&_t=$timestamp", headers)
     }
 
     override fun latestUpdatesParse(response: Response): AnimesPage {
@@ -66,8 +70,9 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         val genreFilter = filterList.firstInstanceOrNull<AnimeKizzFilters.GenreFilter>()
         val genre = genreFilter?.toUriPart() ?: ""
         val genreQuery = if (genre.isNotEmpty()) "&genre=$genre" else ""
+        val timestamp = System.currentTimeMillis()
         
-        return GET("$baseUrl/catalog?q=${query.encodeUri()}$genreQuery&page=$page", headers)
+        return GET("$baseUrl/catalog?q=${query.encodeUri()}$genreQuery&page=$page&_t=$timestamp", headers)
     }
 
     override fun searchAnimeParse(response: Response): AnimesPage {
@@ -75,7 +80,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         return parseAnimeList(response, document)
     }
 
-    // ==================== SHARED PARSER (FIXED PAGINATION) ====================
+    // ==================== SHARED PARSER ====================
     private fun parseAnimeList(response: Response, document: Document): AnimesPage {
         val animes = document.select("a[href^='/anime/']").mapNotNull { aTag ->
             val url = aTag.attr("href")
@@ -98,14 +103,9 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             }
         }.distinctBy { it.url }
         
-        // Dynamically extract current page from the actual request URL
         val currentUrl = response.request.url.toString()
         val currentPage = Regex("page=(\\d+)").find(currentUrl)?.groupValues?.get(1)?.toIntOrNull() ?: 1
         
-        // Robust hasNextPage check:
-        // 1. Looks for an explicit link to the next page.
-        // 2. Looks for a "Next" button.
-        // 3. FALLBACK: If we received a full grid of results (18+ items), assume there is a next page to keep infinite scroll alive.
         val hasNextPage = document.select("a[href*='page=${currentPage + 1}']").isNotEmpty() ||
                           document.select("button:contains(Next), a:contains(Next), [aria-label*='next' i]").isNotEmpty() ||
                           (animes.isNotEmpty() && animes.size >= 18)
@@ -117,7 +117,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
     override fun animeDetailsParse(response: Response): SAnime {
         val document = response.useAsJsoup()
         return SAnime.create().apply {
-            title = document.select("h1, h2.text-2xl, h2.text-3xl").firstOrNull()?.text()?.trim() ?: document.title()
+            title = document.select("h1").firstOrNull()?.text()?.trim() ?: document.title()
             
             thumbnail_url = document.select("img[src*='/cover/']").firstOrNull()?.attr("abs:src")
                 ?: document.select("img").firstOrNull { it.attr("src").contains("anilist.co", ignoreCase = true) }?.attr("abs:src")
@@ -127,32 +127,34 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             
             val synopsis = document.select("p.line-clamp-4, .synopsis, div.synopsis").firstOrNull()?.text()?.trim() ?: ""
             
+            // 1. Extract top badges (Type, Status, Score)
+            val badges = document.select("div.flex.flex-wrap.items-center.gap-3.mb-2 > span")
+            val type = badges.getOrNull(0)?.text()?.trim() ?: ""
+            val statusText = badges.getOrNull(1)?.text()?.trim() ?: ""
+            val score = badges.getOrNull(2)?.text()?.trim() ?: ""
+            
+            // 2. Extract metadata blocks (Studio, Season, Source, Episodes)
             val metaBlocks = document.select("div.flex.flex-col.gap-1")
             fun getMeta(label: String): String {
                 return metaBlocks.firstOrNull { 
-                    it.selectFirst("span")?.text()?.contains(label, ignoreCase = true) == true 
-                }?.select("span")?.lastOrNull()?.text()?.trim()?.replace(Regex("\\s+"), " ") ?: ""
+                    it.select("span").firstOrNull()?.text()?.contains(label, ignoreCase = true) == true 
+                }?.select("span")?.lastOrNull()?.text()?.trim() ?: ""
             }
             
-            val season = getMeta("Season")
-            val episodes = getMeta("Episodes")
-            val duration = getMeta("Duration")
-            val country = getMeta("Country")
             val studio = getMeta("Studio")
+            val season = getMeta("Season")
+            val episodesCount = getMeta("Episodes")
+            val source = getMeta("Source")
             
-            val badges = document.select("div.flex.items-center.gap-3.mb-2.flex-wrap span.px-3.py-1.5")
-            val type = badges.getOrNull(0)?.text()?.trim() ?: ""
-            val statusText = badges.getOrNull(1)?.text()?.trim() ?: ""
-            val score = badges.getOrNull(2)?.text()?.trim()?.replace(Regex("\\s+"), " ") ?: ""
-            
+            // Assign to dedicated fields
             author = studio
-            
             status = when {
                 statusText.contains("Airing", ignoreCase = true) || statusText.contains("Releasing", ignoreCase = true) -> SAnime.ONGOING
                 statusText.contains("Completed", ignoreCase = true) || statusText.contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
                 else -> SAnime.UNKNOWN
             }
             
+            // 3. Build clean, formatted description with metadata ALWAYS at the end
             val descBuilder = StringBuilder()
             if (synopsis.isNotBlank()) {
                 descBuilder.append(synopsis).append("\n\n")
@@ -163,9 +165,9 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             if (statusText.isNotBlank()) metaLines.add("Status: $statusText")
             if (score.isNotBlank()) metaLines.add("Score: $score")
             if (season.isNotBlank()) metaLines.add("Aired: $season")
-            if (duration.isNotBlank()) metaLines.add("Duration: $duration")
-            if (episodes.isNotBlank()) metaLines.add("Episodes: $episodes")
-            if (country.isNotBlank()) metaLines.add("Country: $country")
+            if (episodesCount.isNotBlank()) metaLines.add("Episodes: $episodesCount")
+            if (studio.isNotBlank()) metaLines.add("Studio: $studio")
+            if (source.isNotBlank()) metaLines.add("Source: $source")
             
             if (metaLines.isNotEmpty()) {
                 descBuilder.append(metaLines.joinToString("\n"))
@@ -175,32 +177,58 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         }
     }
 
-    // ==================== EPISODES ====================
+    // ==================== EPISODES (Parsed directly from Metadata Page) ====================
     override fun episodeListParse(response: Response): List<SEpisode> {
-        val document = response.useAsJsoup()
-        return document.select("a[href*='/watch/']").mapNotNull { element ->
-            val href = element.attr("href")
-            if (!href.contains("/watch/")) return@mapNotNull null
+        val episodes = mutableListOf<SEpisode>()
+        val baseUrl = response.request.url.toString().substringBefore("?") // Clean base URL
+        var page = 1
+        var hasMore = true
+        
+        while (hasMore && page <= 10) { // Limit to 10 pages to prevent infinite loops
+            val url = if (page == 1) baseUrl else "$baseUrl?page=$page"
+            val res = client.newCall(GET(url, headers)).execute()
+            val document = res.useAsJsoup()
             
-            SEpisode.create().apply {
-                setUrlWithoutDomain(href)
+            val pageEpisodes = document.select("a[href^='/watch/']").mapNotNull { element ->
+                val href = element.attr("href")
+                if (!href.contains("/watch/")) return@mapNotNull null
                 
-                val epMatch = Regex("episode-(\\d+)", RegexOption.IGNORE_CASE).find(href)
+                // Extract episode number from the button's text (e.g., "EP 1")
+                val epButton = element.selectFirst("button[aria-label^='Open details for episode']")
+                val epText = epButton?.text() ?: ""
+                val epMatch = Regex("EP\\s*(\\d+)", RegexOption.IGNORE_CASE).find(epText)
                 val epNum = epMatch?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 0f
-                episode_number = epNum
                 
-                val title = element.select("span.truncate, span.block").firstOrNull()?.text()?.trim() 
-                    ?: element.select("button[aria-label*='episode']").text().replace(Regex("EP\\s*", RegexOption.IGNORE_CASE), "").trim()
+                // Extract episode title directly from the metadata page HTML
+                val title = element.selectFirst("span.block.w-full.min-w-0.font-black.truncate")?.text()?.trim() 
+                    ?: element.selectFirst("span.truncate")?.text()?.trim() 
+                    ?: ""
                 
-                name = if (title.isNotBlank() && !title.startsWith("Episode", ignoreCase = true)) {
-                    "Episode ${epNum.toInt()}: $title"
-                } else {
-                    "Episode ${epNum.toInt()}"
+                SEpisode.create().apply {
+                    setUrlWithoutDomain(href)
+                    episode_number = epNum
+                    name = if (title.isNotBlank() && !title.startsWith("Episode", ignoreCase = true)) {
+                        "Episode ${epNum.toInt()}: $title"
+                    } else {
+                        "Episode ${epNum.toInt()}"
+                    }
+                    date_upload = 0L
                 }
-                
-                date_upload = 0L
+            }.distinctBy { it.url }
+            
+            // Check if we actually got new episodes that we haven't seen yet
+            val existingUrls = episodes.map { it.url }.toSet()
+            val newEpisodes = pageEpisodes.filter { it.url !in existingUrls }
+            
+            if (newEpisodes.isEmpty()) {
+                hasMore = false // Stop pagination if no new episodes are found
+            } else {
+                episodes.addAll(newEpisodes)
             }
-        }.distinctBy { it.url }.sortedBy { it.episode_number }
+            page++
+        }
+        
+        return episodes.distinctBy { it.url }.sortedBy { it.episode_number }
     }
 
     // ==================== VIDEOS ====================
