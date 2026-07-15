@@ -15,6 +15,7 @@ import keiyoushi.utils.getPreferencesLazy
 import okhttp3.Request
 import okhttp3.Response
 import aniyomi.lib.playlistutils.PlaylistUtils
+import java.net.URLEncoder
 
 class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
@@ -30,6 +31,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         .add("Referer", baseUrl)
         .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
+    // --- POPULAR ---
     override fun popularAnimeRequest(page: Int): Request {
         val timestamp = System.currentTimeMillis()
         return GET("$baseUrl/browse?sort=TRENDING_DESC&page=$page&_t=$timestamp", headers)
@@ -37,63 +39,67 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
     override fun popularAnimeParse(response: Response): AnimesPage {
         val document = response.asJsoup()
-        val animes = document.select("a[href^='/anime/']").map { element ->
+        val animes = document.select("a.anime-card[href^='/anime/']").map { element ->
             SAnime.create().apply {
-                title = element.select("h3, .title").firstOrNull()?.text() ?: "Unknown Title"
+                title = element.select("h3").firstOrNull()?.text()?.trim() ?: "Unknown"
                 url = element.attr("href")
                 thumbnail_url = element.select("img").attr("abs:src")
             }
         }.distinctBy { it.url }
         
-        val hasNextPage = document.select("button:contains(Load More), a:contains(Load More), .pagination .next").isNotEmpty()
+        val hasNextPage = document.select("a:contains(Next), .pagination .next").isNotEmpty()
         return AnimesPage(animes, hasNextPage)
     }
 
+    // --- LATEST ---
     override fun latestUpdatesRequest(page: Int): Request {
         val timestamp = System.currentTimeMillis()
-        return GET("$baseUrl/browse?sort=START_DATE_DESC&page=$page&_t=$timestamp", headers)
+        // Homepage contains "New Today", so we fetch the homepage for latest
+        return GET("$baseUrl/?_t=$timestamp", headers)
     }
 
-    override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
+    override fun latestUpdatesParse(response: Response): AnimesPage {
+        val document = response.asJsoup()
+        val animes = document.select("a.new-ep-card").map { element ->
+            val watchUrl = element.attr("href") // e.g., "/watch/184356/2"
+            val animeId = watchUrl.substringAfter("/watch/").substringBefore("/")
+            
+            SAnime.create().apply {
+                title = element.select("p.text-ani-text").text().trim()
+                url = "/anime/$animeId" // Convert to detail URL so the app can load metadata
+                thumbnail_url = element.select("img").attr("abs:src")
+            }
+        }.distinctBy { it.url }
+        
+        val hasNextPage = document.select("a:contains(Next), .pagination .next").isNotEmpty()
+        return AnimesPage(animes, hasNextPage)
+    }
 
+    // --- SEARCH ---
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         val timestamp = System.currentTimeMillis()
-        val queryParams = mutableListOf<String>()
-        
-        if (query.isNotBlank()) {
-            queryParams.add("q=$query")
-        }
-        
-        var sortParam = "TRENDING_DESC"
-        
-        filters.forEach { filter ->
-            when (filter) {
-                is GenreFilter -> {
-                    if (filter.selectedValue.isNotBlank()) {
-                        queryParams.add("genre=${filter.selectedValue}")
-                    }
-                }
-                is FormatFilter -> {
-                    if (filter.selectedValue.isNotBlank()) {
-                        queryParams.add("format=${filter.selectedValue}")
-                    }
-                }
-                is SortFilter -> {
-                    sortParam = filter.selectedValue.ifBlank { "TRENDING_DESC" }
-                }
-                else -> {}
-            }
-        }
-        
-        queryParams.add("sort=$sortParam")
-        queryParams.add("page=$page")
-        queryParams.add("_t=$timestamp")
-        
-        return GET("$baseUrl/browse?${queryParams.joinToString("&")}", headers)
+        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        return GET("$baseUrl/search?q=$encodedQuery&page=$page&_t=$timestamp", headers)
     }
 
-    override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
+    override fun searchAnimeParse(response: Response): AnimesPage {
+        val document = response.asJsoup()
+        val animes = document.select("a.anime-card[href^='/anime/'], a[href^='/anime/']").mapNotNull { element ->
+            // Filter out footer/nav links by ensuring it's an actual card with an image
+            if (element.select("img").isEmpty() && !element.hasClass("anime-card")) return@mapNotNull null
+            
+            SAnime.create().apply {
+                title = element.select("h3, p.font-semibold").firstOrNull()?.text()?.trim() ?: "Unknown"
+                url = element.attr("href")
+                thumbnail_url = element.select("img").attr("abs:src")
+            }
+        }.distinctBy { it.url }
+        
+        val hasNextPage = document.select("a:contains(Next), .pagination .next").isNotEmpty()
+        return AnimesPage(animes, hasNextPage)
+    }
 
+    // --- DETAILS ---
     override fun animeDetailsParse(response: Response): SAnime {
         val document = response.asJsoup()
         return SAnime.create().apply {
@@ -128,6 +134,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         }
     }
 
+    // --- EPISODES ---
     override fun episodeListParse(response: Response): List<SEpisode> {
         val document = response.asJsoup()
         val episodeElements = document.select("div.grid a[href^='/watch/']")
@@ -142,6 +149,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         }.reversed()
     }
 
+    // --- VIDEO ---
     override fun videoListParse(response: Response): List<Video> {
         val document = response.asJsoup()
         val videoList = mutableListOf<Video>()
@@ -193,6 +201,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         return videoList.distinctBy { it.quality }
     }
 
+    // --- PREFERENCES ---
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         val pref = SwitchPreferenceCompat(screen.context).apply {
             key = "prefer_1080p"
