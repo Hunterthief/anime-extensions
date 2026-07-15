@@ -46,22 +46,34 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
     override fun popularAnimeParse(response: Response): AnimesPage {
         val document = response.useAsJsoup()
         
-        // FIX: Target the exact card container structure seen in the HTML
-        val animes = document.select("div.group.relative.flex-none").mapNotNull { card ->
-            val link = card.select("a[href^='/anime/']").attr("href")
-            val title = card.select("h3").text().trim()
-            val thumbnail = card.select("img").attr("abs:src")
+        // FIX: Robustly select all anime links, regardless of the exact grid container structure
+        val animes = document.select("a[href^='/anime/']").mapNotNull { aTag ->
+            val url = aTag.attr("href")
+            if (url.isBlank() || url == "/anime/") return@mapNotNull null
             
-            if (link.isBlank() || title.isBlank()) return@mapNotNull null
+            // Get title from img alt (works for recommendations) or h3 inside/next to the link
+            val img = aTag.selectFirst("img")
+            val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
+                ?: aTag.selectFirst("h3")?.text()?.trim()
+                ?: aTag.parent()?.selectFirst("h3")?.text()?.trim()
+                ?: ""
+                
+            if (title.isBlank()) return@mapNotNull null
+            
+            val thumbnail = img?.attr("abs:src") ?: ""
             
             SAnime.create().apply {
                 this.title = title
-                setUrlWithoutDomain(link)
+                setUrlWithoutDomain(url)
                 this.thumbnail_url = thumbnail
             }
         }.distinctBy { it.url }
         
-        val hasNextPage = document.select("a:contains(Next), .pagination a:contains(2), button:contains(Next)").isNotEmpty()
+        val currentUrl = response.request.url.toString()
+        val currentPage = Regex("page=(\\d+)").find(currentUrl)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        val hasNextPage = document.select("a[href*='page=${currentPage + 1}']").isNotEmpty() || 
+                          document.select("a:contains(Next), button:contains(Next)").isNotEmpty()
+        
         return AnimesPage(animes, hasNextPage)
     }
 
@@ -86,29 +98,26 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
     override fun animeDetailsParse(response: Response): SAnime {
         val document = response.useAsJsoup()
         return SAnime.create().apply {
-            title = document.select("h2.text-2xl, h2.text-3xl").firstOrNull()?.text()?.trim() ?: document.title()
+            title = document.select("h2.text-2xl, h2.text-3xl, h1").firstOrNull()?.text()?.trim() ?: document.title()
             
-            // Genres
-            genre = document.select("div.flex.flex-wrap.gap-2 a[href*='/catalog?genre=']").joinToString { it.text() }
+            genre = document.select("a[href*='/catalog?genre=']").joinToString { it.text() }
             
-            // FIX: Explicitly target the tall poster container, ignoring the wide banner
-            thumbnail_url = document.select("div.group.relative img").firstOrNull()?.attr("abs:src") 
-                ?: document.select("img[src*='anilist.co/file/anilistcdn/media/anime/cover']").firstOrNull()?.attr("abs:src")
+            // FIX: Explicitly target the cover image (contains /cover/) to avoid the wide banner image
+            thumbnail_url = document.select("img[src*='/cover/']").firstOrNull()?.attr("abs:src")
+                ?: document.select("img").firstOrNull()?.attr("abs:src")
             
-            // Synopsis
             val synopsis = document.select("p.line-clamp-4").firstOrNull()?.text()?.trim() ?: ""
             
-            // FIX: Extract Season and Episodes from the exact metadata grid structure
+            // Extract metadata (Season, Episodes)
             val metaBlocks = document.select("div.flex.flex-col.gap-1")
             val season = metaBlocks.firstOrNull { 
                 it.select("span").first()?.text()?.contains("Season", ignoreCase = true) == true 
-            }?.select("span.font-bold")?.text()?.trim() ?: ""
+            }?.select("span.font-bold, span.text-sm")?.text()?.trim() ?: ""
             
             val episodes = metaBlocks.firstOrNull { 
                 it.select("span").first()?.text()?.contains("Episodes", ignoreCase = true) == true 
-            }?.select("span.font-bold")?.text()?.trim() ?: ""
+            }?.select("span.font-bold, span.text-sm")?.text()?.trim() ?: ""
             
-            // Combine description with Season and Episode count
             val descBuilder = StringBuilder()
             if (season.isNotBlank()) descBuilder.append("Season: $season\n")
             if (episodes.isNotBlank()) descBuilder.append("Episodes: $episodes\n")
@@ -132,17 +141,22 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
     // ==================== EPISODES ====================
     override fun episodeListParse(response: Response): List<SEpisode> {
         val document = response.useAsJsoup()
-        return document.select("a[href^='/watch/']").map { element ->
+        return document.select("a[href*='/watch/']").mapNotNull { element ->
+            val href = element.attr("href")
+            if (!href.contains("/watch/")) return@mapNotNull null
+            
             SEpisode.create().apply {
-                val href = element.attr("href")
                 setUrlWithoutDomain(href)
                 
-                // Extract episode number directly from the URL (e.g., "episode-14")
+                // FIX: Extract episode number strictly from the URL (e.g., "episode-14")
                 val epMatch = Regex("episode-(\\d+)", RegexOption.IGNORE_CASE).find(href)
                 val epNum = epMatch?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 0f
                 episode_number = epNum
                 
-                val title = element.select("span.truncate, span.block").firstOrNull()?.text()?.trim() ?: ""
+                // Extract title from the span inside the episode card
+                val title = element.select("span.truncate, span.block").firstOrNull()?.text()?.trim() 
+                    ?: element.select("button[aria-label*='episode']").text().replace(Regex("EP\\s*", RegexOption.IGNORE_CASE), "").trim()
+                
                 name = if (title.isNotBlank() && !title.startsWith("Episode", ignoreCase = true)) {
                     "Episode ${epNum.toInt()}: $title"
                 } else {
@@ -151,7 +165,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                 
                 date_upload = 0L
             }
-        }.reversed().distinctBy { it.url }
+        }.distinctBy { it.url }.sortedBy { it.episode_number }
     }
 
     // ==================== VIDEOS ====================
@@ -187,7 +201,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                         val quality = source["quality"]?.jsonPrimitive?.content ?: "Auto"
                         val serverName = source["server"]?.jsonPrimitive?.content ?: serverId
                         
-                        // Extract subtitles
                         val subtitleTracks = mutableListOf<Track>()
                         val subtitles = source["subtitles"]?.jsonArray
                         subtitles?.forEach { subElement ->
@@ -199,7 +212,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                             }
                         }
                         
-                        // FIX: Extract headers from the API response (crucial for downloads/streaming)
                         val sourceHeaders = headers.newBuilder()
                         val headersObj = source["headers"]?.jsonObject
                         headersObj?.let {
@@ -223,7 +235,7 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
                     }
                 }
             } catch (e: Exception) {
-                // Ignore failed server resolutions and try the next one
+                // Ignore failed server resolutions
             }
         }
         
