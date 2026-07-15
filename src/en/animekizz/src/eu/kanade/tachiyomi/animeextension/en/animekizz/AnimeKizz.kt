@@ -127,13 +127,6 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             
             val synopsis = document.select("p.line-clamp-4, .synopsis, div.synopsis").firstOrNull()?.text()?.trim() ?: ""
             
-            // 1. Extract top badges (Type, Status, Score)
-            val badges = document.select("div.flex.flex-wrap.items-center.gap-3.mb-2 > span")
-            val type = badges.getOrNull(0)?.text()?.trim() ?: ""
-            val statusText = badges.getOrNull(1)?.text()?.trim() ?: ""
-            val score = badges.getOrNull(2)?.text()?.trim() ?: ""
-            
-            // 2. Extract metadata blocks (Studio, Season, Source, Episodes)
             val metaBlocks = document.select("div.flex.flex-col.gap-1")
             fun getMeta(label: String): String {
                 return metaBlocks.firstOrNull { 
@@ -146,26 +139,21 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             val episodesCount = getMeta("Episodes")
             val source = getMeta("Source")
             
-            // Assign to dedicated fields
             author = studio
             status = when {
-                statusText.contains("Airing", ignoreCase = true) || statusText.contains("Releasing", ignoreCase = true) -> SAnime.ONGOING
-                statusText.contains("Completed", ignoreCase = true) || statusText.contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
+                document.text().contains("Airing", ignoreCase = true) || document.text().contains("Releasing", ignoreCase = true) -> SAnime.ONGOING
+                document.text().contains("Completed", ignoreCase = true) || document.text().contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
                 else -> SAnime.UNKNOWN
             }
             
-            // 3. Build clean, formatted description with metadata ALWAYS at the end
             val descBuilder = StringBuilder()
             if (synopsis.isNotBlank()) {
                 descBuilder.append(synopsis).append("\n\n")
             }
             
             val metaLines = mutableListOf<String>()
-            if (type.isNotBlank()) metaLines.add("Type: $type")
-            if (statusText.isNotBlank()) metaLines.add("Status: $statusText")
-            if (score.isNotBlank()) metaLines.add("Score: $score")
-            if (season.isNotBlank()) metaLines.add("Aired: $season")
             if (episodesCount.isNotBlank()) metaLines.add("Episodes: $episodesCount")
+            if (season.isNotBlank()) metaLines.add("Aired: $season")
             if (studio.isNotBlank()) metaLines.add("Studio: $studio")
             if (source.isNotBlank()) metaLines.add("Source: $source")
             
@@ -177,57 +165,63 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
         }
     }
 
-    // ==================== EPISODES (Parsed directly from Metadata Page) ====================
+    // ==================== EPISODES (BATCH SCRAPING) ====================
     override fun episodeListParse(response: Response): List<SEpisode> {
+        val document = response.useAsJsoup()
         val episodes = mutableListOf<SEpisode>()
-        val baseUrl = response.request.url.toString().substringBefore("?") // Clean base URL
-        var page = 1
-        var hasMore = true
         
-        while (hasMore && page <= 10) { // Limit to 10 pages to prevent infinite loops
-            val url = if (page == 1) baseUrl else "$baseUrl?page=$page"
-            val res = client.newCall(GET(url, headers)).execute()
-            val document = res.useAsJsoup()
-            
-            val pageEpisodes = document.select("a[href^='/watch/']").mapNotNull { element ->
-                val href = element.attr("href")
-                if (!href.contains("/watch/")) return@mapNotNull null
+        // 1. Get total episodes from metadata
+        val episodesCountStr = document.select("div.flex.flex-col.gap-1").firstOrNull { 
+            it.select("span").firstOrNull()?.text()?.contains("Episodes", ignoreCase = true) == true 
+        }?.select("span")?.lastOrNull()?.text()?.trim()?.replace(Regex("\\D"), "")
+        
+        val totalEps = episodesCountStr?.toIntOrNull() ?: 12
+        
+        // 2. Get slug from the current details page URL
+        val slug = response.request.url.toString()
+            .substringAfter("/anime/")
+            .substringBefore("?")
+            .trim()
+        
+        // 3. Loop through batches of 50 episodes
+        for (startEp in 1..totalEps step 50) {
+            val watchUrl = "$baseUrl/watch/$slug-episode-$startEp"
+            try {
+                val watchResponse = client.newCall(GET(watchUrl, headers)).execute()
+                val watchDoc = watchResponse.useAsJsoup()
                 
-                // Extract episode number from the button's text (e.g., "EP 1")
-                val epButton = element.selectFirst("button[aria-label^='Open details for episode']")
-                val epText = epButton?.text() ?: ""
-                val epMatch = Regex("EP\\s*(\\d+)", RegexOption.IGNORE_CASE).find(epText)
-                val epNum = epMatch?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 0f
-                
-                // Extract episode title directly from the metadata page HTML
-                val title = element.selectFirst("span.block.w-full.min-w-0.font-black.truncate")?.text()?.trim() 
-                    ?: element.selectFirst("span.truncate")?.text()?.trim() 
-                    ?: ""
-                
-                SEpisode.create().apply {
-                    setUrlWithoutDomain(href)
-                    episode_number = epNum
-                    name = if (title.isNotBlank() && !title.startsWith("Episode", ignoreCase = true)) {
-                        "Episode ${epNum.toInt()}: $title"
-                    } else {
-                        "Episode ${epNum.toInt()}"
+                val batchEpisodes = watchDoc.select("a[href^='/watch/']").mapNotNull { element ->
+                    val href = element.attr("href")
+                    if (!href.contains("/watch/")) return@mapNotNull null
+                    
+                    // Extract episode number from href: /watch/slug-episode-123
+                    val epMatch = Regex("episode-(\\d+)", RegexOption.IGNORE_CASE).find(href)
+                    val epNum = epMatch?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 0f
+                    
+                    // Extract title from the specific span, fallback to generic truncate
+                    val title = element.selectFirst("span.block.w-full.min-w-0.font-black.truncate")?.text()?.trim()
+                        ?: element.selectFirst("span.truncate")?.text()?.trim()
+                        ?: "Episode ${epNum.toInt()}"
+                    
+                    SEpisode.create().apply {
+                        setUrlWithoutDomain(href)
+                        episode_number = epNum
+                        name = if (title.isNotBlank() && !title.startsWith("Episode", ignoreCase = true) && !title.startsWith("Ep", ignoreCase = true)) {
+                            "Episode ${epNum.toInt()}: $title"
+                        } else {
+                            title.ifBlank { "Episode ${epNum.toInt()}" }
+                        }
+                        date_upload = 0L
                     }
-                    date_upload = 0L
                 }
-            }.distinctBy { it.url }
-            
-            // Check if we actually got new episodes that we haven't seen yet
-            val existingUrls = episodes.map { it.url }.toSet()
-            val newEpisodes = pageEpisodes.filter { it.url !in existingUrls }
-            
-            if (newEpisodes.isEmpty()) {
-                hasMore = false // Stop pagination if no new episodes are found
-            } else {
-                episodes.addAll(newEpisodes)
+                
+                episodes.addAll(batchEpisodes)
+            } catch (e: Exception) {
+                // If a specific batch page fails to load, we skip it and continue to the next batch
             }
-            page++
         }
         
+        // 4. Deduplicate by URL and sort by episode number ascending
         return episodes.distinctBy { it.url }.sortedBy { it.episode_number }
     }
 
