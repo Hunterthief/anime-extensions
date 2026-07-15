@@ -1,0 +1,14 @@
+apply plugin: "keiyoushi.plugins.extension.legacy"
+
+ext {
+    extName = 'Yomi'
+    pkgNameSuffix = 'en.yomi'
+    extClass = '.Yomi'
+    extVersionCode = 1
+}
+
+dependencies {
+    implementation(project(':core'))
+    implementation(project(':lib:playlistutils'))
+    implementation(project(':lib:omniembedextractor'))
+}
