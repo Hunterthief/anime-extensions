@@ -117,36 +117,32 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             val synopsis = document.select("p.line-clamp-4, .synopsis, div.synopsis").firstOrNull()?.text()?.trim() ?: ""
             
             // Extract metadata blocks
-            val metaBlocks = document.select("div.flex.flex-col.gap-1, div.grid > div, .metadata-item")
-            
+            val metaBlocks = document.select("div.flex.flex-col.gap-1")
             fun getMeta(label: String): String {
                 return metaBlocks.firstOrNull { 
                     it.selectFirst("span")?.text()?.contains(label, ignoreCase = true) == true 
-                }?.select("span.font-bold, span.text-sm, span")?.lastOrNull()?.text()?.trim() 
-                  ?: metaBlocks.firstOrNull { 
-                      it.text().contains(label, ignoreCase = true) 
-                  }?.select("span")?.lastOrNull()?.text()?.trim() ?: ""
+                }?.select("span")?.lastOrNull()?.text()?.trim()?.replace(Regex("\\s+"), " ") ?: ""
             }
             
-            // Extract top badges (Type, Status, Score)
-            val badgeContainer = document.selectFirst("div.flex.items-center.gap-3.mb-2.flex-wrap")
-            val type = badgeContainer?.select("span")?.getOrNull(0)?.text()?.trim() ?: ""
-            val statusBadge = badgeContainer?.select("span")?.getOrNull(1)?.text()?.trim() ?: ""
-            val score = badgeContainer?.select("span")?.getOrNull(2)?.text()?.replace(Regex("\\s+"), " ")?.trim() ?: ""
-            
-            val studio = getMeta("Studio")
-            val episodes = getMeta("Episodes")
             val season = getMeta("Season")
-            val rating = getMeta("Rating")
-            val duration = getMeta("Duration") ?: getMeta("Average Length") ?: getMeta("Length") ?: getMeta("Avg Length")
+            val episodes = getMeta("Episodes")
+            val duration = getMeta("Duration")
+            val country = getMeta("Country")
+            val studio = getMeta("Studio") // Will be blank if the site doesn't provide it, which is correct
             
-            // Set Studio to the author field as requested
+            // Extract top badges (Type, Status, Score)
+            val badges = document.select("div.flex.items-center.gap-3.mb-2.flex-wrap span.px-3.py-1.5")
+            val type = badges.getOrNull(0)?.text()?.trim() ?: ""
+            val statusText = badges.getOrNull(1)?.text()?.trim() ?: ""
+            val score = badges.getOrNull(2)?.text()?.trim()?.replace(Regex("\\s+"), " ") ?: ""
+            
+            // Set Studio to the author field
             author = studio
             
-            // Set Status field
+            // Set Status field (This populates the dedicated "Status" area in the app)
             status = when {
-                statusBadge.contains("Airing", ignoreCase = true) || statusBadge.contains("Releasing", ignoreCase = true) -> SAnime.ONGOING
-                statusBadge.contains("Completed", ignoreCase = true) || statusBadge.contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
+                statusText.contains("Airing", ignoreCase = true) || statusText.contains("Releasing", ignoreCase = true) -> SAnime.ONGOING
+                statusText.contains("Completed", ignoreCase = true) || statusText.contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
                 else -> SAnime.UNKNOWN
             }
             
@@ -158,12 +154,12 @@ class AnimeKizz : AnimeHttpSource(), ConfigurableAnimeSource {
             
             val metaLines = mutableListOf<String>()
             if (type.isNotBlank()) metaLines.add("Type: $type")
-            if (statusBadge.isNotBlank()) metaLines.add("Status: $statusBadge")
+            if (statusText.isNotBlank()) metaLines.add("Status: $statusText")
             if (score.isNotBlank()) metaLines.add("Score: $score")
             if (season.isNotBlank()) metaLines.add("Aired: $season")
             if (duration.isNotBlank()) metaLines.add("Duration: $duration")
             if (episodes.isNotBlank()) metaLines.add("Episodes: $episodes")
-            if (rating.isNotBlank()) metaLines.add("Rating: $rating")
+            if (country.isNotBlank()) metaLines.add("Country: $country")
             
             if (metaLines.isNotEmpty()) {
                 descBuilder.append(metaLines.joinToString("\n"))
