@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.animeextension.en.yomi
 
-import android.content.Context
 import androidx.preference.PreferenceScreen
 import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import aniyomi.lib.playlistutils.PlaylistUtils
@@ -20,8 +19,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 
 class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
@@ -33,11 +30,15 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
     private val preferences by getPreferencesLazy()
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
     
-    // Cloudflare Interceptor setup (The "Silver Bullet" for blank pages)
-    private val context: Context by injectLazy()
+    // Cloudflare Interceptor setup (Takes OkHttpClient and User-Agent String)
     override val client: OkHttpClient =
         super.client.newBuilder()
-            .addInterceptor(CloudflareInterceptor(context, super.client))
+            .addInterceptor(
+                CloudflareInterceptor(
+                    super.client,
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                )
+            )
             .build()
 
     override fun headersBuilder() = super.headersBuilder()
@@ -48,7 +49,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         .add("Expires", "0")
         .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
         .add("Accept-Language", "en-US,en;q=0.9")
-        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
     // ==================== POPULAR ====================
     override fun popularAnimeRequest(page: Int): Request {
@@ -88,7 +89,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
                 setUrlWithoutDomain(detailUrl)
                 this.thumbnail_url = img?.attr("abs:src") ?: img?.attr("data-src") ?: ""
             }
-        }.distinctBy { it.url }.take(50) // Limit to prevent homepage carousel overload
+        }.distinctBy { it.url }.take(50)
         
         return AnimesPage(animes, false) 
     }
@@ -111,10 +112,9 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
     // ==================== SHARED PARSER ====================
     private fun parseAnimeList(response: Response, document: Document): AnimesPage {
-        // Detect Cloudflare block page to avoid parsing garbage
         if (document.title().contains("Just a moment", ignoreCase = true) || 
             (document.selectFirst("script[src*='cloudflare']") != null && document.select("a[href*='/anime/']").isEmpty())) {
-            // The interceptor will handle the challenge on the next automatic retry
+            // Cloudflare block detected, interceptor will handle it on automatic retry
         }
 
         val animes = document.select("a[href*='/anime/']").mapNotNull { aTag ->
@@ -125,7 +125,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
             val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
                 ?: aTag.selectFirst("h3, p, .title")?.text()?.trim()
                 ?: aTag.parent()?.selectFirst("h3, p, .title")?.text()?.trim()
-                ?: aTag.text().trim().take(50) // Ultimate fallback
+                ?: aTag.text().trim().take(50)
                 
             if (title.isBlank() || title.length < 3) return@mapNotNull null
             
@@ -273,5 +273,4 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
     }
 
     private fun String.encodeUri(): String = java.net.URLEncoder.encode(this, "UTF-8")
-    private inline fun <reified T> injectLazy() = lazy { Injekt.get<T>() }
 }
