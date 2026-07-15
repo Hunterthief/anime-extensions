@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.animeextension.en.yomi
 
 import android.app.Application
+import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -9,16 +11,12 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.getPreferencesLazy
-import keiyoushi.utils.preferenceScreen
-import keiyoushi.utils.switchPreference
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
-import aniyomi.lib.omniembedextractor.OmniEmbedExtractor
 import aniyomi.lib.playlistutils.PlaylistUtils
 
 class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
@@ -135,7 +133,6 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
     override fun episodeListParse(response: Response): List<SEpisode> {
         val document = response.asJsoup()
-        // Adaptive episode scraping: read directly from the grid on the detail page
         val episodeElements = document.select("div.grid a[href^='/watch/']")
         
         return episodeElements.mapIndexed { index, element ->
@@ -148,56 +145,52 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         }.reversed()
     }
 
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.asJsoup()
+    override fun extractVideos(episode: SEpisode): List<Video> {
+        val document = client.newCall(GET(episode.url, headers)).execute().asJsoup()
         val videoList = mutableListOf<Video>()
 
         // Dynamic Subtype Extraction
         val activeSubtype = document.select("button[aria-pressed='true'], button.bg-ani-accent").firstOrNull()?.text()?.trim()?.uppercase() ?: "SUB"
-        
+        val qualitySuffix = " ($activeSubtype)"
+
         // Extract iframe sources
-        val iframes = document.select("iframe")
-        iframes.forEach { iframe ->
-            val src = iframe.attr("abs:src")
-            if (src.isNotBlank()) {
+        document.select("iframe").forEach { iframe ->
+            val src = iframe.absUrl("src")
+            if (src.isNotBlank() && src.contains(".m3u8", ignoreCase = true)) {
                 try {
-                    val extractedVideos = OmniEmbedExtractor(client).videosFromUrl(src, headers)
-                    extractedVideos.forEach { video ->
-                        val qualityWithSubtype = "${video.quality} ($activeSubtype)"
-                        videoList.add(Video(video.url, qualityWithSubtype, video.url, video.headers))
-                    }
+                    videoList.addAll(
+                        playlistUtils.extractFromHls(src, headers, headers)
+                    )
                 } catch (e: Exception) {
-                    if (src.contains(".m3u8", ignoreCase = true)) {
-                        videoList.addAll(playlistUtils.extractFromHls(src, videoName = "Playlist ($activeSubtype)"))
-                    }
+                    // Ignore extraction errors
                 }
             }
         }
 
-        // Fallback: Search for direct m3u8 in script tags if iframe extraction fails
+        // Fallback: Search for direct m3u8 in script tags if iframe extraction yields nothing
         if (videoList.isEmpty()) {
             val scriptData = document.select("script").joinToString("\n") { it.data() }
             val m3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
             m3u8Regex.findAll(scriptData).forEach { match ->
                 val url = match.groupValues[1]
-                videoList.addAll(playlistUtils.extractFromHls(url, videoName = "Direct ($activeSubtype)"))
+                try {
+                    videoList.addAll(
+                        playlistUtils.extractFromHls(url, headers, headers)
+                    )
+                } catch (e: Exception) {
+                    // Ignore
+                }
             }
         }
 
         return videoList.distinctBy { it.quality }
     }
 
-    override fun videoListSelector() = throw UnsupportedOperationException("Not used")
-    override fun videoFromElement(element: Element) = throw UnsupportedOperationException("Not used")
-    override fun videoUrlParse(document: Document) = throw UnsupportedOperationException("Not used")
-
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        screen.preferenceScreen {
-            switchPreference {
-                key = "prefer_1080p"
-                title = "Prefer 1080p quality"
-                defaultValue = true
-            }
-        }
+        SwitchPreferenceCompat(screen.context).apply {
+            key = "prefer_1080p"
+            title = "Prefer 1080p quality"
+            setDefaultValue(true)
+        }.also { screen.addPreference(it) }
     }
 }
