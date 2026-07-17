@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.yomi
 
+import android.content.Context
 import androidx.preference.PreferenceScreen
 import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import aniyomi.lib.playlistutils.PlaylistUtils
@@ -19,6 +20,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 import java.net.URLEncoder
 
 class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
@@ -30,24 +33,16 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
     private val preferences by getPreferencesLazy()
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
-
-    // CORRECT CloudflareInterceptor initialization: (OkHttpClient, String)
-    override val client: OkHttpClient =
-        super.client.newBuilder()
-            .addInterceptor(
-                CloudflareInterceptor(
-                    super.client,
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                )
-            )
-            .build()
+    
+    // CRITICAL: Cloudflare Interceptor setup using the base network client
+    private val context: Context by lazy { Injekt.get() }
+    override val client: OkHttpClient = network.client.newBuilder()
+        .addInterceptor(CloudflareInterceptor(context, network.client))
+        .build()
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
         .add("Origin", baseUrl)
-        .add("Cache-Control", "no-cache, no-store, must-revalidate")
-        .add("Pragma", "no-cache")
-        .add("Expires", "0")
         .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
         .add("Accept-Language", "en-US,en;q=0.9")
         .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -71,30 +66,7 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
 
     override fun latestUpdatesParse(response: Response): AnimesPage {
         val document = response.useAsJsoup()
-        val animes = document.select("a[href*='/watch/'], a[href*='/anime/']").mapNotNull { element ->
-            runCatching {
-                val url = element.attr("href")
-                if (url.isBlank() || url == "/") return@runCatching null
-                
-                val img = element.selectFirst("img")
-                val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
-                    ?: element.selectFirst("p, h3, .title")?.text()?.trim()
-                    ?: "Unknown"
-                    
-                if (title.isBlank() || title.length < 3) return@runCatching null
-                
-                val animeId = url.substringAfter("/watch/").substringAfter("/anime/").substringBefore("/")
-                val detailUrl = if (url.contains("/watch/")) "/anime/$animeId" else url
-                
-                SAnime.create().apply {
-                    this.title = title
-                    setUrlWithoutDomain(detailUrl)
-                    this.thumbnail_url = img?.attr("abs:src") ?: img?.attr("data-src") ?: ""
-                }
-            }.getOrNull()
-        }.distinctBy { it.url }.take(50)
-        
-        return AnimesPage(animes, false)
+        return parseAnimeList(document)
     }
 
     // ==================== SEARCH ====================
@@ -114,17 +86,19 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
         return parseAnimeList(document)
     }
 
-    // ==================== SHARED PARSER ====================
+    // ==================== SHARED PARSER (Bulletproof) ====================
     private fun parseAnimeList(document: Document): AnimesPage {
-        val animes = document.select("a[href^='/anime/']").mapNotNull { element ->
+        val animes = document.select("a[href^='/anime/']").mapNotNull { aTag ->
             runCatching {
-                val url = element.attr("href")
+                val url = aTag.attr("href")
                 if (url.isBlank() || url == "/anime/" || url == "/") return@runCatching null
                 
-                val img = element.selectFirst("img")
+                val img = aTag.selectFirst("img")
+                // Fallback chain for title: img alt -> h3 tag -> p tag -> raw text
                 val title = img?.attr("alt")?.takeIf { it.isNotBlank() }
-                    ?: element.selectFirst("h3, p, .title")?.text()?.trim()
-                    ?: element.text().trim().take(50)
+                    ?: aTag.selectFirst("h3")?.text()?.trim()
+                    ?: aTag.selectFirst("p")?.text()?.trim()
+                    ?: "Unknown"
                     
                 if (title.isBlank() || title.length < 3) return@runCatching null
                 
@@ -138,29 +112,10 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
             }.getOrNull()
         }.distinctBy { it.url }
         
-        // Fallback detection if primary selector yields nothing but page has anime links
-        if (animes.isEmpty()) {
-            val fallbackAnimes = document.select("a").mapNotNull { element ->
-                runCatching {
-                    val url = element.attr("href")
-                    if (url.contains("/anime/")) {
-                        val title = element.text().trim().take(50)
-                        if (title.length >= 3) {
-                            SAnime.create().apply {
-                                this.title = "[FALLBACK] $title"
-                                setUrlWithoutDomain(url)
-                            }
-                        } else null
-                    } else null
-                }.getOrNull()
-            }.distinctBy { it.url }.take(10)
-            
-            if (fallbackAnimes.isNotEmpty()) return AnimesPage(fallbackAnimes, false)
-        }
-        
-        val hasNextPage = document.select("a[href*='page=2'], button:contains(Next), a:contains(Next)").isNotEmpty() ||
+        // Check for pagination or assume there is more if we got a full page of results
+        val hasNextPage = document.select("a[href*='page=2'], a:contains(Next), button:contains(Load More)").isNotEmpty() || 
                           (animes.isNotEmpty() && animes.size >= 18)
-        
+                          
         return AnimesPage(animes, hasNextPage)
     }
 
@@ -174,6 +129,9 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
             
             val synopsis = document.select("p, .synopsis, .description").firstOrNull()?.text()?.trim() ?: ""
             
+            val descBuilder = StringBuilder()
+            if (synopsis.isNotBlank()) descBuilder.append(synopsis).append("\n\n")
+            
             val metaBlocks = document.select("div.flex.flex-col.gap-1, .meta-blocks, .info-list")
             fun getMeta(label: String): String {
                 return metaBlocks.firstOrNull { 
@@ -181,18 +139,14 @@ class Yomi : AnimeHttpSource(), ConfigurableAnimeSource {
                 }?.select("span, .value")?.lastOrNull()?.text()?.trim() ?: ""
             }
             
-            val studio = getMeta("Studio")
             val episodesCount = getMeta("Episodes")
+            val studio = getMeta("Studio")
             
-            author = studio
             status = when {
                 document.text().contains("Airing", ignoreCase = true) || document.text().contains("Releasing", ignoreCase = true) || document.text().contains("Ongoing", ignoreCase = true) -> SAnime.ONGOING
                 document.text().contains("Completed", ignoreCase = true) || document.text().contains("Finished", ignoreCase = true) -> SAnime.COMPLETED
                 else -> SAnime.UNKNOWN
             }
-            
-            val descBuilder = StringBuilder()
-            if (synopsis.isNotBlank()) descBuilder.append(synopsis).append("\n\n")
             
             val metaLines = mutableListOf<String>()
             if (episodesCount.isNotBlank()) metaLines.add("Episodes: $episodesCount")
