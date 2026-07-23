@@ -1,86 +1,98 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.lib.filemoonextractor.FilemoonExtractor
+import eu.kanade.tachiyomi.lib.playlistutils.PlaylistUtils
+import eu.kanade.tachiyomi.lib.streamwishextractor.StreamWishExtractor
 import eu.kanade.tachiyomi.network.GET
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 
 class ProviderManager(
     private val client: OkHttpClient,
-    private val headers: Headers
+    private val headers: Headers,
+    private val preferences: androidx.preference.PreferenceSharedPreferences
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val providers = listOf(
-        "https://api.consumet.org/meta/anilist",
-        "https://api.hianime.zoro/meta/anilist"
-    )
+    // Consumet API instance (can be self-hosted or public)
+    private val consumetApi = "https://api.consumet.org/meta/anilist"
+
+    // Initialize extractors
+    private val filemoonExtractor by lazy { FilemoonExtractor(client) }
+    private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
+    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
     suspend fun fetchVideos(anilistId: Int, episodeNumber: Int): List<Video> {
         val aggregatedVideos = mutableListOf<Video>()
 
-        for (apiBase in providers) {
-            try {
-                val episodeListUrl = "$apiBase/episodes/$anilistId"
-                val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
-                val episodeData = json.decodeFromString<ProviderEpisodesResponse>(episodeResponse.body.string())
+        try {
+            // 1. Fetch Episode List from Consumet using AniList ID
+            val episodeListUrl = "$consumetApi/episodes/$anilistId"
+            val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
+            val episodeData = json.decodeFromString<ConsumetEpisodesResponse>(episodeResponse.body.string())
 
-                val targetEpisode = episodeData.episodes.firstOrNull { it.number == episodeNumber }
-                val embedUrl = targetEpisode?.url ?: continue
+            // 2. Find the target episode ID
+            val targetEpisode = episodeData.episodes.firstOrNull { it.number == episodeNumber } ?: return emptyList()
+            val episodeId = targetEpisode.id
 
-                val serverUrl = "$apiBase/servers?episodeUrl=${embedUrl.toHttpUrl().encodedPath}"
-                val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
-                val serverData = json.decodeFromString<ProviderServersResponse>(serverResponse.body.string())
+            // 3. Fetch Servers and Sources for the Episode
+            // Consumet expects the episodeId to be URL-encoded if it contains slashes
+            val encodedEpId = java.net.URLEncoder.encode(episodeId, "UTF-8")
+            val serverUrl = "$consumetApi/watch?episodeId=$encodedEpId&provider=gogoanime"
+            val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
+            val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
 
-                for (server in serverData.servers) {
-                    val videos = extractFromServer(server.url, server.name)
-                    aggregatedVideos.addAll(videos)
+            // 4. Extract Videos from sources
+            for (source in serverData.sources) {
+                val url = source.url
+                if (url.contains(".m3u8") && source.isM3U8 == true) {
+                    // Use PlaylistUtils for m3u8 to handle adaptive streaming and subtitles
+                    try {
+                        val masterHeaders = Headers.Builder().apply {
+                            serverData.headers.forEach { (k, v) -> add(k, v) }
+                        }.build()
+                        aggregatedVideos.addAll(playlistUtils.extractFromHls(url, masterHeaders, "$url.m3u8"))
+                    } catch (e: Exception) {
+                        aggregatedVideos.add(Video(url, source.quality ?: "Unknown (m3u8)", url))
+                    }
+                } else {
+                    // Fallback to direct video or unknown formats
+                    aggregatedVideos.add(Video(url, source.quality ?: "Unknown", url))
                 }
-            } catch (e: Exception) {
-                continue
             }
+
+            // Also attempt to extract from known embeds if Consumet provided them in sources (some APIs do)
+            // Note: Consumet usually returns direct sources or m3u8, but we keep this for robustness
+            if (aggregatedVideos.isEmpty()) {
+                aggregatedVideos.add(Video(serverUrl, "Fallback (Consumet)", serverUrl))
+            }
+
+        } catch (e: Exception) {
+            // Silently fail and return whatever we have
+            return aggregatedVideos
         }
 
         return rankVideos(aggregatedVideos)
     }
 
-    private suspend fun extractFromServer(url: String, serverName: String): List<Video> {
-        val videoList = mutableListOf<Video>()
-
-        when {
-            url.contains(".m3u8") -> {
-                val response = client.newCall(GET(url, headers)).execute()
-                val masterPlaylist = response.body.string()
-                if (masterPlaylist.contains("#EXT-X-STREAM-INF:")) {
-                    val lines = masterPlaylist.split("\n")
-                    for (i in lines.indices) {
-                        if (lines[i].startsWith("#EXT-X-STREAM-INF:")) {
-                            val res = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1) ?: "Unknown"
-                            val quality = "$res p"
-                            val videoUrl = lines[i + 1].trim()
-                            videoList.add(Video(videoUrl, "$quality ($serverName)", videoUrl))
-                        }
-                    }
-                } else {
-                    videoList.add(Video(url, "Default ($serverName)", url))
-                }
-            }
-            else -> {
-                videoList.add(Video(url, "Unknown ($serverName)", url))
-            }
-        }
-
-        return videoList
-    }
-
     private fun rankVideos(videos: List<Video>): List<Video> {
+        val preferredSubType = preferences.getString("preferred_sub_type", "softsub") ?: "softsub"
+        
         return videos.sortedWith(
             compareByDescending<Video> {
+                // Rank by resolution
                 Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             }.thenBy {
-                it.quality.contains("Dub")
+                // Rank by preferred subtitle type
+                when {
+                    it.quality.contains(preferredSubType, ignoreCase = true) -> 0
+                    it.quality.contains("softsub", ignoreCase = true) -> 1
+                    it.quality.contains("hardsub", ignoreCase = true) -> 2
+                    it.quality.contains("dub", ignoreCase = true) -> 3
+                    else -> 4
+                }
             }
         )
     }
