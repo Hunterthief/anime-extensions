@@ -13,13 +13,11 @@ class ProviderManager(
     private val client: OkHttpClient,
     private val headers: Headers
 ) {
-    // Conceptual APIs representing standard aggregator backends
     private val providers = listOf(
         "https://api.consumet.org/meta/anilist",
         "https://api.hianime.zoro/meta/anilist"
     )
 
-    // Initialize extractors with the network client
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
 
@@ -28,26 +26,22 @@ class ProviderManager(
 
         for (apiBase in providers) {
             try {
-                // 1. Fetch Episode Link from Provider using AniList ID
                 val episodeListUrl = "$apiBase/episodes/$anilistId"
                 val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
                 val episodeData = episodeResponse.parseAs<ProviderEpisodesResponse>()
-                
+
                 val targetEpisode = episodeData.episodes.firstOrNull { it.number == episodeNumber }
                 val embedUrl = targetEpisode?.url ?: continue
 
-                // 2. Fetch Servers for the Episode
                 val serverUrl = "$apiBase/servers?episodeUrl=${embedUrl.toHttpUrl().encodedPath}"
                 val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
                 val serverData = serverResponse.parseAs<ProviderServersResponse>()
 
-                // 3. Extract Videos from each server using shared libraries
                 for (server in serverData.servers) {
                     val videos = extractFromServer(server.url, server.name)
                     aggregatedVideos.addAll(videos)
                 }
             } catch (e: Exception) {
-                // Silently fail one provider and try the next to ensure maximum availability
                 continue
             }
         }
@@ -57,8 +51,7 @@ class ProviderManager(
 
     private suspend fun extractFromServer(url: String, serverName: String): List<Video> {
         val videoList = mutableListOf<Video>()
-        
-        // Dynamic extraction based on URL pattern, routing to shared libraries
+
         when {
             url.contains(".m3u8") -> {
                 val response = client.newCall(GET(url, headers)).execute()
@@ -67,8 +60,9 @@ class ProviderManager(
                     val lines = masterPlaylist.split("\n")
                     for (i in lines.indices) {
                         if (lines[i].startsWith("#EXT-X-STREAM-INF:")) {
-                            val quality = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1) + "p"
-                            val videoUrl = lines[i+1].trim()
+                            val res = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1) ?: "Unknown"
+                            val quality = "$res p"
+                            val videoUrl = lines[i + 1].trim()
                             videoList.add(Video(videoUrl, "$quality ($serverName)", videoUrl))
                         }
                     }
@@ -83,7 +77,6 @@ class ProviderManager(
                 videoList.addAll(streamwishExtractor.videosFromUrl(url, videoName = "$serverName"))
             }
             else -> {
-                // Fallback for direct mp4 or unknown formats
                 videoList.add(Video(url, "Unknown ($serverName)", url))
             }
         }
@@ -93,10 +86,10 @@ class ProviderManager(
 
     private fun rankVideos(videos: List<Video>): List<Video> {
         return videos.sortedWith(
-            compareByDescending<Video> { 
-                Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0 
-            }.thenBy { 
-                it.quality.contains("Dub") 
+            compareByDescending<Video> {
+                Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            }.thenBy {
+                it.quality.contains("Dub")
             }
         )
     }
