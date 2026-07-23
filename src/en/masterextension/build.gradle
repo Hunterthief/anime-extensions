@@ -1,9 +1,13 @@
-apply plugin: "keiyoushi.plugins.extension.legacy"
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'kotlinx-serialization'
 
 android {
     namespace = "eu.kanade.tachiyomi.animeextension.en.masterextension"
+    compileSdk = 34
 
     defaultConfig {
+        minSdk = 21
         manifestPlaceholders["sourceName"] = "Master Extension"
         manifestPlaceholders["sourceClass"] = "MasterExtension"
         manifestPlaceholders["sourceVersion"] = "1.0.0"
@@ -12,9 +16,16 @@ android {
 
     sourceSets {
         getByName("main") {
-            // Maps the custom source path to Gradle
             java.srcDirs("src")
         }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
     }
 }
 
