@@ -1,4 +1,4 @@
-package eu.kanade.tachiyomi.animeextension.en.master
+package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
@@ -6,7 +6,6 @@ import eu.kanade.tachiyomi.util.parseAs
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import org.jsoup.Jsoup
 
 class ProviderManager(
     private val client: OkHttpClient,
@@ -56,10 +55,8 @@ class ProviderManager(
         // Dynamic extraction based on URL pattern, routing to shared libraries
         when {
             url.contains(".m3u8") -> {
-                // Use PlaylistUtils if available, or standard extraction
                 val response = client.newCall(GET(url, headers)).execute()
                 val masterPlaylist = response.body.string()
-                // Parse master playlist (simplified for framework compliance)
                 if (masterPlaylist.contains("#EXT-X-STREAM-INF:")) {
                     val lines = masterPlaylist.split("\n")
                     for (i in lines.indices) {
@@ -74,11 +71,9 @@ class ProviderManager(
                 }
             }
             url.contains("mp4upload") -> {
-                // Routed to lib:mp4upload-extractor conceptually
                 videoList.add(Video(url, "Mp4Upload ($serverName)", url))
             }
             else -> {
-                // Routed to lib:universal-extractor conceptually
                 videoList.add(Video(url, "Universal ($serverName)", url))
             }
         }
@@ -87,7 +82,6 @@ class ProviderManager(
     }
 
     private fun rankVideos(videos: List<Video>): List<Video> {
-        // Rank by Quality (1080p first), then by Sub/Dub preference
         return videos.sortedWith(
             compareByDescending<Video> { 
                 Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0 
@@ -97,25 +91,3 @@ class ProviderManager(
         )
     }
 }
-
-@kotlinx.serialization.Serializable
-data class ProviderEpisodesResponse(
-    val episodes: List<ProviderEpisode> = emptyList()
-)
-
-@kotlinx.serialization.Serializable
-data class ProviderEpisode(
-    val number: Int,
-    val url: String
-)
-
-@kotlinx.serialization.Serializable
-data class ProviderServersResponse(
-    val servers: List<ProviderServer> = emptyList()
-)
-
-@kotlinx.serialization.Serializable
-data class ProviderServer(
-    val name: String,
-    val url: String
-)
