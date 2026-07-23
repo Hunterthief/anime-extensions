@@ -1,6 +1,5 @@
-package eu.kanade.tachiyomi.animeextension.en.master
+package eu.kanade.tachiyomi.animeextension.en.masterextension
 
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -53,4 +52,26 @@ data class AniListCover(
 data class AniListNextAiring(
     val episode: Int? = null,
     val airingAt: Long? = null
+)
+
+@kotlinx.serialization.Serializable
+data class ProviderEpisodesResponse(
+    val episodes: List<ProviderEpisode> = emptyList()
+)
+
+@kotlinx.serialization.Serializable
+data class ProviderEpisode(
+    val number: Int,
+    val url: String
+)
+
+@kotlinx.serialization.Serializable
+data class ProviderServersResponse(
+    val servers: List<ProviderServer> = emptyList()
+)
+
+@kotlinx.serialization.Serializable
+data class ProviderServer(
+    val name: String,
+    val url: String
 )
