@@ -1,4 +1,4 @@
-package eu.kanade.tachiyomi.animeextension.en.master
+package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
