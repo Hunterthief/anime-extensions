@@ -14,11 +14,6 @@ dependencies {
     implementation(project(':lib:doodextractor'))
     implementation(project(':lib:vidhideextractor'))
     implementation(project(':lib:vidmolyextractor'))
-    implementation(project(':lib:gogostreamextractor'))
-    implementation(project(':lib:megacloudextractor'))
-    implementation(project(':lib:rapidcloudextractor'))
-    implementation(project(':lib:streamlareextractor'))
     implementation(project(':lib:okruextractor'))
-    implementation(project(':lib:megaupextractor'))
-    implementation(project(':lib:omniembedextractor'))
+    implementation(project(':lib:streamlareextractor'))
 }
