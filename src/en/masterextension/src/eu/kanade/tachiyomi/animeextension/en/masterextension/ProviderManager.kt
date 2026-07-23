@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.lib.filemoonextractor.FilemoonExtractor
+import eu.kanade.tachiyomi.lib.streamwishextractor.StreamWishExtractor
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.util.parseAs
 import okhttp3.Headers
@@ -16,6 +18,10 @@ class ProviderManager(
         "https://api.consumet.org/meta/anilist",
         "https://api.hianime.zoro/meta/anilist"
     )
+
+    // Initialize extractors with the network client
+    private val filemoonExtractor by lazy { FilemoonExtractor(client) }
+    private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
 
     suspend fun fetchVideos(anilistId: Int, episodeNumber: Int): List<Video> {
         val aggregatedVideos = mutableListOf<Video>()
@@ -35,7 +41,7 @@ class ProviderManager(
                 val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
                 val serverData = serverResponse.parseAs<ProviderServersResponse>()
 
-                // 3. Extract Videos from each server
+                // 3. Extract Videos from each server using shared libraries
                 for (server in serverData.servers) {
                     val videos = extractFromServer(server.url, server.name)
                     aggregatedVideos.addAll(videos)
@@ -70,11 +76,15 @@ class ProviderManager(
                     videoList.add(Video(url, "Default ($serverName)", url))
                 }
             }
-            url.contains("mp4upload") -> {
-                videoList.add(Video(url, "Mp4Upload ($serverName)", url))
+            url.contains("filemoon") || url.contains("moon") -> {
+                videoList.addAll(filemoonExtractor.videosFromUrl(url, "$serverName"))
+            }
+            url.contains("streamwish") || url.contains("wish") || url.contains("swhoi") -> {
+                videoList.addAll(streamwishExtractor.videosFromUrl(url, videoName = "$serverName"))
             }
             else -> {
-                videoList.add(Video(url, "Universal ($serverName)", url))
+                // Fallback for direct mp4 or unknown formats
+                videoList.add(Video(url, "Unknown ($serverName)", url))
             }
         }
 
