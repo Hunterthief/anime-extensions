@@ -1,10 +1,8 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.lib.filemoonextractor.FilemoonExtractor
-import eu.kanade.tachiyomi.lib.streamwishextractor.StreamWishExtractor
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.util.parseAs
+import kotlinx.serialization.json.Json
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -13,13 +11,12 @@ class ProviderManager(
     private val client: OkHttpClient,
     private val headers: Headers
 ) {
+    private val json = Json { ignoreUnknownKeys = true }
+
     private val providers = listOf(
         "https://api.consumet.org/meta/anilist",
         "https://api.hianime.zoro/meta/anilist"
     )
-
-    private val filemoonExtractor by lazy { FilemoonExtractor(client) }
-    private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
 
     suspend fun fetchVideos(anilistId: Int, episodeNumber: Int): List<Video> {
         val aggregatedVideos = mutableListOf<Video>()
@@ -28,14 +25,14 @@ class ProviderManager(
             try {
                 val episodeListUrl = "$apiBase/episodes/$anilistId"
                 val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
-                val episodeData = episodeResponse.parseAs<ProviderEpisodesResponse>()
+                val episodeData = json.decodeFromString<ProviderEpisodesResponse>(episodeResponse.body.string())
 
                 val targetEpisode = episodeData.episodes.firstOrNull { it.number == episodeNumber }
                 val embedUrl = targetEpisode?.url ?: continue
 
                 val serverUrl = "$apiBase/servers?episodeUrl=${embedUrl.toHttpUrl().encodedPath}"
                 val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
-                val serverData = serverResponse.parseAs<ProviderServersResponse>()
+                val serverData = json.decodeFromString<ProviderServersResponse>(serverResponse.body.string())
 
                 for (server in serverData.servers) {
                     val videos = extractFromServer(server.url, server.name)
@@ -69,12 +66,6 @@ class ProviderManager(
                 } else {
                     videoList.add(Video(url, "Default ($serverName)", url))
                 }
-            }
-            url.contains("filemoon") || url.contains("moon") -> {
-                videoList.addAll(filemoonExtractor.videosFromUrl(url, "$serverName"))
-            }
-            url.contains("streamwish") || url.contains("wish") || url.contains("swhoi") -> {
-                videoList.addAll(streamwishExtractor.videosFromUrl(url, videoName = "$serverName"))
             }
             else -> {
                 videoList.add(Video(url, "Unknown ($serverName)", url))
