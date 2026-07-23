@@ -5,7 +5,6 @@ import aniyomi.lib.doodextractor.DoodExtractor
 import aniyomi.lib.filemoonextractor.FilemoonExtractor
 import aniyomi.lib.mp4uploadextractor.Mp4uploadExtractor
 import aniyomi.lib.okruextractor.OkruExtractor
-import aniyomi.lib.playlistutils.PlaylistUtils
 import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
 import aniyomi.lib.vidhideextractor.VidHideExtractor
@@ -28,7 +27,6 @@ class ProviderManager(
     private val providers = listOf("gogoanime", "zoro", "9anime", "animepahe")
 
     // Initialize shared extractors
-    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
     private val mp4uploadExtractor by lazy { Mp4uploadExtractor(client) }
@@ -62,11 +60,26 @@ class ProviderManager(
                         serverData.headers.forEach { (k, v) -> add(k, v) }
                     }.build()
 
-                    // 3. Route URLs to the appropriate shared library extractor
+                    // 3. Route URLs to the appropriate extraction logic
                     when {
                         url.contains(".m3u8") && source.isM3U8 == true -> {
+                            // Manual m3u8 parsing
                             try {
-                                aggregatedVideos.addAll(playlistUtils.extractFromHls(url, srcHeaders, url))
+                                val m3u8Response = client.newCall(GET(url, srcHeaders)).execute()
+                                val masterPlaylist = m3u8Response.body.string()
+                                if (masterPlaylist.contains("#EXT-X-STREAM-INF:")) {
+                                    val lines = masterPlaylist.split("\n")
+                                    for (i in lines.indices) {
+                                        if (lines[i].startsWith("#EXT-X-STREAM-INF:")) {
+                                            val res = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1) ?: "Unknown"
+                                            val quality = "$provider $res p"
+                                            val videoUrl = lines[i + 1].trim()
+                                            aggregatedVideos.add(Video(videoUrl, quality, videoUrl, headers = srcHeaders))
+                                        }
+                                    }
+                                } else {
+                                    aggregatedVideos.add(Video(url, "$provider ${source.quality ?: "HLS"}", url, headers = srcHeaders))
+                                }
                             } catch (e: Exception) {
                                 aggregatedVideos.add(Video(url, "$provider ${source.quality ?: "HLS"}", url, headers = srcHeaders))
                             }
@@ -78,8 +91,8 @@ class ProviderManager(
                             aggregatedVideos.addAll(streamwishExtractor.videosFromUrl(url, "$provider StreamWish"))
                         }
                         url.contains("mp4upload") -> {
-                            // Mp4uploadExtractor in yuzono expects a String prefix
-                            aggregatedVideos.addAll(mp4uploadExtractor.videosFromUrl(url, "$provider Mp4Upload"))
+                            // Mp4uploadExtractor expects Headers
+                            aggregatedVideos.addAll(mp4uploadExtractor.videosFromUrl(url, headers))
                         }
                         url.contains("dood") -> {
                             aggregatedVideos.addAll(doodExtractor.videosFromUrl(url))
