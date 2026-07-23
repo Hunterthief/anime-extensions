@@ -1,13 +1,20 @@
 apply plugin: "keiyoushi.plugins.extension.legacy"
 
 android {
-    namespace = "eu.kanade.tachiyomi.animeextension.en.master"
+    namespace = "eu.kanade.tachiyomi.animeextension.en.masterextension"
 
     defaultConfig {
         manifestPlaceholders["sourceName"] = "Master Extension"
         manifestPlaceholders["sourceClass"] = "MasterExtension"
         manifestPlaceholders["sourceVersion"] = "1.0.0"
         manifestPlaceholders["sourceAuthor"] = "Hologos"
+    }
+
+    sourceSets {
+        getByName("main") {
+            // Maps the custom source path to Gradle
+            java.srcDirs("src")
+        }
     }
 }
 
