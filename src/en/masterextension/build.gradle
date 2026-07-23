@@ -1,38 +1,20 @@
-apply plugin: 'com.android.application'
-apply plugin: 'org.jetbrains.kotlin.android'
-apply plugin: 'kotlinx-serialization'
+apply plugin: "keiyoushi.plugins.extension.legacy"
 
 android {
     namespace = "eu.kanade.tachiyomi.animeextension.en.masterextension"
-    compileSdk = 34
 
     defaultConfig {
-        minSdk = 21
         manifestPlaceholders["sourceName"] = "Master Extension"
         manifestPlaceholders["sourceClass"] = "MasterExtension"
         manifestPlaceholders["sourceVersion"] = "1.0.0"
         manifestPlaceholders["sourceAuthor"] = "Hologos"
     }
-
-    sourceSets {
-        getByName("main") {
-            java.srcDirs("src")
-        }
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
 }
 
 dependencies {
-    implementation(project(':lib:playlistutils'))
-    implementation(project(':lib:universal-extractor'))
-    implementation(project(':lib:mp4upload-extractor'))
-    implementation(project(':lib:streamtape-extractor'))
-    implementation(project(':lib:dood-extractor'))
+    implementation(project(":lib:playlistutils"))
+    implementation(project(":lib:universal-extractor"))
+    implementation(project(":lib:mp4upload-extractor"))
+    implementation(project(":lib:streamtape-extractor"))
+    implementation(project(":lib:dood-extractor"))
 }
