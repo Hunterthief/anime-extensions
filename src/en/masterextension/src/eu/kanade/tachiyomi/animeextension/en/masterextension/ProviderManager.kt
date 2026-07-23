@@ -2,8 +2,6 @@ package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import android.content.SharedPreferences
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.lib.filemoonextractor.FilemoonExtractor
-import eu.kanade.tachiyomi.lib.streamwishextractor.StreamWishExtractor
 import eu.kanade.tachiyomi.network.GET
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
@@ -18,10 +16,6 @@ class ProviderManager(
 
     // Consumet API instance
     private val consumetApi = "https://api.consumet.org/meta/anilist"
-
-    // Initialize extractors
-    private val filemoonExtractor by lazy { FilemoonExtractor(client) }
-    private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
 
     suspend fun fetchVideos(anilistId: Int, episodeNumber: Int): List<Video> {
         val aggregatedVideos = mutableListOf<Video>()
@@ -63,9 +57,11 @@ class ProviderManager(
                         aggregatedVideos.add(Video(url, source.quality ?: "Unknown (m3u8)", url))
                     }
                 } else if (url.contains("filemoon") || url.contains("moon")) {
-                    aggregatedVideos.addAll(filemoonExtractor.videosFromUrl(url, "Filemoon"))
+                    // Basic fallback for Filemoon embeds
+                    aggregatedVideos.add(Video(url, "Filemoon", url))
                 } else if (url.contains("streamwish") || url.contains("wish") || url.contains("swhoi")) {
-                    aggregatedVideos.addAll(streamwishExtractor.videosFromUrl(url, "StreamWish"))
+                    // Basic fallback for StreamWish embeds
+                    aggregatedVideos.add(Video(url, "StreamWish", url))
                 } else {
                     aggregatedVideos.add(Video(url, source.quality ?: "Unknown", url))
                 }
