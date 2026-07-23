@@ -54,24 +54,28 @@ data class AniListNextAiring(
     val airingAt: Long? = null
 )
 
+// Consumet API DTOs
 @Serializable
-data class ProviderEpisodesResponse(
-    val episodes: List<ProviderEpisode> = emptyList()
+data class ConsumetEpisodesResponse(
+    val episodes: List<ConsumetEpisode> = emptyList()
 )
 
 @Serializable
-data class ProviderEpisode(
+data class ConsumetEpisode(
     val number: Int,
-    val url: String
+    val id: String, // Consumet uses 'id' for the episode identifier to fetch servers
+    val url: String? = null
 )
 
 @Serializable
-data class ProviderServersResponse(
-    val servers: List<ProviderServer> = emptyList()
+data class ConsumetServersResponse(
+    val sources: List<ConsumetSource> = emptyList(),
+    val headers: Map<String, String> = emptyMap()
 )
 
 @Serializable
-data class ProviderServer(
-    val name: String,
-    val url: String
+data class ConsumetSource(
+    val url: String,
+    val quality: String? = null,
+    val isM3U8: Boolean? = null
 )
