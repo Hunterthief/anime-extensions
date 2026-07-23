@@ -3,12 +3,9 @@ package eu.kanade.tachiyomi.animeextension.en.masterextension
 import android.content.SharedPreferences
 import aniyomi.lib.doodextractor.DoodExtractor
 import aniyomi.lib.filemoonextractor.FilemoonExtractor
-import aniyomi.lib.gogostreamextractor.GogoStreamExtractor
-import aniyomi.lib.megacloudextractor.MegaCloudExtractor
 import aniyomi.lib.mp4uploadextractor.Mp4uploadExtractor
 import aniyomi.lib.okruextractor.OkruExtractor
 import aniyomi.lib.playlistutils.PlaylistUtils
-import aniyomi.lib.rapidcloudextractor.RapidCloudExtractor
 import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
 import aniyomi.lib.vidhideextractor.VidHideExtractor
@@ -38,9 +35,6 @@ class ProviderManager(
     private val doodExtractor by lazy { DoodExtractor(client) }
     private val vidHideExtractor by lazy { VidHideExtractor(client, headers) }
     private val vidMolyExtractor by lazy { VidMolyExtractor(client) }
-    private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
-    private val megaCloudExtractor by lazy { MegaCloudExtractor(client) }
-    private val rapidCloudExtractor by lazy { RapidCloudExtractor(client, headers) }
     private val streamlareExtractor by lazy { StreamlareExtractor(client) }
     private val okruExtractor by lazy { OkruExtractor(client) }
 
@@ -72,7 +66,7 @@ class ProviderManager(
                     when {
                         url.contains(".m3u8") && source.isM3U8 == true -> {
                             try {
-                                aggregatedVideos.addAll(playlistUtils.extractFromHls(url, srcHeaders, "$url.m3u8"))
+                                aggregatedVideos.addAll(playlistUtils.extractFromHls(url, srcHeaders))
                             } catch (e: Exception) {
                                 aggregatedVideos.add(Video(url, "$provider ${source.quality ?: "HLS"}", url, headers = srcHeaders))
                             }
@@ -94,15 +88,6 @@ class ProviderManager(
                         }
                         url.contains("vidmoly") -> {
                             aggregatedVideos.addAll(vidMolyExtractor.videosFromUrl(url))
-                        }
-                        url.contains("gogostream") || url.contains("goload") -> {
-                            aggregatedVideos.addAll(gogoStreamExtractor.videosFromUrl(url, headers))
-                        }
-                        url.contains("megacloud") -> {
-                            aggregatedVideos.addAll(megaCloudExtractor.videosFromUrl(url))
-                        }
-                        url.contains("rapidcloud") -> {
-                            aggregatedVideos.addAll(rapidCloudExtractor.videosFromUrl(url))
                         }
                         url.contains("streamlare") -> {
                             aggregatedVideos.addAll(streamlareExtractor.videosFromUrl(url))
