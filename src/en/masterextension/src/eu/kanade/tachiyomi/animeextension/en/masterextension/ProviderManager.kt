@@ -78,7 +78,7 @@ class ProviderManager(
                             aggregatedVideos.addAll(streamwishExtractor.videosFromUrl(url, "$provider StreamWish"))
                         }
                         url.contains("mp4upload") -> {
-                            aggregatedVideos.addAll(mp4uploadExtractor.videosFromUrl(url, headers))
+                            aggregatedVideos.addAll(mp4uploadExtractor.videosFromUrl(url, "$provider Mp4Upload"))
                         }
                         url.contains("dood") -> {
                             aggregatedVideos.addAll(doodExtractor.videosFromUrl(url))
