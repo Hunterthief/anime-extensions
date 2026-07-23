@@ -37,7 +37,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     override fun popularAnimeRequest(page: Int): Request {
-        val query = """query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, sort: POPULARITY_DESC) { id title { romaji english } coverImage { large } episodes } } }"""
+        val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, sort: POPULARITY_DESC) { id title { romaji english } coverImage { large } episodes } } }"
         val variables = """{"page": $page}"""
         return buildGraphQLRequest(query, variables)
     }
@@ -56,7 +56,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     override fun latestUpdatesRequest(page: Int): Request {
-        val query = """query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, status: RELEASING, sort: START_DATE_DESC) { id title { romaji english } coverImage { large } episodes } } }"""
+        val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, status: RELEASING, sort: START_DATE_DESC) { id title { romaji english } coverImage { large } episodes } } }"
         val variables = """{"page": $page}"""
         return buildGraphQLRequest(query, variables)
     }
@@ -68,7 +68,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val formatFilter = filters.find { it is MasterFilters.FormatFilter } as? MasterFilters.FormatFilter
         val sortFilter = filters.find { it is MasterFilters.SortFilter } as? MasterFilters.SortFilter
 
-        val gqlQuery = """query (\$page: Int, \$search: String, \$genre: String, \$format: String, \$sort: [MediaSort]) { Page(page: \$page, perPage: 20) { media(type: ANIME, search: \$search, genre: \$genre, format: \$format, sort: \$sort) { id title { romaji english } coverImage { large } episodes } } }"""
+        val gqlQuery = "query (\$page: Int, \$search: String, \$genre: String, \$format: String, \$sort: [MediaSort]) { Page(page: \$page, perPage: 20) { media(type: ANIME, search: \$search, genre: \$genre, format: \$format, sort: \$sort) { id title { romaji english } coverImage { large } episodes } } }"
 
         val genreStr = if (genreFilter?.values?.get(genreFilter.state) == "Any") null else genreFilter?.values?.get(genreFilter.state)
         val formatStr = if (formatFilter?.values?.get(formatFilter.state) == "Any") null else formatFilter?.values?.get(formatFilter.state)
@@ -87,7 +87,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     override fun animeDetailsRequest(anime: SAnime): Request {
-        val query = """query (\$id: Int) { Media(id: \$id, type: ANIME) { id title { romaji english native } description episodes status season seasonYear format genres averageScore nextAiringEpisode { episode airingAt } } }"""
+        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id title { romaji english native } description episodes status season seasonYear format genres averageScore nextAiringEpisode { episode airingAt } } }"
         val variables = """{"id": ${anime.url.toInt()}}"""
         return buildGraphQLRequest(query, variables)
     }
