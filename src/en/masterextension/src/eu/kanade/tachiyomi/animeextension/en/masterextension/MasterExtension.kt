@@ -10,8 +10,8 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.util.parseAs
 import keiyoushi.utils.getPreferencesLazy
+import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -26,6 +26,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override val supportsLatest = true
 
     private val preferences by getPreferencesLazy()
+    private val json = Json { ignoreUnknownKeys = true }
 
     private val providerManager by lazy { ProviderManager(client, headers) }
 
@@ -42,7 +43,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     override fun popularAnimeParse(response: Response): AnimesPage {
-        val data = response.parseAs<AniListResponse>().data?.Page?.media ?: emptyList()
+        val data = json.decodeFromString<AniListResponse>(response.body.string()).data?.Page?.media ?: emptyList()
         val animes = data.map { media ->
             SAnime.create().apply {
                 url = media.id.toString()
@@ -92,7 +93,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     override fun animeDetailsParse(response: Response): SAnime {
-        val media = response.parseAs<AniListResponse>().data?.Media
+        val media = json.decodeFromString<AniListResponse>(response.body.string()).data?.Media
         return SAnime.create().apply {
             title = media?.title?.romaji ?: media?.title?.english ?: "Unknown"
             description = media?.description?.let { Jsoup.parse(it).text() }
@@ -110,7 +111,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun episodeListRequest(anime: SAnime): Request = animeDetailsRequest(anime)
 
     override fun episodeListParse(response: Response): List<SEpisode> {
-        val media = response.parseAs<AniListResponse>().data?.Media
+        val media = json.decodeFromString<AniListResponse>(response.body.string()).data?.Media
         val episodeCount = media?.episodes ?: 0
         val episodes = mutableListOf<SEpisode>()
 
