@@ -5,9 +5,3 @@ ext {
 }
 
 apply plugin: "kei.plugins.extension.legacy"
-
-dependencies {
-    implementation(project(':lib:playlistutils'))
-    implementation(project(':lib:filemoonextractor'))
-    implementation(project(':lib:streamwishextractor'))
-}
