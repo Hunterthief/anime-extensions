@@ -28,7 +28,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     private val preferences by getPreferencesLazy()
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val providerManager by lazy { ProviderManager(client, headers) }
+    // Pass preferences to ProviderManager
+    private val providerManager by lazy { ProviderManager(client, headers, preferences) }
 
     private fun buildGraphQLRequest(query: String, variables: String): Request {
         val payload = """{"query": "$query", "variables": $variables}"""
