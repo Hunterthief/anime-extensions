@@ -1,0 +1,20 @@
+apply plugin: "keiyoushi.plugins.extension.legacy"
+
+android {
+    namespace = "eu.kanade.tachiyomi.animeextension.en.master"
+
+    defaultConfig {
+        manifestPlaceholders["sourceName"] = "Master Extension"
+        manifestPlaceholders["sourceClass"] = "MasterExtension"
+        manifestPlaceholders["sourceVersion"] = "1.0.0"
+        manifestPlaceholders["sourceAuthor"] = "Hologos"
+    }
+}
+
+dependencies {
+    implementation(project(':lib:playlistutils'))
+    implementation(project(':lib:universal-extractor'))
+    implementation(project(':lib:mp4upload-extractor'))
+    implementation(project(':lib:streamtape-extractor'))
+    implementation(project(':lib:dood-extractor'))
+}
