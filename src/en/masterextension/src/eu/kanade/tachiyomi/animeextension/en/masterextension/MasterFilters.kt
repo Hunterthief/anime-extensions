@@ -8,8 +8,8 @@ object MasterFilters {
     class GenreFilter : AnimeFilter.Select<String>(
         "Genre",
         arrayOf(
-            "Any", "Action", "Adventure", "Comedy", "Drama", "Fantasy", 
-            "Horror", "Mystery", "Romance", "Sci-Fi", "Slice of Life", 
+            "Any", "Action", "Adventure", "Comedy", "Drama", "Fantasy",
+            "Horror", "Mystery", "Romance", "Sci-Fi", "Slice of Life",
             "Sports", "Supernatural", "Thriller"
         )
     )
