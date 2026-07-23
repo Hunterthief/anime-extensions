@@ -66,7 +66,7 @@ class ProviderManager(
                     when {
                         url.contains(".m3u8") && source.isM3U8 == true -> {
                             try {
-                                aggregatedVideos.addAll(playlistUtils.extractFromHls(url, srcHeaders))
+                                aggregatedVideos.addAll(playlistUtils.extractFromHls(url, srcHeaders, url))
                             } catch (e: Exception) {
                                 aggregatedVideos.add(Video(url, "$provider ${source.quality ?: "HLS"}", url, headers = srcHeaders))
                             }
@@ -78,6 +78,7 @@ class ProviderManager(
                             aggregatedVideos.addAll(streamwishExtractor.videosFromUrl(url, "$provider StreamWish"))
                         }
                         url.contains("mp4upload") -> {
+                            // Mp4uploadExtractor in yuzono expects a String prefix
                             aggregatedVideos.addAll(mp4uploadExtractor.videosFromUrl(url, "$provider Mp4Upload"))
                         }
                         url.contains("dood") -> {
