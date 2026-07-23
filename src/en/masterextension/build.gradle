@@ -1,11 +1,11 @@
-apply plugin: "keiyoushi.plugins.extension.legacy"
+apply plugin: "keiyoushi.plugins.extension.anime"
 
 android {
     namespace = "eu.kanade.tachiyomi.animeextension.en.masterextension"
 
     defaultConfig {
         manifestPlaceholders["sourceName"] = "Master Extension"
-        manifestPlaceholders["sourceClass"] = "MasterExtension"
+        manifestPlaceholders["sourceClass"] = ".MasterExtension"
         manifestPlaceholders["sourceVersion"] = "1.0.0"
         manifestPlaceholders["sourceAuthor"] = "Hologos"
     }
