@@ -1,11 +1,11 @@
-package eu.kanade.tachiyomi.animeextension.en.master
+package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import android.app.Application
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
-import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -20,8 +20,6 @@ import okhttp3.Response
 import org.jsoup.Jsoup
 import uy.kohesive.injekt.InjektKt
 import uy.kohesive.injekt.api.get
-import java.text.SimpleDateFormat
-import java.util.Locale
 
 class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
