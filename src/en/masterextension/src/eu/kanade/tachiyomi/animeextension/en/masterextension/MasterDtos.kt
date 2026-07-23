@@ -54,23 +54,23 @@ data class AniListNextAiring(
     val airingAt: Long? = null
 )
 
-@kotlinx.serialization.Serializable
+@Serializable
 data class ProviderEpisodesResponse(
     val episodes: List<ProviderEpisode> = emptyList()
 )
 
-@kotlinx.serialization.Serializable
+@Serializable
 data class ProviderEpisode(
     val number: Int,
     val url: String
 )
 
-@kotlinx.serialization.Serializable
+@Serializable
 data class ProviderServersResponse(
     val servers: List<ProviderServer> = emptyList()
 )
 
-@kotlinx.serialization.Serializable
+@Serializable
 data class ProviderServer(
     val name: String,
     val url: String
