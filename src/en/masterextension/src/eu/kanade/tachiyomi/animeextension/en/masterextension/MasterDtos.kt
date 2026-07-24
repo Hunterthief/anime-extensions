@@ -67,7 +67,19 @@ data class AniListNextAiring(
     val timeUntilAiring: Long? = null
 )
 
-// Enime API returns an object with an episodes array
+// Jikan API (MAL) DTOs for Episode Titles
+@Serializable
+data class JikanEpisodesResponse(
+    val data: List<JikanEpisode> = emptyList()
+)
+
+@Serializable
+data class JikanEpisode(
+    val mal_id: Int,
+    val title: String? = null
+)
+
+// Consumet/Enime DTOs
 @Serializable
 data class EnimeAnimeResponse(
     val episodes: List<ConsumetEpisode> = emptyList()
