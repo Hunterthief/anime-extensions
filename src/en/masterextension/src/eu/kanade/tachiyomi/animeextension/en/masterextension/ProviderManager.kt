@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import android.content.SharedPreferences
-import android.util.Base64
 import aniyomi.lib.doodextractor.DoodExtractor
 import aniyomi.lib.filemoonextractor.FilemoonExtractor
 import aniyomi.lib.gogostreamextractor.GogoStreamExtractor
@@ -11,17 +10,15 @@ import aniyomi.lib.playlistutils.PlaylistUtils
 import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.utils.bodyString
 import keiyoushi.utils.parseAs
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
+import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.security.MessageDigest
-import javax.crypto.Cipher
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 class ProviderManager(
     private val client: OkHttpClient,
@@ -44,25 +41,19 @@ class ProviderManager(
             add("Accept", "*/*")
             add("Content-Type", "application/json")
             add("Host", "api.allanime.day")
-            add("Origin", "https://youtu-chan.com")
+            add("Origin", "https://allmanga.to")
             add("Referer", "https://allmanga.to/")
             add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         }.build()
     }
 
-    // XOR keys indexed by source-URL prefix type: '--'=3 '#-'=2 '##'=1 '-#'=4 '#'=0
     private val xorKeys = arrayOf(
-        "allanimenews",
-        "1234567890123456789",
-        "1234567890123456789012345",
-        "s5feqxw21",
-        "feqx1",
+        "allanimenews".toCharArray(),
+        "1234567890123456789".toCharArray(),
+        "1234567890123456789012345".toCharArray(),
+        "s5feqxw21".toCharArray(),
+        "feqx1".toCharArray(),
     )
-
-    // Pre-compute cumulative XOR mask for each key (XOR of all char codes)
-    private val xorMasks = xorKeys.map { key ->
-        key.fold(0) { mask, ch -> mask xor ch.code }
-    }.toIntArray()
 
     private fun String.decryptSource(): String {
         val (hexPayload, keyType) = when {
@@ -74,35 +65,18 @@ class ProviderManager(
             else -> this to null
         }
 
+        if (keyType == null) return this
+
+        val key = xorKeys[keyType]
         val parsedChunks = try {
             hexPayload.chunked(2).map { it.toInt(16) }
         } catch (_: NumberFormatException) {
             return this
         }
 
-        if (keyType == null) {
-            xorMasks.forEach { mask ->
-                val decrypted = String(CharArray(parsedChunks.size) { i -> ((parsedChunks[i] xor mask) and 0xFF).toChar() })
-                if (decrypted.contains("/clock") || decrypted.contains("http")) return decrypted
-            }
-            return this
-        }
-
-        val mask = xorMasks[keyType]
-        return String(CharArray(parsedChunks.size) { i -> ((parsedChunks[i] xor mask) and 0xFF).toChar() })
-    }
-
-    private fun decryptTobeparsed(base64Payload: String): String {
-        val blob = Base64.decode(base64Payload, Base64.DEFAULT)
-        if (blob.size < 13) return ""
-        val versionByte = blob[0].toInt() and 0xFF
-        val iv = blob.sliceArray(1 until 13)
-        val encryptedData = blob.sliceArray(13 until blob.size)
-        val keyBytes = MessageDigest.getInstance("SHA-256").digest("Xot36i3lK3:v$versionByte".toByteArray(Charsets.UTF_8))
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val gcmSpec = GCMParameterSpec(128, iv)
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), gcmSpec)
-        return String(cipher.doFinal(encryptedData), Charsets.UTF_8)
+        return String(CharArray(parsedChunks.size) { i ->
+            ((parsedChunks[i] xor key[i % key.size].code) and 0xFF).toChar()
+        })
     }
 
     private fun buildAllAnimePost(query: String, variables: String): Request {
@@ -117,8 +91,8 @@ class ProviderManager(
 
     fun fetchAllAnimeShowId(title: String): String {
         return try {
-            val query = "query (\$search: String!) { shows(search: \$search, allowAdult: true) { edges { _id name } } }"
-            val variables = """{"search":"${title.replace("\"", "\\\"")}"}"""
+            val query = "query (\$search: SearchInput!) { shows(search: \$search, limit: 40, page: 1, translationType: \"SUB\", countryOrigin: \"ALL\") { edges { _id name } } }"
+            val variables = """{"search":{"query":"${title.replace("\"", "\\\"")}","allowAdult":true}}"""
             val request = buildAllAnimePost(query, variables)
             client.newCall(request).execute().use { res ->
                 res.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?._id ?: ""
@@ -149,63 +123,93 @@ class ProviderManager(
             val variables = """{"showId":"$showId","translationType":"SUB","episodeString":"$epNum"}"""
             val request = buildAllAnimePost(query, variables)
             
-            val responseBody = client.newCall(request).execute().body.string()
+            val responseBody = client.newCall(request).awaitSuccess().bodyString()
             val parsed = responseBody.parseAs<AllAnimeResponse>()
+            val sourceUrls = parsed.data?.episode?.sourceUrls ?: emptyList()
             
-            // 1. Check for encrypted response (tobeparsed present)
-            val tobeparsed = parsed.data?.tobeparsed
-            val sourceUrls = if (!tobeparsed.isNullOrBlank()) {
-                decryptTobeparsed(tobeparsed).parseAs<AllAnimeResponse>().data?.episode?.sourceUrls ?: emptyList()
-            } else {
-                parsed.data?.episode?.sourceUrls ?: emptyList()
+            val videos = sourceUrls.parallelCatchingFlatMap { source ->
+                extractVideo(source)
             }
             
-            val videos = mutableListOf<Video>()
-            for (source in sourceUrls) {
-                val decryptedUrl = source.sourceUrl.decryptSource()
-                
-                if (decryptedUrl.startsWith("/apivtwo/")) continue // Skip internal hosters for stability
-                
-                val providerName = "AllAnime"
-                when {
-                    decryptedUrl.contains(".m3u8") -> {
-                        try {
-                            videos.addAll(playlistUtils.extractFromHls(decryptedUrl, decryptedUrl, allAnimeHeaders, allAnimeHeaders))
-                        } catch (e: Exception) {
-                            videos.add(Video(decryptedUrl, "$providerName HLS", decryptedUrl, headers = allAnimeHeaders))
-                        }
-                    }
-                    decryptedUrl.contains("filemoon") || decryptedUrl.contains("moon") -> {
-                        videos.addAll(filemoonExtractor.videosFromUrl(decryptedUrl, "$providerName Filemoon"))
-                    }
-                    decryptedUrl.contains("streamwish") || decryptedUrl.contains("wish") || decryptedUrl.contains("swhoi") -> {
-                        videos.addAll(streamwishExtractor.videosFromUrl(decryptedUrl, "$providerName StreamWish"))
-                    }
-                    decryptedUrl.contains("mp4upload") -> {
-                        videos.addAll(mp4uploadExtractor.videosFromUrl(decryptedUrl, allAnimeHeaders))
-                    }
-                    decryptedUrl.contains("dood") -> {
-                        videos.addAll(doodExtractor.videosFromUrl(decryptedUrl))
-                    }
-                    decryptedUrl.contains("vidstreaming") || decryptedUrl.contains("gogo") || decryptedUrl.contains("vidcloud") -> {
-                        videos.addAll(gogoStreamExtractor.videosFromUrl(decryptedUrl.replace(Regex("^//"), "https://")))
-                    }
-                    decryptedUrl.contains("streamlare") -> {
-                        videos.addAll(streamlareExtractor.videosFromUrl(decryptedUrl))
-                    }
-                    decryptedUrl.contains("ok.ru") || decryptedUrl.contains("okru") -> {
-                        videos.addAll(okruExtractor.videosFromUrl(decryptedUrl))
-                    }
-                    else -> {
-                        if (decryptedUrl.startsWith("http")) {
-                            videos.add(Video(decryptedUrl, "$providerName ${source.sourceName}", decryptedUrl, headers = allAnimeHeaders))
-                        }
-                    }
-                }
-            }
             rankVideos(videos)
         } catch (e: Exception) {
             emptyList()
+        }
+    }
+
+    private suspend fun extractVideo(source: AllAnimeSourceUrl): List<Video> {
+        val decryptedUrl = source.sourceUrl.decryptSource()
+        val providerName = "AllAnime"
+        
+        return when {
+            decryptedUrl.startsWith("/apivtwo/") -> {
+                try {
+                    val realUrl = "https://api.allanime.day$decryptedUrl"
+                    val innerResponse = client.newCall(GET(realUrl, allAnimeHeaders)).awaitSuccess().bodyString()
+                    val innerParsed = innerResponse.parseAs<AllAnimeApivtwoResponse>()
+                    innerParsed.links.flatMap { link ->
+                        val url = link.hls ?: link.link
+                        if (url.isNotBlank()) {
+                            try {
+                                playlistUtils.extractFromHls(
+                                    playlistUrl = url,
+                                    referer = allAnimeHeaders["Referer"] ?: "https://allmanga.to/",
+                                    videoNameGen = { quality -> "$providerName: $quality" },
+                                    masterHeaders = allAnimeHeaders,
+                                    videoHeaders = allAnimeHeaders
+                                )
+                            } catch (e: Exception) {
+                                listOf(Video(url, "$providerName ${link.resolutionStr ?: "HLS"}", url, headers = allAnimeHeaders))
+                            }
+                        } else {
+                            emptyList()
+                        }
+                    }
+                } catch (e: Exception) {
+                    emptyList()
+                }
+            }
+            decryptedUrl.contains(".m3u8") -> {
+                try {
+                    playlistUtils.extractFromHls(
+                        playlistUrl = decryptedUrl,
+                        referer = allAnimeHeaders["Referer"] ?: "https://allmanga.to/",
+                        videoNameGen = { quality -> "$providerName: $quality" },
+                        masterHeaders = allAnimeHeaders,
+                        videoHeaders = allAnimeHeaders
+                    )
+                } catch (e: Exception) {
+                    listOf(Video(decryptedUrl, "$providerName HLS", decryptedUrl, headers = allAnimeHeaders))
+                }
+            }
+            decryptedUrl.contains("filemoon") || decryptedUrl.contains("moon") -> {
+                filemoonExtractor.videosFromUrl(decryptedUrl, "$providerName Filemoon")
+            }
+            decryptedUrl.contains("streamwish") || decryptedUrl.contains("wish") || decryptedUrl.contains("swhoi") -> {
+                streamwishExtractor.videosFromUrl(decryptedUrl, "$providerName StreamWish")
+            }
+            decryptedUrl.contains("mp4upload") -> {
+                mp4uploadExtractor.videosFromUrl(decryptedUrl, allAnimeHeaders)
+            }
+            decryptedUrl.contains("dood") -> {
+                doodExtractor.videosFromUrl(decryptedUrl)
+            }
+            decryptedUrl.contains("vidstreaming") || decryptedUrl.contains("gogo") || decryptedUrl.contains("vidcloud") -> {
+                gogoStreamExtractor.videosFromUrl(decryptedUrl.replace(Regex("^//"), "https://"))
+            }
+            decryptedUrl.contains("streamlare") -> {
+                streamlareExtractor.videosFromUrl(decryptedUrl)
+            }
+            decryptedUrl.contains("ok.ru") || decryptedUrl.contains("okru") -> {
+                okruExtractor.videosFromUrl(decryptedUrl)
+            }
+            else -> {
+                if (decryptedUrl.startsWith("http")) {
+                    listOf(Video(decryptedUrl, "$providerName ${source.sourceName}", decryptedUrl, headers = allAnimeHeaders))
+                } else {
+                    emptyList()
+                }
+            }
         }
     }
 
