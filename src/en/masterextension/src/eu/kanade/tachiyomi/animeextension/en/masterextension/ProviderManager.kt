@@ -26,9 +26,6 @@ class ProviderManager(
     private val json = Json { ignoreUnknownKeys = true }
 
     private val consumetApi = preferences.getString("consumet_api_url", "https://api.consumet.org/meta/anilist") ?: "https://api.consumet.org/meta/anilist"
-    private val amvstrApi = preferences.getString("amvstr_api_url", "https://api.amvstr.me/api/v2") ?: "https://api.amvstr.me/api/v2"
-    private val enimeApi = preferences.getString("enime_api_url", "https://api.enime.moe") ?: "https://api.enime.moe"
-
     private val consumetProviders = listOf("gogoanime", "zoro", "9anime", "animepahe")
 
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
@@ -41,20 +38,7 @@ class ProviderManager(
     private val okruExtractor by lazy { OkruExtractor(client) }
 
     suspend fun fetchVideos(anilistId: Int, episodeNumber: Int): List<Video> {
-        // 1. Try Consumet first (queries all 4 sites in parallel)
-        var videos = fetchFromConsumet(anilistId, episodeNumber)
-        
-        // 2. If Consumet fails or returns nothing, try Enime
-        if (videos.isEmpty()) {
-            videos = fetchFromEnime(anilistId, episodeNumber)
-        }
-        
-        // 3. If Enime also fails, try AMVStr
-        if (videos.isEmpty()) {
-            videos = fetchFromAMVStr(anilistId, episodeNumber)
-        }
-
-        return rankVideos(videos)
+        return fetchFromConsumet(anilistId, episodeNumber)
     }
 
     private suspend fun fetchFromConsumet(anilistId: Int, episodeNumber: Int): List<Video> = coroutineScope {
@@ -62,8 +46,10 @@ class ProviderManager(
             // 1. Fetch the episode list from Consumet
             val episodeListUrl = "$consumetApi/episodes/$anilistId"
             val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
-            val episodeData = json.decodeFromString<ConsumetEpisodesResponse>(episodeResponse.body.string())
-            val targetEpisode = episodeData.episodes.firstOrNull { it.number == episodeNumber } 
+            
+            // Consumet returns a raw JSON Array, so we decode it as a List directly
+            val episodeData = json.decodeFromString<List<ConsumetEpisode>>(episodeResponse.body.string())
+            val targetEpisode = episodeData.firstOrNull { it.number == episodeNumber } 
                 ?: return@coroutineScope emptyList()
             val episodeId = targetEpisode.id
 
@@ -71,8 +57,7 @@ class ProviderManager(
             val deferredVideos = consumetProviders.map { provider ->
                 async {
                     try {
-                        val encodedEpId = java.net.URLEncoder.encode(episodeId, "UTF-8")
-                        val serverUrl = "$consumetApi/watch?episodeId=$encodedEpId&provider=$provider"
+                        val serverUrl = "$consumetApi/watch/$episodeId?provider=$provider"
                         val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
                         val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
 
@@ -88,46 +73,6 @@ class ProviderManager(
         } catch (e: Exception) {
             return@coroutineScope emptyList()
         }
-    }
-
-    private suspend fun fetchFromAMVStr(anilistId: Int, episodeNumber: Int): List<Video> {
-        val videos = mutableListOf<Video>()
-        try {
-            val episodeListUrl = "$amvstrApi/anime/$anilistId"
-            val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
-            val episodeData = json.decodeFromString<ConsumetEpisodesResponse>(episodeResponse.body.string())
-            val targetEpisode = episodeData.episodes.firstOrNull { it.number == episodeNumber } ?: return videos
-            val episodeId = targetEpisode.id
-
-            val serverUrl = "$amvstrApi/source/$episodeId"
-            val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
-            val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
-
-            videos.addAll(extractFromSourceList(serverData.sources, serverData.headers, "AMVStr"))
-        } catch (e: Exception) {
-            return videos
-        }
-        return videos
-    }
-
-    private suspend fun fetchFromEnime(anilistId: Int, episodeNumber: Int): List<Video> {
-        val videos = mutableListOf<Video>()
-        try {
-            val episodeListUrl = "$enimeApi/anime/$anilistId"
-            val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
-            val episodeData = json.decodeFromString<ConsumetEpisodesResponse>(episodeResponse.body.string())
-            val targetEpisode = episodeData.episodes.firstOrNull { it.number == episodeNumber } ?: return videos
-            val episodeId = targetEpisode.id
-
-            val serverUrl = "$enimeApi/source/$episodeId"
-            val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
-            val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
-
-            videos.addAll(extractFromSourceList(serverData.sources, serverData.headers, "Enime"))
-        } catch (e: Exception) {
-            return videos
-        }
-        return videos
     }
 
     private suspend fun extractFromSourceList(
