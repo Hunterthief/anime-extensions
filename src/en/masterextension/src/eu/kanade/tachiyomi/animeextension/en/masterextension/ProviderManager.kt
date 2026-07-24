@@ -40,7 +40,8 @@ class ProviderManager(
 
     suspend fun fetchVideos(anilistId: Int, target: String): List<Video> = coroutineScope {
         val epNum = target.toFloatOrNull() ?: 1f
-        return@coroutineScope fetchFromConsumetByNumber(anilistId, epNum)
+        val videos = fetchFromConsumetByNumber(anilistId, epNum)
+        return@coroutineScope rankVideos(videos)
     }
 
     private suspend fun fetchFromConsumetByNumber(anilistId: Int, episodeNumber: Float): List<Video> = coroutineScope {
