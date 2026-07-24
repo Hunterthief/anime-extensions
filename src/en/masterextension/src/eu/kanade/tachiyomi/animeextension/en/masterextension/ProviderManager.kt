@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import android.content.SharedPreferences
+import android.util.Base64
 import aniyomi.lib.doodextractor.DoodExtractor
 import aniyomi.lib.filemoonextractor.FilemoonExtractor
 import aniyomi.lib.gogostreamextractor.GogoStreamExtractor
@@ -10,12 +11,17 @@ import aniyomi.lib.playlistutils.PlaylistUtils
 import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
 import eu.kanade.tachiyomi.animesource.model.Video
-import keiyoushi.utils.graphQLPost
-import keiyoushi.utils.parseGraphQLAs
+import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.Headers
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.security.MessageDigest
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 class ProviderManager(
     private val client: OkHttpClient,
@@ -35,6 +41,10 @@ class ProviderManager(
 
     private val allAnimeHeaders by lazy {
         Headers.Builder().apply {
+            add("Accept", "*/*")
+            add("Content-Type", "application/json")
+            add("Host", "api.allanime.day")
+            add("Origin", "https://youtu-chan.com")
             add("Referer", "https://allmanga.to/")
             add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         }.build()
@@ -82,13 +92,36 @@ class ProviderManager(
         return String(CharArray(parsedChunks.size) { i -> ((parsedChunks[i] xor mask) and 0xFF).toChar() })
     }
 
+    private fun decryptTobeparsed(base64Payload: String): String {
+        val blob = Base64.decode(base64Payload, Base64.DEFAULT)
+        if (blob.size < 13) return ""
+        val versionByte = blob[0].toInt() and 0xFF
+        val iv = blob.sliceArray(1 until 13)
+        val encryptedData = blob.sliceArray(13 until blob.size)
+        val keyBytes = MessageDigest.getInstance("SHA-256").digest("Xot36i3lK3:v$versionByte".toByteArray(Charsets.UTF_8))
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val gcmSpec = GCMParameterSpec(128, iv)
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), gcmSpec)
+        return String(cipher.doFinal(encryptedData), Charsets.UTF_8)
+    }
+
+    private fun buildAllAnimePost(query: String, variables: String): Request {
+        val payload = """{"query":"$query","variables":$variables}"""
+        val body = payload.toRequestBody(null)
+        return Request.Builder()
+            .url(allAnimeApi)
+            .post(body)
+            .headers(allAnimeHeaders)
+            .build()
+    }
+
     fun fetchAllAnimeShowId(title: String): String {
         return try {
             val query = "query (\$search: String!) { shows(search: \$search, allowAdult: true) { edges { _id name } } }"
-            val variables = buildJsonObject { put("search", title) }
-            val request = graphQLPost(allAnimeApi, allAnimeHeaders, query, variables = variables)
+            val variables = """{"search":"${title.replace("\"", "\\\"")}"}"""
+            val request = buildAllAnimePost(query, variables)
             client.newCall(request).execute().use { res ->
-                res.parseGraphQLAs<AllAnimeSearchData>().shows?.edges?.firstOrNull()?._id ?: ""
+                res.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?._id ?: ""
             }
         } catch (e: Exception) {
             ""
@@ -98,10 +131,10 @@ class ProviderManager(
     fun fetchAllAnimeEpisodes(showId: String): Map<String, String> {
         return try {
             val query = "query (\$showId: String!) { show(_id: \$showId) { _id episodes { episodeString note } } }"
-            val variables = buildJsonObject { put("showId", showId) }
-            val request = graphQLPost(allAnimeApi, allAnimeHeaders, query, variables = variables)
+            val variables = """{"showId":"$showId"}"""
+            val request = buildAllAnimePost(query, variables)
             client.newCall(request).execute().use { res ->
-                res.parseGraphQLAs<AllAnimeShowData>().show?.episodes?.associate { it.episodeString to (it.note ?: "Episode ${it.episodeString}") } ?: emptyMap()
+                res.parseAs<AllAnimeResponse>().data?.show?.episodes?.associate { it.episodeString to (it.note ?: "Episode ${it.episodeString}") } ?: emptyMap()
             }
         } catch (e: Exception) {
             emptyMap()
@@ -113,17 +146,22 @@ class ProviderManager(
         
         return try {
             val query = "query (\$showId: String!, \$translationType: String!, \$episodeString: String!) { episode(showId: \$showId, translationType: \$translationType, episodeString: \$episodeString) { sourceUrls { sourceUrl sourceName type priority } } }"
-            val variables = buildJsonObject {
-                put("showId", showId)
-                put("translationType", "SUB")
-                put("episodeString", epNum.toString())
+            val variables = """{"showId":"$showId","translationType":"SUB","episodeString":"$epNum"}"""
+            val request = buildAllAnimePost(query, variables)
+            
+            val responseBody = client.newCall(request).execute().body.string()
+            val parsed = responseBody.parseAs<AllAnimeResponse>()
+            
+            // 1. Check for encrypted response (tobeparsed present)
+            val tobeparsed = parsed.data?.tobeparsed
+            val sourceUrls = if (!tobeparsed.isNullOrBlank()) {
+                decryptTobeparsed(tobeparsed).parseAs<AllAnimeResponse>().data?.episode?.sourceUrls ?: emptyList()
+            } else {
+                parsed.data?.episode?.sourceUrls ?: emptyList()
             }
-            val request = graphQLPost(allAnimeApi, allAnimeHeaders, query, variables = variables)
-            val response = client.newCall(request).execute()
-            val sources = response.parseGraphQLAs<AllAnimeEpisodeData>().episode?.sourceUrls ?: emptyList()
             
             val videos = mutableListOf<Video>()
-            for (source in sources) {
+            for (source in sourceUrls) {
                 val decryptedUrl = source.sourceUrl.decryptSource()
                 
                 if (decryptedUrl.startsWith("/apivtwo/")) continue // Skip internal hosters for stability
