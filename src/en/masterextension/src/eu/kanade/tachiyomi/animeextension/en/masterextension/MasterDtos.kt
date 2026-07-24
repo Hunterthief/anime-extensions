@@ -111,17 +111,14 @@ data class AllAnimeSourceUrl(
     val priority: Float? = null
 )
 
-// Internal AllAnime apivtwo DTOs
+// Jikan API (MAL) DTOs
 @Serializable
-data class AllAnimeApivtwoResponse(
-    val links: List<AllAnimeApivtwoLink> = emptyList()
+data class JikanResponse(
+    val data: List<JikanEpisode>? = null
 )
 
 @Serializable
-data class AllAnimeApivtwoLink(
-    val link: String,
-    val hls: String? = null,
-    val mp4: String? = null,
-    val resolutionStr: String? = null,
-    val src: String? = null
+data class JikanEpisode(
+    val mal_id: Int,
+    val title: String? = null
 )
