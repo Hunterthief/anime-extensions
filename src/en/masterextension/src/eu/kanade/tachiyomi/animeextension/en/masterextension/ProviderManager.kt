@@ -56,7 +56,8 @@ class ProviderManager(
                 async {
                     try {
                         val encodedEpId = java.net.URLEncoder.encode(targetEpisode.id, "UTF-8")
-                        val serverUrl = "$consumetApi/watch?episodeId=$encodedEpId&provider=$provider"
+                        // FIX: episodeId must be a path parameter, not a query parameter
+                        val serverUrl = "$consumetApi/watch/$encodedEpId?provider=$provider"
                         val response = client.newCall(GET(serverUrl, headers)).execute()
                         val data = json.decodeFromString<ConsumetServersResponse>(response.body.string())
                         extractFromSourceList(data.sources, data.headers, provider)
