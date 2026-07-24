@@ -57,7 +57,8 @@ data class AniListStudios(
 @Serializable
 data class AniListNode(
     val name: String? = null,
-    val isLicensor: Boolean? = null
+    val isLicensor: Boolean? = null,
+    val isAnimationStudio: Boolean? = null
 )
 
 @Serializable
@@ -65,22 +66,6 @@ data class AniListNextAiring(
     val episode: Int? = null,
     val airingAt: Long? = null,
     val timeUntilAiring: Long? = null
-)
-
-@Serializable
-data class JikanEpisodesResponse(
-    val data: List<JikanEpisode> = emptyList()
-)
-
-@Serializable
-data class JikanEpisode(
-    val mal_id: Int,
-    val title: String? = null
-)
-
-@Serializable
-data class EnimeAnimeResponse(
-    val episodes: List<ConsumetEpisode> = emptyList()
 )
 
 @Serializable
