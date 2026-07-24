@@ -42,7 +42,7 @@ class ProviderManager(
     }
 
     // XOR keys indexed by source-URL prefix type: '--'=3 '#-'=2 '##'=1 '-#'=4 '#'=0
-    private val XOR_KEYS = arrayOf(
+    private val xorKeys = arrayOf(
         "allanimenews",
         "1234567890123456789",
         "1234567890123456789012345",
@@ -51,7 +51,7 @@ class ProviderManager(
     )
 
     // Pre-compute cumulative XOR mask for each key (XOR of all char codes)
-    private val XOR_MASKS = XOR_KEYS.map { key ->
+    private val xorMasks = xorKeys.map { key ->
         key.fold(0) { mask, ch -> mask xor ch.code }
     }.toIntArray()
 
@@ -72,14 +72,14 @@ class ProviderManager(
         }
 
         if (keyType == null) {
-            XOR_MASKS.forEach { mask ->
+            xorMasks.forEach { mask ->
                 val decrypted = String(CharArray(parsedChunks.size) { i -> ((parsedChunks[i] xor mask) and 0xFF).toChar() })
                 if (decrypted.contains("/clock") || decrypted.contains("http")) return decrypted
             }
             return this
         }
 
-        val mask = XOR_MASKS[keyType]
+        val mask = xorMasks[keyType]
         return String(CharArray(parsedChunks.size) { i -> ((parsedChunks[i] xor mask) and 0xFF).toChar() })
     }
 
