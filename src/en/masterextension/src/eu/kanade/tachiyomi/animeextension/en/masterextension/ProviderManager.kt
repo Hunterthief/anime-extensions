@@ -26,7 +26,6 @@ class ProviderManager(
     private val json = Json { ignoreUnknownKeys = true }
 
     private val consumetApi = preferences.getString("consumet_api_url", "https://api.consumet.org/meta/anilist") ?: "https://api.consumet.org/meta/anilist"
-    private val enimeApi = "https://api.enime.moe"
     
     private val consumetProviders = listOf("gogoanime", "zoro", "9anime", "animepahe")
 
@@ -40,34 +39,8 @@ class ProviderManager(
     private val okruExtractor by lazy { OkruExtractor(client) }
 
     suspend fun fetchVideos(anilistId: Int, target: String): List<Video> = coroutineScope {
-        val videos = mutableListOf<Video>()
         val epNum = target.toFloatOrNull() ?: 1f
-        
-        // Try Enime first
-        videos.addAll(fetchFromEnimeByNumber(anilistId, epNum))
-        
-        // Try Consumet
-        if (videos.isEmpty()) {
-            videos.addAll(fetchFromConsumetByNumber(anilistId, epNum))
-        }
-        
-        return@coroutineScope rankVideos(videos)
-    }
-
-    private suspend fun fetchFromEnimeByNumber(anilistId: Int, episodeNumber: Float): List<Video> {
-        return try {
-            val animeUrl = "$enimeApi/anime/$anilistId"
-            val response = client.newCall(GET(animeUrl, headers)).execute()
-            val data = json.decodeFromString<EnimeAnimeResponse>(response.body.string())
-            val ep = data.episodes.firstOrNull { it.number.toInt() == episodeNumber.toInt() } ?: return emptyList()
-            
-            val serverUrl = "$enimeApi/source/${ep.id}"
-            val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
-            val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
-            extractFromSourceList(serverData.sources, serverData.headers, "Enime")
-        } catch (e: Exception) {
-            emptyList()
-        }
+        return@coroutineScope fetchFromConsumetByNumber(anilistId, epNum)
     }
 
     private suspend fun fetchFromConsumetByNumber(anilistId: Int, episodeNumber: Float): List<Video> = coroutineScope {
@@ -111,7 +84,6 @@ class ProviderManager(
 
             when {
                 url.contains(".m3u8") && source.isM3U8 == true -> {
-                    // Manual m3u8 parsing
                     try {
                         val m3u8Response = client.newCall(GET(url, srcHeaders)).execute()
                         val masterPlaylist = m3u8Response.body.string()
@@ -139,7 +111,6 @@ class ProviderManager(
                     videos.addAll(streamwishExtractor.videosFromUrl(url, "$providerName StreamWish"))
                 }
                 url.contains("mp4upload") -> {
-                    // FIX: Mp4uploadExtractor expects a Headers object
                     videos.addAll(mp4uploadExtractor.videosFromUrl(url, headers))
                 }
                 url.contains("dood") -> {
