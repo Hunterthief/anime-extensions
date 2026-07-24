@@ -12,16 +12,12 @@ import aniyomi.lib.vidhideextractor.VidHideExtractor
 import aniyomi.lib.vidmolyextractor.VidMolyExtractor
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
-import keiyoushi.lib.unpacker.Unpacker
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
-import okhttp3.RequestBody.Companion.toRequestBody
 
 class ProviderManager(
     private val client: OkHttpClient,
@@ -31,8 +27,6 @@ class ProviderManager(
     private val json = Json { ignoreUnknownKeys = true }
 
     private val consumetApi = preferences.getString("consumet_api_url", "https://api.consumet.org/meta/anilist") ?: "https://api.consumet.org/meta/anilist"
-    private val allAnimeApi = "https://api.allmanga.to/api"
-    
     private val consumetProviders = listOf("gogoanime", "zoro", "9anime", "animepahe")
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
@@ -45,126 +39,48 @@ class ProviderManager(
     private val streamlareExtractor by lazy { StreamlareExtractor(client) }
     private val okruExtractor by lazy { OkruExtractor(client) }
 
-    // AllAnime requires specific headers to bypass Cloudflare
-    private val allAnimeHeaders by lazy {
-        Headers.Builder().apply {
-            add("Referer", "https://allmanga.to/")
-            add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        }.build()
-    }
-
-    suspend fun fetchVideos(anilistId: Int, target: String, title: String): List<Video> = coroutineScope {
-        val epNum = target.toFloatOrNull() ?: 1f
-        val videos = mutableListOf<Video>()
-        
-        // 1. Try AllAnime (Highly reliable)
-        videos.addAll(fetchFromAllAnime(title, epNum))
-        
-        // 2. Try Consumet
-        if (videos.isEmpty()) {
-            videos.addAll(fetchFromConsumetByNumber(anilistId, epNum))
+    suspend fun fetchVideos(episodeUrl: String): List<Video> = coroutineScope {
+        // If it contains a slash, it's a fallback (AniList ID / Ep Number)
+        return@coroutineScope if (episodeUrl.contains("/")) {
+            val parts = episodeUrl.split("/")
+            val anilistId = parts[0].toIntOrNull() ?: return@coroutineScope emptyList()
+            val epNum = parts[1].toFloatOrNull() ?: 1f
+            fetchFromConsumetByNumber(anilistId, epNum)
+        } else {
+            // It's a direct Consumet Episode ID
+            fetchFromConsumetById(episodeUrl)
         }
-        
-        return@coroutineScope rankVideos(videos)
     }
 
-    private suspend fun fetchFromAllAnime(title: String, episodeNumber: Float): List<Video> = coroutineScope {
-        try {
-            val searchQuery = "query (\$search: String!) { shows(search: \$search, allowAdult: true) { edges { _id name } } }"
-            val searchVars = """{"search":"${title.replace("\"", "\\\"")}"}"""
-            val searchPayload = """{"query":"$searchQuery","variables":$searchVars}"""
-            val searchResponse = client.newCall(POST(allAnimeApi, allAnimeHeaders, searchPayload.toRequestBody("application/json; charset=utf-8".toMediaType()))).execute()
-            val searchData = json.decodeFromString<AllAnimeSearchResponse>(searchResponse.body.string())
-            val showId = searchData.data?.shows?.edges?.firstOrNull()?._id ?: return@coroutineScope emptyList()
-            
-            val epQuery = "query (\$showId: String!, \$episodeString: String!, \$translationType: String!, \$source: String!) { episode(showId: \$showId, episodeString: \$episodeString, translationType: \$translationType, source: \$source) { sourceUrls } }"
-            val sourcesToQuery = listOf("gogoanime", "zoro", "animepahe")
-            
-            val deferredVideos = sourcesToQuery.map { source ->
-                async {
-                    try {
-                        val epVars = """{"showId":"$showId","episodeString":"${episodeNumber.toInt()}","translationType":"SUB","source":"$source"}"""
-                        val epPayload = """{"query":"$epQuery","variables":$epVars}"""
-                        val epResponse = client.newCall(POST(allAnimeApi, allAnimeHeaders, epPayload.toRequestBody("application/json; charset=utf-8".toMediaType()))).execute()
-                        val epData = json.decodeFromString<AllAnimeEpisodeResponse>(epResponse.body.string())
-                        val sources = epData.data?.episode?.sourceUrls ?: emptyList()
-                        
-                        val vids = mutableListOf<Video>()
-                        for (url in sources) {
-                            vids.addAll(extractFromAllAnimeUrl(url, source))
-                        }
-                        vids
-                    } catch (e: Exception) {
-                        emptyList<Video>()
-                    }
+    private suspend fun fetchFromConsumetById(episodeId: String): List<Video> = coroutineScope {
+        val deferredVideos = consumetProviders.map { provider ->
+            async {
+                try {
+                    val encodedEpId = java.net.URLEncoder.encode(episodeId, "UTF-8")
+                    // FIX: Consumet watch endpoint uses PATH PARAMS
+                    val serverUrl = "$consumetApi/watch/$encodedEpId?provider=$provider"
+                    val response = client.newCall(GET(serverUrl, headers)).execute()
+                    val data = json.decodeFromString<ConsumetServersResponse>(response.body.string())
+                    extractFromSourceList(data.sources, data.headers, provider)
+                } catch (e: Exception) {
+                    emptyList()
                 }
             }
-            return@coroutineScope deferredVideos.awaitAll().flatten()
-        } catch (e: Exception) {
-            return@coroutineScope emptyList()
         }
+        val aggregatedVideos = deferredVideos.awaitAll().flatten()
+        return@coroutineScope rankVideos(aggregatedVideos)
     }
 
-    private suspend fun extractFromAllAnimeUrl(url: String, providerName: String): List<Video> {
-        val videos = mutableListOf<Video>()
-        try {
-            val response = client.newCall(GET(url, allAnimeHeaders)).execute()
-            val body = response.body.string()
-            
-            val unpacked = if (body.contains("eval(function(p,a,c,k,e,d)")) {
-                Unpacker.unpack(body)
-            } else {
-                body
-            }
-            
-            val sourceRegex = Regex("""(?:file|src|source)\s*[:=]\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""")
-            sourceRegex.findAll(unpacked).forEach { match ->
-                val srcUrl = match.groupValues[1]
-                if (srcUrl.contains(".m3u8")) {
-                    try {
-                        // FIX: extractFromHls expects a String referer
-                        videos.addAll(playlistUtils.extractFromHls(srcUrl, url))
-                    } catch (e: Exception) {
-                        videos.add(Video(srcUrl, "$providerName AllAnime", srcUrl, headers = allAnimeHeaders))
-                    }
-                } else {
-                    videos.add(Video(srcUrl, "$providerName AllAnime MP4", srcUrl, headers = allAnimeHeaders))
-                }
-            }
-            
-            if (videos.isEmpty()) {
-                videos.addAll(extractFromSourceList(listOf(ConsumetSource(url = url)), emptyMap(), providerName))
-            }
-        } catch (e: Exception) {
-            // Ignore
-        }
-        return videos
-    }
-
-    private suspend fun fetchFromConsumetByNumber(anilistId: Int, episodeNumber: Float): List<Video> = coroutineScope {
-        try {
+    private suspend fun fetchFromConsumetByNumber(anilistId: Int, episodeNumber: Float): List<Video> {
+        return try {
             val episodeListUrl = "$consumetApi/episodes/$anilistId"
             val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
             val episodeData = json.decodeFromString<List<ConsumetEpisode>>(episodeResponse.body.string())
-            val targetEpisode = episodeData.firstOrNull { it.number.toInt() == episodeNumber.toInt() } 
-                ?: return@coroutineScope emptyList()
+            val targetEpisode = episodeData.firstOrNull { it.number.toInt() == episodeNumber.toInt() } ?: return emptyList()
             
-            val deferredVideos = consumetProviders.map { provider ->
-                async {
-                    try {
-                        val encodedEpId = java.net.URLEncoder.encode(targetEpisode.id, "UTF-8")
-                        val serverUrl = "$consumetApi/watch?episodeId=$encodedEpId&provider=$provider"
-                        val response = client.newCall(GET(serverUrl, headers)).execute()
-                        val data = json.decodeFromString<ConsumetServersResponse>(response.body.string())
-                        extractFromSourceList(data.sources, data.headers, provider)
-                    } catch (e: Exception) {
-                        emptyList()
-                    }
-                }
-            }
-            return@coroutineScope deferredVideos.awaitAll().flatten()
+            fetchFromConsumetById(targetEpisode.id)
         } catch (e: Exception) {
-            return@coroutineScope emptyList()
+            emptyList()
         }
     }
 
@@ -184,7 +100,7 @@ class ProviderManager(
                 url.contains(".m3u8") && source.isM3U8 == true -> {
                     try {
                         // FIX: extractFromHls expects a String referer
-                        videos.addAll(playlistUtils.extractFromHls(url, url))
+                        videos.addAll(playlistUtils.extractFromHls(url, url, srcHeaders))
                     } catch (e: Exception) {
                         videos.add(Video(url, "$providerName ${source.quality ?: "HLS"}", url, headers = srcHeaders))
                     }
