@@ -16,7 +16,6 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.Headers
 import okhttp3.OkHttpClient
-import okhttp3.Response
 
 class ProviderManager(
     private val client: OkHttpClient,
@@ -83,25 +82,27 @@ class ProviderManager(
         return String(CharArray(parsedChunks.size) { i -> ((parsedChunks[i] xor mask) and 0xFF).toChar() })
     }
 
-    suspend fun fetchAllAnimeShowId(title: String): String {
+    fun fetchAllAnimeShowId(title: String): String {
         return try {
             val query = "query (\$search: String!) { shows(search: \$search, allowAdult: true) { edges { _id name } } }"
             val variables = buildJsonObject { put("search", title) }
             val request = graphQLPost(allAnimeApi, allAnimeHeaders, query, variables = variables)
-            val response = client.newCall(request).execute()
-            response.parseGraphQLAs<AllAnimeSearchData>().shows?.edges?.firstOrNull()?._id ?: ""
+            client.newCall(request).execute().use { res ->
+                res.parseGraphQLAs<AllAnimeSearchData>().shows?.edges?.firstOrNull()?._id ?: ""
+            }
         } catch (e: Exception) {
             ""
         }
     }
 
-    suspend fun fetchAllAnimeEpisodes(showId: String): Map<String, String> {
+    fun fetchAllAnimeEpisodes(showId: String): Map<String, String> {
         return try {
             val query = "query (\$showId: String!) { show(_id: \$showId) { _id episodes { episodeString note } } }"
             val variables = buildJsonObject { put("showId", showId) }
             val request = graphQLPost(allAnimeApi, allAnimeHeaders, query, variables = variables)
-            val response = client.newCall(request).execute()
-            response.parseGraphQLAs<AllAnimeShowData>().show?.episodes?.associate { it.episodeString to (it.note ?: "Episode ${it.episodeString}") } ?: emptyMap()
+            client.newCall(request).execute().use { res ->
+                res.parseGraphQLAs<AllAnimeShowData>().show?.episodes?.associate { it.episodeString to (it.note ?: "Episode ${it.episodeString}") } ?: emptyMap()
+            }
         } catch (e: Exception) {
             emptyMap()
         }
@@ -131,7 +132,6 @@ class ProviderManager(
                 when {
                     decryptedUrl.contains(".m3u8") -> {
                         try {
-                            // FIX: Correct signature for extractFromHls
                             videos.addAll(playlistUtils.extractFromHls(decryptedUrl, decryptedUrl, allAnimeHeaders, allAnimeHeaders))
                         } catch (e: Exception) {
                             videos.add(Video(decryptedUrl, "$providerName HLS", decryptedUrl, headers = allAnimeHeaders))
@@ -144,7 +144,6 @@ class ProviderManager(
                         videos.addAll(streamwishExtractor.videosFromUrl(decryptedUrl, "$providerName StreamWish"))
                     }
                     decryptedUrl.contains("mp4upload") -> {
-                        // FIX: Correct signature for videosFromUrl
                         videos.addAll(mp4uploadExtractor.videosFromUrl(decryptedUrl, allAnimeHeaders))
                     }
                     decryptedUrl.contains("dood") -> {
