@@ -37,15 +37,15 @@ class ProviderManager(
     private val streamlareExtractor by lazy { StreamlareExtractor(client) }
     private val okruExtractor by lazy { OkruExtractor(client) }
 
-    suspend fun fetchVideos(episodeUrl: String): List<Video> {
+    suspend fun fetchVideos(episodeUrl: String): List<Video> = coroutineScope {
         // If it contains a slash, it's a fallback (AniList ID / Ep Number)
-        return if (episodeUrl.contains("/")) {
+        return@coroutineScope if (episodeUrl.contains("/")) {
             val parts = episodeUrl.split("/")
-            val anilistId = parts[0].toIntOrNull() ?: return emptyList()
+            val anilistId = parts[0].toIntOrNull() ?: return@coroutineScope emptyList()
             val episodeNumber = parts[1].toFloatOrNull() ?: 1f
             fetchFromConsumetByNumber(anilistId, episodeNumber)
         } else {
-            // It's a direct Consumet Episode ID
+            // It's a direct Consumet Episode ID (Instant load!)
             fetchFromConsumetById(episodeUrl)
         }
     }
@@ -65,7 +65,7 @@ class ProviderManager(
                 }
             }
         }
-        return@coroutineScope deferredVideos.awaitAll().flatten()
+        return@coroutineScope rankVideos(deferredVideos.awaitAll().flatten())
     }
 
     private suspend fun fetchFromConsumetByNumber(anilistId: Int, episodeNumber: Float): List<Video> = coroutineScope {
@@ -73,7 +73,7 @@ class ProviderManager(
             val episodeListUrl = "$consumetApi/episodes/$anilistId"
             val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
             val episodeData = json.decodeFromString<List<ConsumetEpisode>>(episodeResponse.body.string())
-            val targetEpisode = episodeData.firstOrNull { it.number == episodeNumber } 
+            val targetEpisode = episodeData.firstOrNull { it.number.toInt() == episodeNumber.toInt() } 
                 ?: return@coroutineScope emptyList()
             
             return@coroutineScope fetchFromConsumetById(targetEpisode.id)
