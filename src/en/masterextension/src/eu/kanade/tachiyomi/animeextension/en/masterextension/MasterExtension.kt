@@ -33,10 +33,10 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
     private val consumetApi = preferences.getString("consumet_api_url", "https://api.consumet.org/meta/anilist") ?: "https://api.consumet.org/meta/anilist"
     private val enimeApi = "https://api.enime.moe"
+    private val jikanApi = "https://api.jikan.moe/v4"
 
     private val providerManager by lazy { ProviderManager(client, headers, preferences) }
 
-    // Bulletproof manual JSON builder to prevent HTTP 400 errors
     private fun buildGraphQLRequest(query: String, variablesJson: String): Request {
         val escapedQuery = query.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
         val payload = """{"query":"$escapedQuery","variables":$variablesJson}"""
@@ -101,7 +101,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             else -> "SEARCH_MATCH"
         }
 
-        // Build variables string manually to ensure 100% valid JSON
         val variables = StringBuilder().apply {
             append("{")
             append("\"page\":$page")
@@ -118,7 +117,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     override fun animeDetailsRequest(anime: SAnime): Request {
-        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes status season seasonYear format genres averageScore studios(isMain: true) { nodes { name } } licensors: studios(isLicensor: true) { nodes { name } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
+        // FIX: Removed invalid isLicensor argument. Fetch all studios and filter in Kotlin.
+        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes status season seasonYear format genres averageScore studios { nodes { name isLicensor } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
         val variables = """{"id":${anime.url.toInt()}}"""
         return buildGraphQLRequest(query, variables)
     }
@@ -128,8 +128,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         return SAnime.create().apply {
             title = media?.title?.romaji ?: media?.title?.english ?: "Unknown"
             
-            val studio = media?.studios?.nodes?.firstOrNull()?.name ?: "Unknown"
-            val producers = media?.licensors?.nodes?.joinToString(", ") { it.name ?: "" }?.takeIf { it.isNotBlank() } ?: "Unknown"
+            val studio = media?.studios?.nodes?.firstOrNull { it.isLicensor != true }?.name ?: "Unknown"
+            val producers = media?.studios?.nodes?.filter { it.isLicensor == true }?.joinToString(", ") { it.name ?: "" }?.takeIf { it.isNotBlank() } ?: "Unknown"
             
             val nextEp = media?.nextAiringEpisode
             val nextEpString = if (nextEp != null && nextEp.timeUntilAiring != null) {
@@ -162,6 +162,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun episodeListParse(response: Response): List<SEpisode> {
         val media = json.decodeFromString<AniListResponse>(response.body.string()).data?.Media
         val anilistId = media?.id ?: return emptyList()
+        val malId = media.idMal
         
         val nextEp = media.nextAiringEpisode
         val anilistEpCount = media.episodes ?: 0
@@ -175,17 +176,28 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         val episodes = mutableListOf<SEpisode>()
 
-        // Generate aired episodes
+        var jikanTitles: Map<Int, String> = emptyMap()
+        if (malId != null) {
+            try {
+                val jikanUrl = "$jikanApi/anime/$malId/episodes"
+                val jikanResponse = client.newCall(GET(jikanUrl, headers)).execute()
+                val jikanData = json.decodeFromString<JikanEpisodesResponse>(jikanResponse.body.string())
+                jikanTitles = jikanData.data.associate { it.mal_id to (it.title ?: "Episode ${it.mal_id}") }
+            } catch (e: Exception) {
+                // Ignore
+            }
+        }
+
         for (i in 1..latestAired) {
+            val title = jikanTitles[i] ?: "Episode $i"
             episodes.add(SEpisode.create().apply {
                 url = "$anilistId/$i"
-                name = "Episode $i"
+                name = "Ep. $i: $title"
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
             })
         }
 
-        // Add the upcoming episode (grayed out by name)
         if (nextEp != null && nextEp.episode != null && nextEp.timeUntilAiring != null) {
             val days = nextEp.timeUntilAiring / 86400
             val hours = (nextEp.timeUntilAiring % 86400) / 3600
