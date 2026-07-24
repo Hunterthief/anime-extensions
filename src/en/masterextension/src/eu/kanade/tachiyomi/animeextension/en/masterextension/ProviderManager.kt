@@ -14,6 +14,7 @@ import keiyoushi.utils.parseAs
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 
 class ProviderManager(
@@ -36,24 +37,41 @@ class ProviderManager(
     private val allAnimeHeaders by lazy {
         Headers.Builder().apply {
             add("Accept", "*/*")
+            add("Accept-Language", "en-US,en;q=0.9")
+            add("Content-Type", "application/json")
             add("Host", "api.allanime.day")
             add("Origin", "https://allmanga.to")
             add("Referer", "https://allmanga.to/")
             add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            add("Sec-Fetch-Dest", "empty")
+            add("Sec-Fetch-Mode", "cors")
+            add("Sec-Fetch-Site", "cross-site")
+        }.build()
+    }
+
+    private val jikanHeaders by lazy {
+        Headers.Builder().apply {
+            add("Accept", "application/json")
+            add("Accept-Language", "en-US,en;q=0.9")
+            add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            add("Sec-Fetch-Dest", "empty")
+            add("Sec-Fetch-Mode", "cors")
+            add("Sec-Fetch-Site", "cross-site")
+            add("Referer", "https://myanimelist.net/")
         }.build()
     }
 
     private fun makeAllAnimeRequest(query: String, variables: String): String? {
         return try {
-            // Must use GET with URL-encoded JSON payload
+            // AllAnime requires variables and query in the URL, but a POST request with an empty body to bypass CF
             val encodedQuery = URLEncoder.encode(query, "UTF-8")
             val encodedVariables = URLEncoder.encode(variables, "UTF-8")
             val url = "$allAnimeApi?variables=$encodedVariables&query=$encodedQuery"
 
             val request = Request.Builder()
                 .url(url)
+                .post("".toRequestBody(null)) // Empty POST body
                 .headers(allAnimeHeaders)
-                .get()
                 .build()
 
             client.newCall(request).execute().use { res ->
@@ -113,6 +131,7 @@ class ProviderManager(
         return try {
             val request = Request.Builder()
                 .url("$jikanApi/anime/$malId/episodes")
+                .headers(jikanHeaders)
                 .get()
                 .build()
                 
