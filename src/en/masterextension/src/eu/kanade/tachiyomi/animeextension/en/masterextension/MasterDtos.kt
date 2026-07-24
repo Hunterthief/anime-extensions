@@ -3,18 +3,13 @@ package eu.kanade.tachiyomi.animeextension.en.masterextension
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class AniListResponse(
-    val data: AniListPage? = null
+data class AniListMediaData(
+    val Media: AniListMedia? = null,
+    val Page: AniListPage? = null
 )
 
 @Serializable
 data class AniListPage(
-    val Page: AniListMediaPage? = null,
-    val Media: AniListMedia? = null
-)
-
-@Serializable
-data class AniListMediaPage(
     val media: List<AniListMedia> = emptyList()
 )
 
@@ -67,34 +62,54 @@ data class AniListNextAiring(
     val timeUntilAiring: Long? = null
 )
 
+// AllAnime API DTOs
 @Serializable
-data class JikanEpisodesResponse(
-    val data: List<JikanEpisode> = emptyList()
+data class AllAnimeSearchData(
+    val shows: AllAnimeShows? = null
 )
 
 @Serializable
-data class JikanEpisode(
-    val mal_id: Int,
-    val title: String? = null
+data class AllAnimeShows(
+    val edges: List<AllAnimeShowEdge> = emptyList()
 )
 
 @Serializable
-data class ConsumetEpisode(
-    val number: Float, 
-    val id: String,
-    val title: String? = null,
-    val url: String? = null
+data class AllAnimeShowEdge(
+    val _id: String,
+    val name: String? = null
 )
 
 @Serializable
-data class ConsumetServersResponse(
-    val sources: List<ConsumetSource> = emptyList(),
-    val headers: Map<String, String> = emptyMap()
+data class AllAnimeShowData(
+    val show: AllAnimeShow? = null
 )
 
 @Serializable
-data class ConsumetSource(
-    val url: String,
-    val quality: String? = null,
-    val isM3U8: Boolean? = null
+data class AllAnimeShow(
+    val _id: String,
+    val episodes: List<AllAnimeEpisodeInfo> = emptyList()
+)
+
+@Serializable
+data class AllAnimeEpisodeInfo(
+    val episodeString: String,
+    val note: String? = null
+)
+
+@Serializable
+data class AllAnimeEpisodeData(
+    val episode: AllAnimeEpisode? = null
+)
+
+@Serializable
+data class AllAnimeEpisode(
+    val sourceUrls: List<AllAnimeSourceUrl> = emptyList()
+)
+
+@Serializable
+data class AllAnimeSourceUrl(
+    val sourceUrl: String,
+    val sourceName: String,
+    val type: String? = null,
+    val priority: Float? = null
 )
