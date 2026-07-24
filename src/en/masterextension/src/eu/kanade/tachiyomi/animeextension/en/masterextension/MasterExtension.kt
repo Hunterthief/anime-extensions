@@ -10,18 +10,15 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
 import keiyoushi.utils.getPreferencesLazy
-import kotlinx.serialization.json.Json
+import keiyoushi.utils.graphQLPost
+import keiyoushi.utils.parseGraphQLAs
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.jsoup.Jsoup
 import java.util.Calendar
@@ -34,26 +31,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override val supportsLatest = true
 
     private val preferences by getPreferencesLazy()
-    private val json = Json { ignoreUnknownKeys = true }
-
-    private val consumetApi = preferences.getString("consumet_api_url", "https://api.consumet.org/meta/anilist") ?: "https://api.consumet.org/meta/anilist"
-    private val jikanApi = "https://api.jikan.moe/v4"
-
     private val providerManager by lazy { ProviderManager(client, headers, preferences) }
-
-    private fun buildGraphQLRequest(query: String, variables: JsonObject): Request {
-        val payload = buildJsonObject {
-            put("query", query)
-            put("variables", variables)
-        }
-        val body = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-        // Explicit headers to prevent HTTP 400
-        val aniListHeaders = headers.newBuilder()
-            .add("Content-Type", "application/json")
-            .add("Accept", "application/json")
-            .build()
-        return POST(baseUrl, aniListHeaders, body)
-    }
 
     private fun getCurrentSeason(): String {
         val month = Calendar.getInstance().get(Calendar.MONTH) + 1
@@ -75,11 +53,11 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             put("season", season)
             put("year", year)
         }
-        return buildGraphQLRequest(query, variables)
+        return graphQLPost(baseUrl, headers, query, variables = variables)
     }
 
     override fun popularAnimeParse(response: Response): AnimesPage {
-        val data = json.decodeFromString<AniListResponse>(response.body.string()).data?.Page?.media ?: emptyList()
+        val data = response.parseGraphQLAs<AniListMediaData>().Page?.media ?: emptyList()
         val animes = data.map { media ->
             SAnime.create().apply {
                 url = media.id.toString()
@@ -94,7 +72,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun latestUpdatesRequest(page: Int): Request {
         val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC) { id title { romaji english } coverImage { large } } } }"
         val variables = buildJsonObject { put("page", page) }
-        return buildGraphQLRequest(query, variables)
+        return graphQLPost(baseUrl, headers, query, variables = variables)
     }
 
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
@@ -123,22 +101,24 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             if (formatStr != null) put("format", formatStr)
             put("sort", JsonArray(listOf(JsonPrimitive(sortStr))))
         }
-        return buildGraphQLRequest(gqlQuery, variables)
+        return graphQLPost(baseUrl, headers, gqlQuery, variables = variables)
     }
 
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     override fun animeDetailsRequest(anime: SAnime): Request {
+        // FIX: Removed invalid isLicensor field. AniList API only supports isAnimationStudio.
         val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes status season seasonYear format genres averageScore studios { nodes { name isAnimationStudio } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
         val variables = buildJsonObject { put("id", anime.url.toInt()) }
-        return buildGraphQLRequest(query, variables)
+        return graphQLPost(baseUrl, headers, query, variables = variables)
     }
 
     override fun animeDetailsParse(response: Response): SAnime {
-        val media = json.decodeFromString<AniListResponse>(response.body.string()).data?.Media
+        val media = response.parseGraphQLAs<AniListMediaData>().Media
         return SAnime.create().apply {
             title = media?.title?.romaji ?: media?.title?.english ?: "Unknown"
             
+            // Animation Studio is true, Licensors/Producers are false
             val studio = media?.studios?.nodes?.firstOrNull { it.isAnimationStudio == true }?.name ?: "Unknown"
             val producers = media?.studios?.nodes?.filter { it.isAnimationStudio == false }?.joinToString(", ") { it.name ?: "" }?.takeIf { it.isNotBlank() } ?: "Unknown"
             
@@ -171,9 +151,9 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun episodeListRequest(anime: SAnime): Request = animeDetailsRequest(anime)
 
     override fun episodeListParse(response: Response): List<SEpisode> {
-        val media = json.decodeFromString<AniListResponse>(response.body.string()).data?.Media
-        val anilistId = media?.id ?: return emptyList()
-        val malId = media.idMal
+        val media = response.parseGraphQLAs<AniListMediaData>().Media ?: return emptyList()
+        val anilistId = media.id
+        val title = media.title?.romaji ?: media.title?.english ?: "Unknown"
         
         val nextEp = media.nextAiringEpisode
         val anilistEpCount = media.episodes ?: 0
@@ -187,56 +167,29 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         val episodes = mutableListOf<SEpisode>()
 
-        // 1. Try to fetch real episode titles from Consumet
-        var consumetSuccess = false
+        // Fetch real episode titles from AllAnime
+        var allAnimeEpisodes: Map<String, String> = emptyMap()
+        var showId = ""
         try {
-            val consumetUrl = "$consumetApi/episodes/$anilistId"
-            val consumetResponse = client.newCall(GET(consumetUrl, headers)).execute()
-            val consumetData = json.decodeFromString<List<ConsumetEpisode>>(consumetResponse.body.string())
-
-            if (consumetData.isNotEmpty()) {
-                consumetSuccess = true
-                consumetData.filter { it.number.toInt() <= latestAired }.forEach { ep ->
-                    val epNum = ep.number.toInt()
-                    val title = if (!ep.title.isNullOrBlank()) ep.title else "Episode $epNum"
-                    episodes.add(SEpisode.create().apply {
-                        url = ep.id // Store exact Consumet ID for instant video loading
-                        name = "Ep. $epNum: $title"
-                        episode_number = ep.number
-                        date_upload = System.currentTimeMillis()
-                    })
-                }
+            showId = providerManager.fetchAllAnimeShowId(title)
+            if (showId.isNotBlank()) {
+                allAnimeEpisodes = providerManager.fetchAllAnimeEpisodes(showId)
             }
         } catch (e: Exception) {
-            // Consumet failed, fallback below
+            // Ignore, fallback to default names
         }
 
-        // 2. Fallback to Jikan (MAL) for titles
-        if (!consumetSuccess) {
-            var jikanTitles: Map<Int, String> = emptyMap()
-            if (malId != null) {
-                try {
-                    val jikanUrl = "$jikanApi/anime/$malId/episodes"
-                    val jikanResponse = client.newCall(GET(jikanUrl, headers)).execute()
-                    val jikanData = json.decodeFromString<JikanEpisodesResponse>(jikanResponse.body.string())
-                    jikanTitles = jikanData.data.associate { it.mal_id to (it.title ?: "Episode ${it.mal_id}") }
-                } catch (e: Exception) {
-                    // Ignore
-                }
-            }
-
-            for (i in 1..latestAired) {
-                val title = jikanTitles[i] ?: "Episode $i"
-                episodes.add(SEpisode.create().apply {
-                    url = "$anilistId/$i"
-                    name = "Ep. $i: $title"
-                    episode_number = i.toFloat()
-                    date_upload = System.currentTimeMillis()
-                })
-            }
+        for (i in 1..latestAired) {
+            val titleStr = allAnimeEpisodes[i.toString()] ?: "Episode $i"
+            episodes.add(SEpisode.create().apply {
+                // Store AniList ID and AllAnime Show ID and Episode String
+                url = "$anilistId/${showId.ifBlank { "NA" }}/$i"
+                name = "Ep. $i: $titleStr"
+                episode_number = i.toFloat()
+                date_upload = System.currentTimeMillis()
+            })
         }
 
-        // 3. Add the upcoming episode
         if (nextEp != null && nextEp.episode != null && nextEp.timeUntilAiring != null) {
             val days = nextEp.timeUntilAiring / 86400
             val hours = (nextEp.timeUntilAiring % 86400) / 3600
@@ -253,7 +206,13 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
         if (episode.url == "UPCOMING") return emptyList()
-        return providerManager.fetchVideos(episode.url)
+        
+        val parts = episode.url.split("/")
+        val anilistId = parts.getOrNull(0)?.toIntOrNull() ?: return emptyList()
+        val showId = parts.getOrNull(1) ?: "NA"
+        val epNum = parts.getOrNull(2)?.toIntOrNull() ?: 1
+        
+        return providerManager.fetchVideos(anilistId, showId, epNum)
     }
 
     override fun videoListParse(response: Response): List<Video> {
