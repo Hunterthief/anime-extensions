@@ -26,7 +26,6 @@ class ProviderManager(
     private val json = Json { ignoreUnknownKeys = true }
 
     private val consumetApi = preferences.getString("consumet_api_url", "https://api.consumet.org/meta/anilist") ?: "https://api.consumet.org/meta/anilist"
-    
     private val consumetProviders = listOf("gogoanime", "zoro", "9anime", "animepahe")
 
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
@@ -38,37 +37,48 @@ class ProviderManager(
     private val streamlareExtractor by lazy { StreamlareExtractor(client) }
     private val okruExtractor by lazy { OkruExtractor(client) }
 
-    suspend fun fetchVideos(anilistId: Int, target: String): List<Video> = coroutineScope {
-        val epNum = target.toFloatOrNull() ?: 1f
-        val videos = fetchFromConsumetByNumber(anilistId, epNum)
-        return@coroutineScope rankVideos(videos)
+    suspend fun fetchVideos(episodeUrl: String): List<Video> = coroutineScope {
+        // If it contains a slash, it's a fallback (AniList ID / Ep Number)
+        return@coroutineScope if (episodeUrl.contains("/")) {
+            val parts = episodeUrl.split("/")
+            val anilistId = parts[0].toIntOrNull() ?: return@coroutineScope emptyList()
+            val epNum = parts[1].toFloatOrNull() ?: 1f
+            fetchFromConsumetByNumber(anilistId, epNum)
+        } else {
+            // It's a direct Consumet Episode ID
+            fetchFromConsumetById(episodeUrl)
+        }
     }
 
-    private suspend fun fetchFromConsumetByNumber(anilistId: Int, episodeNumber: Float): List<Video> = coroutineScope {
-        try {
+    private suspend fun fetchFromConsumetById(episodeId: String): List<Video> = coroutineScope {
+        val deferredVideos = consumetProviders.map { provider ->
+            async {
+                try {
+                    val encodedEpId = java.net.URLEncoder.encode(episodeId, "UTF-8")
+                    // FIX: Consumet watch endpoint uses QUERY PARAMS, not path params
+                    val serverUrl = "$consumetApi/watch?episodeId=$encodedEpId&provider=$provider"
+                    val response = client.newCall(GET(serverUrl, headers)).execute()
+                    val data = json.decodeFromString<ConsumetServersResponse>(response.body.string())
+                    extractFromSourceList(data.sources, data.headers, provider)
+                } catch (e: Exception) {
+                    emptyList()
+                }
+            }
+        }
+        val aggregatedVideos = deferredVideos.awaitAll().flatten()
+        return@coroutineScope rankVideos(aggregatedVideos)
+    }
+
+    private suspend fun fetchFromConsumetByNumber(anilistId: Int, episodeNumber: Float): List<Video> {
+        return try {
             val episodeListUrl = "$consumetApi/episodes/$anilistId"
             val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
             val episodeData = json.decodeFromString<List<ConsumetEpisode>>(episodeResponse.body.string())
-            val targetEpisode = episodeData.firstOrNull { it.number.toInt() == episodeNumber.toInt() } 
-                ?: return@coroutineScope emptyList()
+            val targetEpisode = episodeData.firstOrNull { it.number.toInt() == episodeNumber.toInt() } ?: return emptyList()
             
-            val deferredVideos = consumetProviders.map { provider ->
-                async {
-                    try {
-                        val encodedEpId = java.net.URLEncoder.encode(targetEpisode.id, "UTF-8")
-                        // FIX: episodeId must be a path parameter, not a query parameter
-                        val serverUrl = "$consumetApi/watch/$encodedEpId?provider=$provider"
-                        val response = client.newCall(GET(serverUrl, headers)).execute()
-                        val data = json.decodeFromString<ConsumetServersResponse>(response.body.string())
-                        extractFromSourceList(data.sources, data.headers, provider)
-                    } catch (e: Exception) {
-                        emptyList()
-                    }
-                }
-            }
-            return@coroutineScope deferredVideos.awaitAll().flatten()
+            fetchFromConsumetById(targetEpisode.id)
         } catch (e: Exception) {
-            return@coroutineScope emptyList()
+            emptyList()
         }
     }
 
