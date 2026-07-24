@@ -114,37 +114,6 @@ class ProviderManager(
         return Triple("", "S0", err.take(60))
     }
 
-    fun fetchAllAnimeEpisodes(showId: String): Triple<Map<String, String>, String, String> {
-        val query = """
-            query(${'$'}_id: String!) {
-              show(_id: ${'$'}_id) {
-                _id
-                availableEpisodesDetail { sub dub }
-              }
-            }
-        """.trimIndent()
-        
-        val payload = buildJsonObject {
-            put("query", query)
-            put("variables", buildJsonObject {
-                put("_id", showId)
-            })
-        }
-        
-        val res = makeAllAnimePostRequest(payload)
-        if (res != null && !res.startsWith("ERR") && !res.startsWith("EXC")) {
-            val eps = res.parseAs<AllAnimeResponse>().data?.show?.availableEpisodesDetail?.sub
-            if (!eps.isNullOrEmpty()) {
-                // AllAnime doesn't provide titles, so we map episode numbers to empty strings
-                val map = eps.associateWith { "" }
-                return Triple(map, "E1", "")
-            }
-        }
-
-        val err = res ?: "Null"
-        return Triple(emptyMap(), "E0", err.take(60))
-    }
-
     fun fetchJikanEpisodes(malId: Int): Triple<Map<String, String>, String, String> {
         return try {
             val request = Request.Builder()
