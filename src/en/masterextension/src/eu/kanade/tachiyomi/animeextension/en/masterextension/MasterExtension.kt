@@ -14,7 +14,6 @@ import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.graphQLPost
 import keiyoushi.utils.parseGraphQLAs
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -151,7 +150,9 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun episodeListParse(response: Response): List<SEpisode> {
         val media = response.parseGraphQLAs<AniListMediaData>().Media ?: return emptyList()
         val anilistId = media.id
-        val title = media.title?.romaji ?: media.title?.english ?: "Unknown"
+        
+        // Prefer English title as AllAnime mostly indexes English titles
+        val title = media.title?.english ?: media.title?.romaji ?: "Unknown"
         
         val nextEp = media.nextAiringEpisode
         val anilistEpCount = media.episodes ?: 0
