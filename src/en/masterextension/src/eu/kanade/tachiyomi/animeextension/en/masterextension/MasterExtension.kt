@@ -48,7 +48,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             put("query", query)
             put("variables", variables)
         }
-        // FIX: Use standard string serialization to prevent malformed JSON
         val body = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
         return POST(baseUrl, headers, body)
     }
@@ -114,16 +113,14 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             else -> "SEARCH_MATCH"
         }
 
-        // Strict JSON variables to prevent HTTP 400
-        val variables = JsonObject(
-            mapOf(
-                "page" to JsonPrimitive(page),
-                "search" to JsonPrimitive(query).takeIf { it.content.isNotBlank() } ?: JsonNull,
-                "genre" to (genreStr?.let { JsonPrimitive(it) } ?: JsonNull),
-                "format" to (formatStr?.let { JsonPrimitive(it) } ?: JsonNull),
-                "sort" to JsonArray(listOf(JsonPrimitive(sortStr)))
-            )
-        )
+        // FIX: Use buildJsonObject to properly handle types and prevent inference errors
+        val variables = buildJsonObject {
+            put("page", page)
+            put("search", if (query.isNotBlank()) JsonPrimitive(query) else JsonNull)
+            put("genre", if (genreStr != null) JsonPrimitive(genreStr) else JsonNull)
+            put("format", if (formatStr != null) JsonPrimitive(formatStr) else JsonNull)
+            put("sort", JsonArray(listOf(JsonPrimitive(sortStr))))
+        }
         return buildGraphQLRequest(gqlQuery, variables)
     }
 
@@ -164,7 +161,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             genre = media?.genres?.joinToString(", ")
             thumbnail_url = media?.coverImage?.large
             
-            // FIX: Put Studio in author, Producers in artist
             author = studio
             artist = producers
         }
@@ -177,7 +173,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val anilistId = media?.id ?: return emptyList()
         val malId = media.idMal
         
-        // Calculate latest aired episode to prevent unreleased episodes from showing
         val nextEp = media.nextAiringEpisode
         val anilistEpCount = media.episodes ?: 0
         val latestAired = if (nextEp != null && nextEp.episode != null) {
@@ -185,12 +180,11 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         } else if (anilistEpCount > 0) {
             anilistEpCount
         } else {
-            12 // Fallback
+            12
         }
 
         val episodes = mutableListOf<SEpisode>()
 
-        // 1. Try to fetch real episode titles from Jikan (MAL)
         var jikanTitles: Map<Int, String> = emptyMap()
         if (malId != null) {
             try {
@@ -199,27 +193,25 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 val jikanData = json.decodeFromString<JikanEpisodesResponse>(jikanResponse.body.string())
                 jikanTitles = jikanData.data.associate { it.mal_id to (it.title ?: "Episode ${it.mal_id}") }
             } catch (e: Exception) {
-                // Ignore, fallback to default names
+                // Ignore
             }
         }
 
-        // Generate aired episodes
         for (i in 1..latestAired) {
             val title = jikanTitles[i] ?: "Episode $i"
             episodes.add(SEpisode.create().apply {
-                url = "$anilistId/$i" // Store AniList ID and Episode Number
+                url = "$anilistId/$i"
                 name = "Ep. $i: $title"
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
             })
         }
 
-        // Add the upcoming episode (grayed out by name)
         if (nextEp != null && nextEp.episode != null && nextEp.timeUntilAiring != null) {
             val days = nextEp.timeUntilAiring / 86400
             val hours = (nextEp.timeUntilAiring % 86400) / 3600
             episodes.add(SEpisode.create().apply {
-                url = "$anilistId/UPCOMING" // Prevents video loading
+                url = "$anilistId/UPCOMING"
                 name = "Ep. ${nextEp.episode}: (Upcoming - airs in ${days}d ${hours}h)"
                 episode_number = nextEp.episode.toFloat()
                 date_upload = System.currentTimeMillis()
@@ -230,13 +222,12 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        if (episode.url.contains("UPCOMING")) return emptyList() // Don't load videos for grayed out eps
+        if (episode.url.contains("UPCOMING")) return emptyList()
         
         val parts = episode.url.split("/")
         val anilistId = parts.firstOrNull()?.toIntOrNull() ?: return emptyList()
         val target = parts.lastOrNull() ?: return emptyList()
         
-        // Pass the AniList ID and the Target (Episode Number)
         return providerManager.fetchVideos(anilistId, target)
     }
 
