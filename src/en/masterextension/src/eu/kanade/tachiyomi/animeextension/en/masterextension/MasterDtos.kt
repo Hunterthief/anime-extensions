@@ -33,6 +33,7 @@ data class AniListMedia(
     val genres: List<String> = emptyList(),
     val averageScore: Int? = null,
     val studios: AniListStudios? = null,
+    val licensors: AniListStudios? = null,
     val nextAiringEpisode: AniListNextAiring? = null
 )
 
@@ -66,9 +67,15 @@ data class AniListNextAiring(
     val timeUntilAiring: Long? = null
 )
 
+// Enime API returns an object with an episodes array
+@Serializable
+data class EnimeAnimeResponse(
+    val episodes: List<ConsumetEpisode> = emptyList()
+)
+
 @Serializable
 data class ConsumetEpisode(
-    val number: Float, // Changed to Float to prevent JSON parsing crashes
+    val number: Float, 
     val id: String,
     val title: String? = null,
     val url: String? = null
