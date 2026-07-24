@@ -48,7 +48,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             put("query", query)
             put("variables", variables)
         }
-        val body = json.encodeToString(JsonObject.serializer(), payload).toRequestBody("application/json; charset=utf-8".toMediaType())
+        // FIX: Use standard string serialization to prevent malformed JSON
+        val body = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
         return POST(baseUrl, headers, body)
     }
 
@@ -113,11 +114,11 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             else -> "SEARCH_MATCH"
         }
 
-        // FIX: Strict JSON variables to prevent HTTP 400
+        // Strict JSON variables to prevent HTTP 400
         val variables = JsonObject(
             mapOf(
                 "page" to JsonPrimitive(page),
-                "search" to JsonPrimitive(query),
+                "search" to JsonPrimitive(query).takeIf { it.content.isNotBlank() } ?: JsonNull,
                 "genre" to (genreStr?.let { JsonPrimitive(it) } ?: JsonNull),
                 "format" to (formatStr?.let { JsonPrimitive(it) } ?: JsonNull),
                 "sort" to JsonArray(listOf(JsonPrimitive(sortStr)))
