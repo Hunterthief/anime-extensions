@@ -11,13 +11,15 @@ import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
 import eu.kanade.tachiyomi.animesource.model.Video
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.toJsonRequestBody
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.Headers
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 
 class ProviderManager(
     private val client: OkHttpClient,
@@ -41,10 +43,8 @@ class ProviderManager(
             add("Accept", "*/*")
             add("Accept-Language", "en-US,en;q=0.9")
             add("Content-Type", "application/json")
-            add("Host", "api.allanime.day")
-            // CRITICAL: Must be youtu-chan.com to bypass Cloudflare
-            add("Origin", "https://youtu-chan.com")
-            add("Referer", "https://youtu-chan.com/")
+            add("Origin", "https://allmanga.to")
+            add("Referer", "https://allmanga.to/")
             add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             add("Sec-Fetch-Dest", "empty")
             add("Sec-Fetch-Mode", "cors")
@@ -57,16 +57,13 @@ class ProviderManager(
             add("Accept", "application/json")
             add("Accept-Language", "en-US,en;q=0.9")
             add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            add("Sec-Fetch-Dest", "empty")
-            add("Sec-Fetch-Mode", "cors")
-            add("Sec-Fetch-Site", "cross-site")
             add("Referer", "https://myanimelist.net/")
         }.build()
     }
 
     private fun makeAllAnimePostRequest(payload: JsonObject): String? {
         return try {
-            val body = payload.toString().toJsonRequestBody()
+            val body = payload.toString().toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
                 .url(allAnimeApi)
                 .post(body)
@@ -75,9 +72,7 @@ class ProviderManager(
 
             client.newCall(request).execute().use { res ->
                 val bodyStr = res.body.string()
-                if (!res.isSuccessful) {
-                    return "ERR:${res.code}:$bodyStr"
-                }
+                if (!res.isSuccessful) return "ERR:${res.code}:${bodyStr.take(30)}"
                 bodyStr
             }
         } catch (e: Exception) {
@@ -86,7 +81,6 @@ class ProviderManager(
     }
 
     fun fetchAllAnimeShowId(title: String): Triple<String, String, String> {
-        // Note the schema typo: VaildTranslationTypeEnumType (not Valid)
         val query = """
             query(${'$'}search: SearchInput, ${'$'}limit: Int, ${'$'}page: Int, ${'$'}translationType: VaildTranslationTypeEnumType, ${'$'}countryOrigin: VaildCountryOriginEnumType) {
               shows(search: ${'$'}search, limit: ${'$'}limit, page: ${'$'}page, translationType: ${'$'}translationType, countryOrigin: ${'$'}countryOrigin) {
@@ -121,28 +115,30 @@ class ProviderManager(
     }
 
     fun fetchAllAnimeEpisodes(showId: String): Triple<Map<String, String>, String, String> {
-        // We use episodes { episodeString note } instead of availableEpisodesDetail to get titles
         val query = """
-            query (${'$'}showId: String!) {
-                show(_id: ${'$'}showId) {
-                    _id episodes { episodeString note }
-                }
+            query($_id: String!) {
+              show(_id: ${'$'}_id) {
+                _id
+                availableEpisodesDetail { sub dub }
+              }
             }
         """.trimIndent()
         
         val payload = buildJsonObject {
             put("query", query)
             put("variables", buildJsonObject {
-                put("showId", showId)
+                put("_id", showId)
             })
         }
         
         val res = makeAllAnimePostRequest(payload)
         if (res != null && !res.startsWith("ERR") && !res.startsWith("EXC")) {
-            val map = res.parseAs<AllAnimeResponse>().data?.show?.episodes?.associate {
-                it.episodeString to (it.note?.takeIf { n -> n.isNotBlank() } ?: "Episode ${it.episodeString}")
+            val eps = res.parseAs<AllAnimeResponse>().data?.show?.availableEpisodesDetail?.sub
+            if (!eps.isNullOrEmpty()) {
+                // AllAnime doesn't provide titles, so we map episode numbers to empty strings
+                val map = eps.associateWith { "" }
+                return Triple(map, "E1", "")
             }
-            if (!map.isNullOrEmpty()) return Triple(map, "E1", "")
         }
 
         val err = res ?: "Null"
@@ -173,9 +169,133 @@ class ProviderManager(
         }
     }
 
+    // --- VIDEO EXTRACTION ---
+
+    private val xorKeys = arrayOf(
+        "allanimenews".toCharArray(),
+        "1234567890123456789".toCharArray(),
+        "1234567890123456789012345".toCharArray(),
+        "s5feqxw21".toCharArray(),
+        "feqx1".toCharArray(),
+    )
+
+    private fun String.decryptSource(): String {
+        val (hexPayload, keyType) = when {
+            startsWith("--") -> substring(2) to 3
+            startsWith("#-") -> substring(2) to 2
+            startsWith("##") -> substring(2) to 1
+            startsWith("-#") -> substring(2) to 4
+            startsWith("#") -> substring(1) to 0
+            else -> this to null
+        }
+
+        if (keyType == null) return this
+
+        val key = xorKeys[keyType]
+        val parsedChunks = try {
+            hexPayload.chunked(2).map { it.toInt(16) }
+        } catch (_: NumberFormatException) {
+            return this
+        }
+
+        return String(CharArray(parsedChunks.size) { i ->
+            ((parsedChunks[i] xor key[i % key.size].code) and 0xFF).toChar()
+        })
+    }
+
     suspend fun fetchVideos(anilistId: Int, showId: String, epNum: Int): List<Video> {
         if (showId.isBlank() || showId == "NA") return emptyList()
-        // To be implemented later using the GET Persisted Query method
-        return emptyList()
+        
+        return try {
+            val variablesJson = buildJsonObject {
+                put("showId", showId)
+                put("translationType", "sub")
+                put("episodeString", epNum.toString())
+            }.toString()
+
+            val extensionsJson = buildJsonObject {
+                put("persistedQuery", buildJsonObject {
+                    put("version", 1)
+                    put("sha256Hash", "4257d8039f3e68b1c41941a7091721483d3d3050")
+                })
+            }.toString()
+
+            val url = allAnimeApi.toHttpUrl().newBuilder()
+                .addQueryParameter("variables", variablesJson)
+                .addQueryParameter("extensions", extensionsJson)
+                .build()
+
+            val request = Request.Builder()
+                .url(url)
+                .headers(allAnimeHeaders)
+                .get()
+                .build()
+
+            val responseBody = client.newCall(request).execute().body.string()
+            val parsed = responseBody.parseAs<AllAnimeResponse>()
+            val sourceUrls = parsed.data?.episode?.sourceUrls ?: emptyList()
+            
+            val videos = mutableListOf<Video>()
+            for (source in sourceUrls) {
+                val decryptedUrl = source.sourceUrl.decryptSource()
+                val providerName = "AllAnime"
+                
+                when {
+                    decryptedUrl.contains(".m3u8") -> {
+                        try {
+                            videos.addAll(playlistUtils.extractFromHls(decryptedUrl, decryptedUrl, allAnimeHeaders, allAnimeHeaders))
+                        } catch (e: Exception) {
+                            videos.add(Video(decryptedUrl, "$providerName HLS", decryptedUrl, headers = allAnimeHeaders))
+                        }
+                    }
+                    decryptedUrl.contains("filemoon") || decryptedUrl.contains("moon") -> {
+                        videos.addAll(filemoonExtractor.videosFromUrl(decryptedUrl, "$providerName Filemoon"))
+                    }
+                    decryptedUrl.contains("streamwish") || decryptedUrl.contains("wish") || decryptedUrl.contains("swhoi") -> {
+                        videos.addAll(streamwishExtractor.videosFromUrl(decryptedUrl, "$providerName StreamWish"))
+                    }
+                    decryptedUrl.contains("mp4upload") -> {
+                        videos.addAll(mp4uploadExtractor.videosFromUrl(decryptedUrl, allAnimeHeaders))
+                    }
+                    decryptedUrl.contains("dood") -> {
+                        videos.addAll(doodExtractor.videosFromUrl(decryptedUrl))
+                    }
+                    decryptedUrl.contains("vidstreaming") || decryptedUrl.contains("gogo") || decryptedUrl.contains("vidcloud") -> {
+                        videos.addAll(gogoStreamExtractor.videosFromUrl(decryptedUrl.replace(Regex("^//"), "https://")))
+                    }
+                    decryptedUrl.contains("streamlare") -> {
+                        videos.addAll(streamlareExtractor.videosFromUrl(decryptedUrl))
+                    }
+                    decryptedUrl.contains("ok.ru") || decryptedUrl.contains("okru") -> {
+                        videos.addAll(okruExtractor.videosFromUrl(decryptedUrl))
+                    }
+                    else -> {
+                        if (decryptedUrl.startsWith("http")) {
+                            videos.add(Video(decryptedUrl, "$providerName ${source.sourceName}", decryptedUrl, headers = allAnimeHeaders))
+                        }
+                    }
+                }
+            }
+            rankVideos(videos)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun rankVideos(videos: List<Video>): List<Video> {
+        val preferredSubType = preferences.getString("preferred_sub_type", "softsub") ?: "softsub"
+        return videos.sortedWith(
+            compareByDescending<Video> {
+                Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            }.thenBy {
+                when {
+                    it.quality.contains(preferredSubType, ignoreCase = true) -> 0
+                    it.quality.contains("softsub", ignoreCase = true) -> 1
+                    it.quality.contains("hardsub", ignoreCase = true) -> 2
+                    it.quality.contains("dub", ignoreCase = true) -> 3
+                    else -> 4
+                }
+            }
+        )
     }
 }
