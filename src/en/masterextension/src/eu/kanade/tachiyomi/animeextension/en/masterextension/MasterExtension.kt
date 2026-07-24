@@ -166,26 +166,32 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         val episodes = mutableListOf<SEpisode>()
 
-        // Fetch real episode titles from AllAnime
         var allAnimeEpisodes: Map<String, String> = emptyMap()
         var showId = ""
         var indicator = "S0-E0"
+        var errorInfo = ""
 
         try {
             val titleToSearch = englishTitle ?: romajiTitle ?: ""
             if (titleToSearch.isNotBlank()) {
-                val (id, showInd) = providerManager.fetchAllAnimeShowId(titleToSearch)
+                val (id, showInd, showErr) = providerManager.fetchAllAnimeShowId(titleToSearch)
                 showId = id
                 if (showId.isNotBlank()) {
-                    val (epMap, epInd) = providerManager.fetchAllAnimeEpisodes(showId)
+                    val (epMap, epInd, epErr) = providerManager.fetchAllAnimeEpisodes(showId)
                     allAnimeEpisodes = epMap
                     indicator = "$showInd-$epInd"
+                    if (epInd == "E0") errorInfo = epErr
                 } else {
                     indicator = "S0-E0"
+                    errorInfo = showErr
                 }
+            } else {
+                indicator = "S0-E0"
+                errorInfo = "NoTitle"
             }
         } catch (e: Exception) {
-            // Ignore, fallback to default names
+            indicator = "S0-E0"
+            errorInfo = e.message?.take(30) ?: "Exc"
         }
 
         for (i in 1..latestAired) {
@@ -195,7 +201,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 
             episodes.add(SEpisode.create().apply {
                 url = "$anilistId/${showId.ifBlank { "NA" }}/$i"
-                name = "Ep. $i: $titleStr [$indicator]"
+                name = "Ep. $i: $titleStr [$indicator${if (errorInfo.isNotBlank()) ":$errorInfo" else ""}]"
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
             })
