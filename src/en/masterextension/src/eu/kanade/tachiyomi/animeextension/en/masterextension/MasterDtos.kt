@@ -54,7 +54,6 @@ data class AniListNextAiring(
     val airingAt: Long? = null
 )
 
-// Consumet returns a raw JSON Array for episodes, not an object
 @Serializable
 data class ConsumetEpisode(
     val number: Int,
