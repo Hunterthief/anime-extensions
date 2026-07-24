@@ -107,7 +107,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     override fun animeDetailsRequest(anime: SAnime): Request {
-        // FIX: Removed invalid isLicensor field. AniList API only supports isAnimationStudio.
         val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes status season seasonYear format genres averageScore studios { nodes { name isAnimationStudio } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
         val variables = buildJsonObject { put("id", anime.url.toInt()) }
         return graphQLPost(baseUrl, headers, query, variables = variables)
@@ -118,7 +117,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         return SAnime.create().apply {
             title = media?.title?.romaji ?: media?.title?.english ?: "Unknown"
             
-            // Animation Studio is true, Licensors/Producers are false
             val studio = media?.studios?.nodes?.firstOrNull { it.isAnimationStudio == true }?.name ?: "Unknown"
             val producers = media?.studios?.nodes?.filter { it.isAnimationStudio == false }?.joinToString(", ") { it.name ?: "" }?.takeIf { it.isNotBlank() } ?: "Unknown"
             
