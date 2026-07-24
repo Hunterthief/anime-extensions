@@ -33,7 +33,6 @@ data class AniListMedia(
     val genres: List<String> = emptyList(),
     val averageScore: Int? = null,
     val studios: AniListStudios? = null,
-    val licensors: AniListStudios? = null,
     val nextAiringEpisode: AniListNextAiring? = null
 )
 
@@ -52,13 +51,13 @@ data class AniListCover(
 
 @Serializable
 data class AniListStudios(
-    // Made nullable to prevent crashes
     val nodes: List<AniListNode>? = null
 )
 
 @Serializable
 data class AniListNode(
-    val name: String? = null
+    val name: String? = null,
+    val isLicensor: Boolean? = null
 )
 
 @Serializable
