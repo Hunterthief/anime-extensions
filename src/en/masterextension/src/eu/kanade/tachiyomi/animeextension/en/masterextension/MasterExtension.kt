@@ -99,7 +99,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val formatFilter = filters.find { it is MasterFilters.FormatFilter } as? MasterFilters.FormatFilter
         val sortFilter = filters.find { it is MasterFilters.SortFilter } as? MasterFilters.SortFilter
 
-        val gqlQuery = "query (\$page: Int, \$search: String, \$genre: String, \$format: String, \$sort: [MediaSort]) { Page(page: \$page, perPage: 20) { media(type: ANIME, search: \$search, genre: \$genre, format: \$format, sort: \$sort) { id title { romaji english } coverImage { large } } } }"
+        // FIX: format MUST be declared as MediaFormat in GraphQL, not String
+        val gqlQuery = "query (\$page: Int, \$search: String, \$genre: String, \$format: MediaFormat, \$sort: [MediaSort]) { Page(page: \$page, perPage: 20) { media(type: ANIME, search: \$search, genre: \$genre, format: \$format, sort: \$sort) { id title { romaji english } coverImage { large } } } }"
 
         val genreStr = if (genreFilter?.values?.get(genreFilter.state) == "Any") null else genreFilter?.values?.get(genreFilter.state)
         val formatStr = if (formatFilter?.values?.get(formatFilter.state) == "Any") null else formatFilter?.values?.get(formatFilter.state)
@@ -114,7 +115,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         // Strict JSON variables to prevent HTTP 400
         val variables = buildJsonObject {
             put("page", page)
-            put("search", query)
+            put("search", query.ifBlank { null }) // Empty string can cause 400, pass null
             put("genre", genreStr)
             put("format", formatStr)
             put("sort", JsonArray(listOf(JsonPrimitive(sortStr))))
@@ -159,7 +160,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             genre = media?.genres?.joinToString(", ")
             thumbnail_url = media?.coverImage?.large
             
-            // Put Studio in author, Producers in artist
+            // FIX: Put Studio in author, Producers in artist
             author = studio
             artist = producers
         }
