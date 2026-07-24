@@ -113,6 +113,43 @@ class ProviderManager(
         return Triple("", "S0", err.take(60))
     }
 
+    fun fetchAllAnimeEpisodes(showId: String): Triple<Map<String, String>, String, String> {
+        // Added translationType: "sub" inside episodes argument
+        val query = """
+            query(${'$'}_id: String!) {
+              show(_id: ${'$'}_id) {
+                _id
+                episodes(translationType: "sub") {
+                  episodeString
+                  note
+                }
+              }
+            }
+        """.trimIndent()
+        
+        val payload = buildJsonObject {
+            put("query", query)
+            put("variables", buildJsonObject {
+                put("_id", showId)
+            })
+        }
+        
+        val res = makeAllAnimePostRequest(payload)
+        if (res != null && !res.startsWith("ERR") && !res.startsWith("EXC")) {
+            val eps = res.parseAs<AllAnimeResponse>().data?.show?.episodes
+            if (!eps.isNullOrEmpty()) {
+                val map = eps.mapNotNull { ep ->
+                    val title = ep.note?.takeIf { n -> n.isNotBlank() }
+                    if (title != null) ep.episodeString to title else null
+                }.toMap()
+                return Triple(map, "E1", "")
+            }
+        }
+
+        val err = res ?: "Null"
+        return Triple(emptyMap(), "E0", err.take(60))
+    }
+
     fun fetchJikanEpisodes(malId: Int): Triple<Map<String, String>, String, String> {
         var attempt = 0
         while (attempt < 3) {
@@ -125,10 +162,17 @@ class ProviderManager(
                     
                 client.newCall(request).execute().use { res ->
                     val bodyStr = res.body.string()
-                    if (res.code == 429) {
-                        // Rate limited, wait and retry
-                        return@use 
+                    
+                    if (res.code == 429 || res.code in 500..599) {
+                        attempt++
+                        if (attempt < 3) {
+                            try { Thread.sleep(2000) } catch (_: InterruptedException) {}
+                            return@use
+                        } else {
+                            return Triple(emptyMap(), "J0", "RetryFail:${res.code}")
+                        }
                     }
+                    
                     if (!res.isSuccessful) return Triple(emptyMap(), "J0", "ERR:${res.code}:${bodyStr.take(30)}")
                     
                     val parsed = bodyStr.parseAs<JikanResponse>()
@@ -142,13 +186,8 @@ class ProviderManager(
             } catch (e: Exception) {
                 return Triple(emptyMap(), "J0", "EXC:${e.message?.take(30)}")
             }
-            // If we reached here, it was a 429
-            attempt++
-            try {
-                Thread.sleep(1500)
-            } catch (_: InterruptedException) {}
         }
-        return Triple(emptyMap(), "J0", "RateLimit")
+        return Triple(emptyMap(), "J0", "MaxRetries")
     }
 
     // --- VIDEO EXTRACTION ---
