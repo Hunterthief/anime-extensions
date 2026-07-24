@@ -14,11 +14,9 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import keiyoushi.utils.getPreferencesLazy
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.add
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
@@ -39,6 +37,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     private val json = Json { ignoreUnknownKeys = true }
 
     private val consumetApi = preferences.getString("consumet_api_url", "https://api.consumet.org/meta/anilist") ?: "https://api.consumet.org/meta/anilist"
+    private val enimeApi = "https://api.enime.moe"
 
     private val providerManager by lazy { ProviderManager(client, headers, preferences) }
 
@@ -67,9 +66,9 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val season = getCurrentSeason()
         val query = "query (\$page: Int, \$season: MediaSeason, \$year: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, season: \$season, seasonYear: \$year, sort: POPULARITY_DESC) { id title { romaji english } coverImage { large } } } }"
         val variables = buildJsonObject {
-            put("page", JsonPrimitive(page))
-            put("season", JsonPrimitive(season))
-            put("year", JsonPrimitive(year))
+            put("page", page)
+            put("season", season)
+            put("year", year)
         }
         return buildGraphQLRequest(query, variables)
     }
@@ -89,7 +88,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
     override fun latestUpdatesRequest(page: Int): Request {
         val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC) { id title { romaji english } coverImage { large } } } }"
-        val variables = buildJsonObject { put("page", JsonPrimitive(page)) }
+        val variables = buildJsonObject { put("page", page) }
         return buildGraphQLRequest(query, variables)
     }
 
@@ -112,12 +111,13 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             else -> "SEARCH_MATCH"
         }
 
+        // Strict JSON variables to prevent HTTP 400
         val variables = buildJsonObject {
-            put("page", JsonPrimitive(page))
-            put("search", JsonPrimitive(query))
-            put("genre", if (genreStr != null) JsonPrimitive(genreStr) else JsonNull)
-            put("format", if (formatStr != null) JsonPrimitive(formatStr) else JsonNull)
-            put("sort", buildJsonArray { add(JsonPrimitive(sortStr)) })
+            put("page", page)
+            put("search", query)
+            put("genre", genreStr)
+            put("format", formatStr)
+            put("sort", JsonArray(listOf(JsonPrimitive(sortStr))))
         }
         return buildGraphQLRequest(gqlQuery, variables)
     }
@@ -125,8 +125,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     override fun animeDetailsRequest(anime: SAnime): Request {
-        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id title { romaji english native } description episodes status season seasonYear format genres averageScore studios(isMain: true) { nodes { name } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
-        val variables = buildJsonObject { put("id", JsonPrimitive(anime.url.toInt())) }
+        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id title { romaji english native } description episodes status season seasonYear format genres averageScore studios(isMain: true) { nodes { name } } licensors: studios(isLicensor: true) { nodes { name } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
+        val variables = buildJsonObject { put("id", anime.url.toInt()) }
         return buildGraphQLRequest(query, variables)
     }
 
@@ -136,6 +136,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             title = media?.title?.romaji ?: media?.title?.english ?: "Unknown"
             
             val studio = media?.studios?.nodes?.firstOrNull()?.name ?: "Unknown"
+            val producers = media?.licensors?.nodes?.joinToString(", ") { it.name ?: "" }?.takeIf { it.isNotBlank() } ?: "Unknown"
+            
             val nextEp = media?.nextAiringEpisode
             val nextEpString = if (nextEp != null && nextEp.timeUntilAiring != null) {
                 val days = nextEp.timeUntilAiring / 86400
@@ -146,7 +148,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             }
 
             val desc = media?.description?.let { Jsoup.parse(it).text() } ?: "No synopsis available."
-            description = "$desc\n\nStudio: $studio\nStatus: $nextEpString"
+            description = "$desc\n\nStudio: $studio\nProducers: $producers\nStatus: $nextEpString"
             
             status = when (media?.status) {
                 "RELEASING" -> SAnime.ONGOING
@@ -156,7 +158,10 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             }
             genre = media?.genres?.joinToString(", ")
             thumbnail_url = media?.coverImage?.large
-            artist = studio
+            
+            // Put Studio in author, Producers in artist
+            author = studio
+            artist = producers
         }
     }
 
@@ -165,39 +170,47 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun episodeListParse(response: Response): List<SEpisode> {
         val media = json.decodeFromString<AniListResponse>(response.body.string()).data?.Media
         val anilistId = media?.id ?: return emptyList()
-        val anilistEpCount = media.episodes ?: 12
+        
+        // Calculate latest aired episode to prevent unreleased episodes from showing
+        val nextEp = media.nextAiringEpisode
+        val anilistEpCount = media.episodes ?: 0
+        val latestAired = if (nextEp != null && nextEp.episode != null) {
+            nextEp.episode - 1
+        } else if (anilistEpCount > 0) {
+            anilistEpCount
+        } else {
+            12 // Fallback
+        }
 
-        // 1. Try to fetch real episode titles from Consumet
+        // 1. Try to fetch real episode titles from Enime
         return try {
-            val consumetUrl = "$consumetApi/episodes/$anilistId"
-            val consumetResponse = client.newCall(GET(consumetUrl, headers)).execute()
-            val episodeList = json.decodeFromString<List<ConsumetEpisode>>(consumetResponse.body.string())
+            val enimeUrl = "$enimeApi/anime/$anilistId"
+            val enimeResponse = client.newCall(GET(enimeUrl, headers)).execute()
+            val enimeData = json.decodeFromString<EnimeAnimeResponse>(enimeResponse.body.string())
 
-            if (episodeList.isNotEmpty()) {
-                // Success: Use Consumet titles and exact IDs
-                episodeList.map { ep ->
+            if (enimeData.episodes.isNotEmpty()) {
+                enimeData.episodes.map { ep ->
                     SEpisode.create().apply {
-                        url = ep.id // Store exact ID for instant video loading
+                        url = "$anilistId/${ep.id}" // Store AniList ID and Enime ID
                         name = if (!ep.title.isNullOrBlank()) "Ep. ${ep.number.toInt()}: ${ep.title}" else "Episode ${ep.number.toInt()}"
                         episode_number = ep.number
                         date_upload = System.currentTimeMillis()
                     }
-                }.reversed()
+                }.filter { it.episode_number <= latestAired }.reversed()
             } else {
-                // Consumet returned empty array, fallback to AniList count
-                generateFallbackEpisodes(anilistId, anilistEpCount)
+                generateFallbackEpisodes(anilistId, latestAired)
             }
         } catch (e: Exception) {
-            // Consumet API is down, fallback to AniList count
-            generateFallbackEpisodes(anilistId, anilistEpCount)
+            // Enime API is down, fallback to AniList count
+            generateFallbackEpisodes(anilistId, latestAired)
         }
     }
 
-    private fun generateFallbackEpisodes(anilistId: Int, episodeCount: Int): List<SEpisode> {
+    private fun generateFallbackEpisodes(anilistId: Int, latestAired: Int): List<SEpisode> {
         val eps = mutableListOf<SEpisode>()
-        for (i in 1..episodeCount) {
+        for (i in 1..latestAired) {
             eps.add(SEpisode.create().apply {
-                url = "$anilistId/$i"
+                url = "$anilistId/$i" // Store AniList ID and Episode Number
                 name = "Episode $i"
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
@@ -207,8 +220,12 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        // Pass the exact Episode URL (either Consumet ID or fallback AniListID/Num)
-        return providerManager.fetchVideos(episode.url)
+        val parts = episode.url.split("/")
+        val anilistId = parts.firstOrNull()?.toIntOrNull() ?: return emptyList()
+        val target = parts.lastOrNull() ?: return emptyList()
+        
+        // Pass the AniList ID and the Target (either Enime ID or Ep Number)
+        return providerManager.fetchVideos(anilistId, target)
     }
 
     override fun videoListParse(response: Response): List<Video> {
