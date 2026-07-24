@@ -146,7 +146,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 "No upcoming episodes scheduled."
             }
 
-            description = "${media?.description?.let { Jsoup.parse(it).text() }\n\nStudio: $studio\nStatus: $nextEpString}"
+            val desc = media?.description?.let { Jsoup.parse(it).text() } ?: "No synopsis available."
+            description = "$desc\n\nStudio: $studio\nStatus: $nextEpString"
             
             status = when (media?.status) {
                 "RELEASING" -> SAnime.ONGOING
