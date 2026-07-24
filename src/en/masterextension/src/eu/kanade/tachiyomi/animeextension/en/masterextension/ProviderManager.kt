@@ -93,8 +93,9 @@ class ProviderManager(
         val deferredVideos = consumetProviders.map { provider ->
             async {
                 try {
-                    // Consumet watch endpoint uses query params
-                    val serverUrl = "$consumetApi/watch?episodeId=$episodeId&provider=$provider"
+                    // FIX: URL encode the Episode ID for the query string
+                    val encodedEpId = java.net.URLEncoder.encode(episodeId, "UTF-8")
+                    val serverUrl = "$consumetApi/watch?episodeId=$encodedEpId&provider=$provider"
                     val response = client.newCall(GET(serverUrl, headers)).execute()
                     val data = json.decodeFromString<ConsumetServersResponse>(response.body.string())
                     extractFromSourceList(data.sources, data.headers, provider)
