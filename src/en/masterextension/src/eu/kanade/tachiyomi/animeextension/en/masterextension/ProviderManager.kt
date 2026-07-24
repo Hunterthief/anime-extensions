@@ -37,39 +37,46 @@ class ProviderManager(
     private val streamlareExtractor by lazy { StreamlareExtractor(client) }
     private val okruExtractor by lazy { OkruExtractor(client) }
 
-    suspend fun fetchVideos(anilistId: Int, episodeNumber: Int): List<Video> {
-        return fetchFromConsumet(anilistId, episodeNumber)
+    suspend fun fetchVideos(episodeUrl: String): List<Video> {
+        // If it contains a slash, it's a fallback (AniList ID / Ep Number)
+        return if (episodeUrl.contains("/")) {
+            val parts = episodeUrl.split("/")
+            val anilistId = parts[0].toIntOrNull() ?: return emptyList()
+            val episodeNumber = parts[1].toFloatOrNull() ?: 1f
+            fetchFromConsumetByNumber(anilistId, episodeNumber)
+        } else {
+            // It's a direct Consumet Episode ID
+            fetchFromConsumetById(episodeUrl)
+        }
     }
 
-    private suspend fun fetchFromConsumet(anilistId: Int, episodeNumber: Int): List<Video> = coroutineScope {
+    private suspend fun fetchFromConsumetById(episodeId: String): List<Video> = coroutineScope {
+        val deferredVideos = consumetProviders.map { provider ->
+            async {
+                try {
+                    val encodedEpId = java.net.URLEncoder.encode(episodeId, "UTF-8")
+                    val serverUrl = "$consumetApi/watch/$encodedEpId?provider=$provider"
+                    val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
+                    val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
+
+                    extractFromSourceList(serverData.sources, serverData.headers, provider)
+                } catch (e: Exception) {
+                    emptyList()
+                }
+            }
+        }
+        return@coroutineScope deferredVideos.awaitAll().flatten()
+    }
+
+    private suspend fun fetchFromConsumetByNumber(anilistId: Int, episodeNumber: Float): List<Video> = coroutineScope {
         try {
-            // 1. Fetch the episode list from Consumet
             val episodeListUrl = "$consumetApi/episodes/$anilistId"
             val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
-            
-            // Consumet returns a raw JSON Array, so we decode it as a List directly
             val episodeData = json.decodeFromString<List<ConsumetEpisode>>(episodeResponse.body.string())
             val targetEpisode = episodeData.firstOrNull { it.number == episodeNumber } 
                 ?: return@coroutineScope emptyList()
-            val episodeId = targetEpisode.id
-
-            // 2. Fetch servers from all 4 providers IN PARALLEL
-            val deferredVideos = consumetProviders.map { provider ->
-                async {
-                    try {
-                        val serverUrl = "$consumetApi/watch/$episodeId?provider=$provider"
-                        val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
-                        val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
-
-                        extractFromSourceList(serverData.sources, serverData.headers, provider)
-                    } catch (e: Exception) {
-                        emptyList()
-                    }
-                }
-            }
-
-            // 3. Wait for all parallel requests to finish and combine them
-            return@coroutineScope deferredVideos.awaitAll().flatten()
+            
+            return@coroutineScope fetchFromConsumetById(targetEpisode.id)
         } catch (e: Exception) {
             return@coroutineScope emptyList()
         }
