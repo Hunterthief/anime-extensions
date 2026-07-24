@@ -1,181 +1,161 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
-import androidx.preference.EditTextPreference
-import androidx.preference.ListPreference
-import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
-import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
-import eu.kanade.tachiyomi.animesource.model.AnimesPage
-import eu.kanade.tachiyomi.animesource.model.SAnime
-import eu.kanade.tachiyomi.animesource.model.SEpisode
+import android.content.SharedPreferences
+import aniyomi.lib.doodextractor.DoodExtractor
+import aniyomi.lib.filemoonextractor.FilemoonExtractor
+import aniyomi.lib.mp4uploadextractor.Mp4uploadExtractor
+import aniyomi.lib.okruextractor.OkruExtractor
+import aniyomi.lib.streamlareextractor.StreamlareExtractor
+import aniyomi.lib.streamwishextractor.StreamWishExtractor
+import aniyomi.lib.vidhideextractor.VidHideExtractor
+import aniyomi.lib.vidmolyextractor.VidMolyExtractor
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
-import eu.kanade.tachiyomi.network.POST
-import keiyoushi.utils.getPreferencesLazy
+import eu.kanade.tachiyomi.network.GET
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.Json
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
-import org.jsoup.Jsoup
+import okhttp3.Headers
+import okhttp3.OkHttpClient
 
-class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
-
-    override val name = "Master Extension"
-    override val baseUrl = "https://graphql.anilist.co"
-    override val lang = "en"
-    override val supportsLatest = true
-
-    private val preferences by getPreferencesLazy()
+class ProviderManager(
+    private val client: OkHttpClient,
+    private val headers: Headers,
+    private val preferences: SharedPreferences
+) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val providerManager by lazy { ProviderManager(client, headers, preferences) }
+    private val consumetApi = preferences.getString("consumet_api_url", "https://api.consumet.org/meta/anilist") ?: "https://api.consumet.org/meta/anilist"
+    private val consumetProviders = listOf("gogoanime", "zoro", "9anime", "animepahe")
 
-    private fun buildGraphQLRequest(query: String, variables: String): Request {
-        val payload = """{"query": "$query", "variables": $variables}"""
-        val body = payload.toRequestBody("application/json; charset=utf-8".toMediaType())
-        return POST(baseUrl, headers, body)
+    private val filemoonExtractor by lazy { FilemoonExtractor(client) }
+    private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
+    private val mp4uploadExtractor by lazy { Mp4uploadExtractor(client) }
+    private val doodExtractor by lazy { DoodExtractor(client) }
+    private val vidHideExtractor by lazy { VidHideExtractor(client, headers) }
+    private val vidMolyExtractor by lazy { VidMolyExtractor(client) }
+    private val streamlareExtractor by lazy { StreamlareExtractor(client) }
+    private val okruExtractor by lazy { OkruExtractor(client) }
+
+    suspend fun fetchVideos(anilistId: Int, episodeNumber: Int): List<Video> {
+        return fetchFromConsumet(anilistId, episodeNumber)
     }
 
-    override fun popularAnimeRequest(page: Int): Request {
-        val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, sort: POPULARITY_DESC) { id idMal title { romaji english } coverImage { large } episodes } } }"
-        val variables = """{"page": $page}"""
-        return buildGraphQLRequest(query, variables)
-    }
+    private suspend fun fetchFromConsumet(anilistId: Int, episodeNumber: Int): List<Video> = coroutineScope {
+        try {
+            // 1. Fetch the episode list from Consumet
+            val episodeListUrl = "$consumetApi/episodes/$anilistId"
+            val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
+            
+            // Consumet returns a raw JSON Array, so we decode it as a List directly
+            val episodeData = json.decodeFromString<List<ConsumetEpisode>>(episodeResponse.body.string())
+            val targetEpisode = episodeData.firstOrNull { it.number == episodeNumber } 
+                ?: return@coroutineScope emptyList()
+            val episodeId = targetEpisode.id
 
-    override fun popularAnimeParse(response: Response): AnimesPage {
-        val data = json.decodeFromString<AniListResponse>(response.body.string()).data?.Page?.media ?: emptyList()
-        val animes = data.map { media ->
-            SAnime.create().apply {
-                url = media.id.toString()
-                title = media.title?.romaji ?: media.title?.english ?: "Unknown"
-                thumbnail_url = media.coverImage?.large ?: ""
-                // Set artist to MAL ID so AniYomi can use AniSkip automatically
-                artist = media.idMal?.toString() ?: ""
-                initialized = true
-            }
-        }
-        return AnimesPage(animes, animes.isNotEmpty())
-    }
+            // 2. Fetch servers from all 4 providers IN PARALLEL
+            val deferredVideos = consumetProviders.map { provider ->
+                async {
+                    try {
+                        val serverUrl = "$consumetApi/watch/$episodeId?provider=$provider"
+                        val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
+                        val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
 
-    override fun latestUpdatesRequest(page: Int): Request {
-        val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, status: RELEASING, sort: START_DATE_DESC) { id idMal title { romaji english } coverImage { large } episodes } } }"
-        val variables = """{"page": $page}"""
-        return buildGraphQLRequest(query, variables)
-    }
-
-    override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
-
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
-        val genreFilter = filters.find { it is MasterFilters.GenreFilter } as? MasterFilters.GenreFilter
-        val formatFilter = filters.find { it is MasterFilters.FormatFilter } as? MasterFilters.FormatFilter
-        val sortFilter = filters.find { it is MasterFilters.SortFilter } as? MasterFilters.SortFilter
-
-        val gqlQuery = "query (\$page: Int, \$search: String, \$genre: String, \$format: String, \$sort: [MediaSort]) { Page(page: \$page, perPage: 20) { media(type: ANIME, search: \$search, genre: \$genre, format: \$format, sort: \$sort) { id idMal title { romaji english } coverImage { large } episodes } } }"
-
-        val genreStr = if (genreFilter?.values?.get(genreFilter.state) == "Any") null else genreFilter?.values?.get(genreFilter.state)
-        val formatStr = if (formatFilter?.values?.get(formatFilter.state) == "Any") null else formatFilter?.values?.get(formatFilter.state)
-        val sortStr = when (sortFilter?.values?.get(sortFilter.state)) {
-            "Popularity" -> "POPULARITY_DESC"
-            "Average Score" -> "SCORE_DESC"
-            "Newest" -> "START_DATE_DESC"
-            "Trending" -> "TRENDING_DESC"
-            else -> "SEARCH_MATCH"
-        }
-
-        val variables = """{"page": $page, "search": "$query", "genre": ${if (genreStr != null) "\"$genreStr\"" else "null"}, "format": ${if (formatStr != null) "\"$formatStr\"" else "null"}, "sort": ["$sortStr"]}"""
-        return buildGraphQLRequest(gqlQuery, variables)
-    }
-
-    override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
-
-    override fun animeDetailsRequest(anime: SAnime): Request {
-        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes status season seasonYear format genres averageScore nextAiringEpisode { episode airingAt } } }"
-        val variables = """{"id": ${anime.url.toInt()}}"""
-        return buildGraphQLRequest(query, variables)
-    }
-
-    override fun animeDetailsParse(response: Response): SAnime {
-        val media = json.decodeFromString<AniListResponse>(response.body.string()).data?.Media
-        return SAnime.create().apply {
-            title = media?.title?.romaji ?: media?.title?.english ?: "Unknown"
-            description = media?.description?.let { Jsoup.parse(it).text() }
-            status = when (media?.status) {
-                "RELEASING" -> SAnime.ONGOING
-                "FINISHED" -> SAnime.COMPLETED
-                "NOT_YET_RELEASED" -> SAnime.ONGOING
-                else -> SAnime.UNKNOWN
-            }
-            genre = media?.genres?.joinToString(", ")
-            thumbnail_url = media?.coverImage?.large
-            artist = media?.idMal?.toString() ?: ""
-        }
-    }
-
-    override fun episodeListRequest(anime: SAnime): Request = animeDetailsRequest(anime)
-
-    override fun episodeListParse(response: Response): List<SEpisode> {
-        val media = json.decodeFromString<AniListResponse>(response.body.string()).data?.Media
-        val episodeCount = media?.episodes ?: 0
-        val episodes = mutableListOf<SEpisode>()
-
-        for (i in 1..episodeCount) {
-            episodes.add(
-                SEpisode.create().apply {
-                    url = "${media?.id}/$i"
-                    name = "Episode $i"
-                    episode_number = i.toFloat()
-                    date_upload = System.currentTimeMillis()
+                        extractFromSourceList(serverData.sources, serverData.headers, provider)
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
                 }
-            )
+            }
+
+            // 3. Wait for all parallel requests to finish and combine them
+            return@coroutineScope deferredVideos.awaitAll().flatten()
+        } catch (e: Exception) {
+            return@coroutineScope emptyList()
         }
-        return episodes.reversed()
     }
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val parts = episode.url.split("/")
-        val anilistId = parts.firstOrNull()?.toIntOrNull() ?: return emptyList()
-        val episodeNumber = parts.lastOrNull()?.toFloat()?.toInt() ?: 1
+    private suspend fun extractFromSourceList(
+        sources: List<ConsumetSource>,
+        headersMap: Map<String, String>,
+        providerName: String
+    ): List<Video> {
+        val videos = mutableListOf<Video>()
+        for (source in sources) {
+            val url = source.url
+            val srcHeaders = Headers.Builder().apply {
+                headersMap.forEach { (k, v) -> add(k, v) }
+            }.build()
 
-        return providerManager.fetchVideos(anilistId, episodeNumber)
+            when {
+                url.contains(".m3u8") && source.isM3U8 == true -> {
+                    try {
+                        val m3u8Response = client.newCall(GET(url, srcHeaders)).execute()
+                        val masterPlaylist = m3u8Response.body.string()
+                        if (masterPlaylist.contains("#EXT-X-STREAM-INF:")) {
+                            val lines = masterPlaylist.split("\n")
+                            for (i in lines.indices) {
+                                if (lines[i].startsWith("#EXT-X-STREAM-INF:")) {
+                                    val res = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1) ?: "Unknown"
+                                    val quality = "$providerName $res p"
+                                    val videoUrl = lines[i + 1].trim()
+                                    videos.add(Video(videoUrl, quality, videoUrl, headers = srcHeaders))
+                                }
+                            }
+                        } else {
+                            videos.add(Video(url, "$providerName ${source.quality ?: "HLS"}", url, headers = srcHeaders))
+                        }
+                    } catch (e: Exception) {
+                        videos.add(Video(url, "$providerName ${source.quality ?: "HLS"}", url, headers = srcHeaders))
+                    }
+                }
+                url.contains("filemoon") || url.contains("moon") -> {
+                    videos.addAll(filemoonExtractor.videosFromUrl(url, "$providerName Filemoon"))
+                }
+                url.contains("streamwish") || url.contains("wish") || url.contains("swhoi") -> {
+                    videos.addAll(streamwishExtractor.videosFromUrl(url, "$providerName StreamWish"))
+                }
+                url.contains("mp4upload") -> {
+                    videos.addAll(mp4uploadExtractor.videosFromUrl(url, headers))
+                }
+                url.contains("dood") -> {
+                    videos.addAll(doodExtractor.videosFromUrl(url))
+                }
+                url.contains("vidhide") || url.contains("streamtape") -> {
+                    videos.addAll(vidHideExtractor.videosFromUrl(url))
+                }
+                url.contains("vidmoly") -> {
+                    videos.addAll(vidMolyExtractor.videosFromUrl(url))
+                }
+                url.contains("streamlare") -> {
+                    videos.addAll(streamlareExtractor.videosFromUrl(url))
+                }
+                url.contains("ok.ru") || url.contains("okru") -> {
+                    videos.addAll(okruExtractor.videosFromUrl(url))
+                }
+                else -> {
+                    videos.add(Video(url, "$providerName ${source.quality ?: "Unknown"}", url, headers = srcHeaders))
+                }
+            }
+        }
+        return videos
     }
 
-    override fun videoListParse(response: Response): List<Video> {
-        throw UnsupportedOperationException("Not used")
+    private fun rankVideos(videos: List<Video>): List<Video> {
+        val preferredSubType = preferences.getString("preferred_sub_type", "softsub") ?: "softsub"
+
+        return videos.sortedWith(
+            compareByDescending<Video> {
+                Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            }.thenBy {
+                when {
+                    it.quality.contains(preferredSubType, ignoreCase = true) -> 0
+                    it.quality.contains("softsub", ignoreCase = true) -> 1
+                    it.quality.contains("hardsub", ignoreCase = true) -> 2
+                    it.quality.contains("dub", ignoreCase = true) -> 3
+                    else -> 4
+                }
+            }
+        )
     }
-
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        ListPreference(screen.context).apply {
-            key = "preferred_sub_type"
-            title = "Preferred Subtitle Type"
-            entries = arrayOf("Soft Sub", "Hard Sub", "Dub")
-            entryValues = arrayOf("softsub", "hardsub", "dub")
-            summary = "%s"
-            setDefaultValue("softsub")
-        }.also { screen.addPreference(it) }
-
-        // Self-Hosting Preferences for APIs
-        EditTextPreference(screen.context).apply {
-            key = "consumet_api_url"
-            title = "Consumet API URL"
-            summary = "Custom or self-hosted URL for Consumet API"
-            setDefaultValue("https://api.consumet.org/meta/anilist")
-        }.also { screen.addPreference(it) }
-
-        EditTextPreference(screen.context).apply {
-            key = "amvstr_api_url"
-            title = "AMVStr API URL"
-            summary = "Custom or self-hosted URL for AMVStr API"
-            setDefaultValue("https://api.amvstr.me/api/v2")
-        }.also { screen.addPreference(it) }
-
-        EditTextPreference(screen.context).apply {
-            key = "enime_api_url"
-            title = "Enime API URL"
-            summary = "Custom or self-hosted URL for Enime API"
-            setDefaultValue("https://api.enime.moe")
-        }.also { screen.addPreference(it) }
-    }
-
-    override fun getFilterList(): AnimeFilterList = MasterFilters.filterList
 }
