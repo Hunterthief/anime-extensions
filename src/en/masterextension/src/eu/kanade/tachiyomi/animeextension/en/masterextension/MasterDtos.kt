@@ -89,13 +89,13 @@ data class AllAnimeShowEdge(
 @Serializable
 data class AllAnimeShow(
     val _id: String,
-    val episodes: List<AllAnimeEpisodeInfo> = emptyList()
+    val availableEpisodesDetail: AllAnimeEpisodesDetail? = null
 )
 
 @Serializable
-data class AllAnimeEpisodeInfo(
-    val episodeString: String,
-    val note: String? = null
+data class AllAnimeEpisodesDetail(
+    val sub: List<String> = emptyList(),
+    val dub: List<String> = emptyList()
 )
 
 @Serializable
