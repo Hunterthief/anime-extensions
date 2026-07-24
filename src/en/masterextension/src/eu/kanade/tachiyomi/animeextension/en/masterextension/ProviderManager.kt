@@ -116,7 +116,7 @@ class ProviderManager(
 
     fun fetchAllAnimeEpisodes(showId: String): Triple<Map<String, String>, String, String> {
         val query = """
-            query($_id: String!) {
+            query(${'$'}_id: String!) {
               show(_id: ${'$'}_id) {
                 _id
                 availableEpisodesDetail { sub dub }
