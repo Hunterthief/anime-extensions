@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
+import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
@@ -28,7 +29,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     private val preferences by getPreferencesLazy()
     private val json = Json { ignoreUnknownKeys = true }
 
-    // Pass preferences to ProviderManager
     private val providerManager by lazy { ProviderManager(client, headers, preferences) }
 
     private fun buildGraphQLRequest(query: String, variables: String): Request {
@@ -38,7 +38,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     override fun popularAnimeRequest(page: Int): Request {
-        val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, sort: POPULARITY_DESC) { id title { romaji english } coverImage { large } episodes } } }"
+        val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, sort: POPULARITY_DESC) { id idMal title { romaji english } coverImage { large } episodes } } }"
         val variables = """{"page": $page}"""
         return buildGraphQLRequest(query, variables)
     }
@@ -50,6 +50,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 url = media.id.toString()
                 title = media.title?.romaji ?: media.title?.english ?: "Unknown"
                 thumbnail_url = media.coverImage?.large ?: ""
+                // Set artist to MAL ID so AniYomi can use AniSkip automatically
+                artist = media.idMal?.toString() ?: ""
                 initialized = true
             }
         }
@@ -57,7 +59,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     override fun latestUpdatesRequest(page: Int): Request {
-        val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, status: RELEASING, sort: START_DATE_DESC) { id title { romaji english } coverImage { large } episodes } } }"
+        val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, status: RELEASING, sort: START_DATE_DESC) { id idMal title { romaji english } coverImage { large } episodes } } }"
         val variables = """{"page": $page}"""
         return buildGraphQLRequest(query, variables)
     }
@@ -69,7 +71,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val formatFilter = filters.find { it is MasterFilters.FormatFilter } as? MasterFilters.FormatFilter
         val sortFilter = filters.find { it is MasterFilters.SortFilter } as? MasterFilters.SortFilter
 
-        val gqlQuery = "query (\$page: Int, \$search: String, \$genre: String, \$format: String, \$sort: [MediaSort]) { Page(page: \$page, perPage: 20) { media(type: ANIME, search: \$search, genre: \$genre, format: \$format, sort: \$sort) { id title { romaji english } coverImage { large } episodes } } }"
+        val gqlQuery = "query (\$page: Int, \$search: String, \$genre: String, \$format: String, \$sort: [MediaSort]) { Page(page: \$page, perPage: 20) { media(type: ANIME, search: \$search, genre: \$genre, format: \$format, sort: \$sort) { id idMal title { romaji english } coverImage { large } episodes } } }"
 
         val genreStr = if (genreFilter?.values?.get(genreFilter.state) == "Any") null else genreFilter?.values?.get(genreFilter.state)
         val formatStr = if (formatFilter?.values?.get(formatFilter.state) == "Any") null else formatFilter?.values?.get(formatFilter.state)
@@ -88,7 +90,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     override fun animeDetailsRequest(anime: SAnime): Request {
-        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id title { romaji english native } description episodes status season seasonYear format genres averageScore nextAiringEpisode { episode airingAt } } }"
+        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes status season seasonYear format genres averageScore nextAiringEpisode { episode airingAt } } }"
         val variables = """{"id": ${anime.url.toInt()}}"""
         return buildGraphQLRequest(query, variables)
     }
@@ -106,6 +108,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             }
             genre = media?.genres?.joinToString(", ")
             thumbnail_url = media?.coverImage?.large
+            artist = media?.idMal?.toString() ?: ""
         }
     }
 
@@ -149,6 +152,28 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             entryValues = arrayOf("softsub", "hardsub", "dub")
             summary = "%s"
             setDefaultValue("softsub")
+        }.also { screen.addPreference(it) }
+
+        // Self-Hosting Preferences for APIs
+        EditTextPreference(screen.context).apply {
+            key = "consumet_api_url"
+            title = "Consumet API URL"
+            summary = "Custom or self-hosted URL for Consumet API"
+            setDefaultValue("https://api.consumet.org/meta/anilist")
+        }.also { screen.addPreference(it) }
+
+        EditTextPreference(screen.context).apply {
+            key = "amvstr_api_url"
+            title = "AMVStr API URL"
+            summary = "Custom or self-hosted URL for AMVStr API"
+            setDefaultValue("https://api.amvstr.me/api/v2")
+        }.also { screen.addPreference(it) }
+
+        EditTextPreference(screen.context).apply {
+            key = "enime_api_url"
+            title = "Enime API URL"
+            summary = "Custom or self-hosted URL for Enime API"
+            setDefaultValue("https://api.enime.moe")
         }.also { screen.addPreference(it) }
     }
 
