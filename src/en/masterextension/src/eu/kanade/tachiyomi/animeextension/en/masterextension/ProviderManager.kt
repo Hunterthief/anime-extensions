@@ -11,6 +11,9 @@ import aniyomi.lib.vidhideextractor.VidHideExtractor
 import aniyomi.lib.vidmolyextractor.VidMolyExtractor
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -21,12 +24,13 @@ class ProviderManager(
     private val preferences: SharedPreferences
 ) {
     private val json = Json { ignoreUnknownKeys = true }
-    private val consumetApi = "https://api.consumet.org/meta/anilist"
 
-    // Providers to aggregate
-    private val providers = listOf("gogoanime", "zoro", "9anime", "animepahe")
+    private val consumetApi = preferences.getString("consumet_api_url", "https://api.consumet.org/meta/anilist") ?: "https://api.consumet.org/meta/anilist"
+    private val amvstrApi = preferences.getString("amvstr_api_url", "https://api.amvstr.me/api/v2") ?: "https://api.amvstr.me/api/v2"
+    private val enimeApi = preferences.getString("enime_api_url", "https://api.enime.moe") ?: "https://api.enime.moe"
 
-    // Initialize shared extractors
+    private val consumetProviders = listOf("gogoanime", "zoro", "9anime", "animepahe")
+
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
     private val mp4uploadExtractor by lazy { Mp4uploadExtractor(client) }
@@ -37,90 +41,159 @@ class ProviderManager(
     private val okruExtractor by lazy { OkruExtractor(client) }
 
     suspend fun fetchVideos(anilistId: Int, episodeNumber: Int): List<Video> {
-        val aggregatedVideos = mutableListOf<Video>()
-
-        // 1. Fetch Episode List from Consumet using AniList ID
-        val episodeListUrl = "$consumetApi/episodes/$anilistId"
-        val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
-        val episodeData = json.decodeFromString<ConsumetEpisodesResponse>(episodeResponse.body.string())
-        val targetEpisode = episodeData.episodes.firstOrNull { it.number == episodeNumber } ?: return emptyList()
-        val episodeId = targetEpisode.id
-
-        // 2. Query all providers in sequence and aggregate sources
-        for (provider in providers) {
-            try {
-                val encodedEpId = java.net.URLEncoder.encode(episodeId, "UTF-8")
-                val serverUrl = "$consumetApi/watch?episodeId=$encodedEpId&provider=$provider"
-                val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
-                val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
-
-                for (source in serverData.sources) {
-                    val url = source.url
-                    val srcHeaders = Headers.Builder().apply {
-                        serverData.headers.forEach { (k, v) -> add(k, v) }
-                    }.build()
-
-                    // 3. Route URLs to the appropriate extraction logic
-                    when {
-                        url.contains(".m3u8") && source.isM3U8 == true -> {
-                            // Manual m3u8 parsing
-                            try {
-                                val m3u8Response = client.newCall(GET(url, srcHeaders)).execute()
-                                val masterPlaylist = m3u8Response.body.string()
-                                if (masterPlaylist.contains("#EXT-X-STREAM-INF:")) {
-                                    val lines = masterPlaylist.split("\n")
-                                    for (i in lines.indices) {
-                                        if (lines[i].startsWith("#EXT-X-STREAM-INF:")) {
-                                            val res = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1) ?: "Unknown"
-                                            val quality = "$provider $res p"
-                                            val videoUrl = lines[i + 1].trim()
-                                            aggregatedVideos.add(Video(videoUrl, quality, videoUrl, headers = srcHeaders))
-                                        }
-                                    }
-                                } else {
-                                    aggregatedVideos.add(Video(url, "$provider ${source.quality ?: "HLS"}", url, headers = srcHeaders))
-                                }
-                            } catch (e: Exception) {
-                                aggregatedVideos.add(Video(url, "$provider ${source.quality ?: "HLS"}", url, headers = srcHeaders))
-                            }
-                        }
-                        url.contains("filemoon") || url.contains("moon") -> {
-                            aggregatedVideos.addAll(filemoonExtractor.videosFromUrl(url, "$provider Filemoon"))
-                        }
-                        url.contains("streamwish") || url.contains("wish") || url.contains("swhoi") -> {
-                            aggregatedVideos.addAll(streamwishExtractor.videosFromUrl(url, "$provider StreamWish"))
-                        }
-                        url.contains("mp4upload") -> {
-                            // Mp4uploadExtractor expects Headers
-                            aggregatedVideos.addAll(mp4uploadExtractor.videosFromUrl(url, headers))
-                        }
-                        url.contains("dood") -> {
-                            aggregatedVideos.addAll(doodExtractor.videosFromUrl(url))
-                        }
-                        url.contains("vidhide") || url.contains("streamtape") -> {
-                            aggregatedVideos.addAll(vidHideExtractor.videosFromUrl(url))
-                        }
-                        url.contains("vidmoly") -> {
-                            aggregatedVideos.addAll(vidMolyExtractor.videosFromUrl(url))
-                        }
-                        url.contains("streamlare") -> {
-                            aggregatedVideos.addAll(streamlareExtractor.videosFromUrl(url))
-                        }
-                        url.contains("ok.ru") || url.contains("okru") -> {
-                            aggregatedVideos.addAll(okruExtractor.videosFromUrl(url))
-                        }
-                        else -> {
-                            aggregatedVideos.add(Video(url, "$provider ${source.quality ?: "Unknown"}", url, headers = srcHeaders))
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                // Silently fail one provider and try the next
-                continue
-            }
+        // 1. Try Consumet first (queries all 4 sites in parallel)
+        var videos = fetchFromConsumet(anilistId, episodeNumber)
+        
+        // 2. If Consumet fails or returns nothing, try Enime
+        if (videos.isEmpty()) {
+            videos = fetchFromEnime(anilistId, episodeNumber)
+        }
+        
+        // 3. If Enime also fails, try AMVStr
+        if (videos.isEmpty()) {
+            videos = fetchFromAMVStr(anilistId, episodeNumber)
         }
 
-        return rankVideos(aggregatedVideos)
+        return rankVideos(videos)
+    }
+
+    private suspend fun fetchFromConsumet(anilistId: Int, episodeNumber: Int): List<Video> = coroutineScope {
+        try {
+            // 1. Fetch the episode list from Consumet
+            val episodeListUrl = "$consumetApi/episodes/$anilistId"
+            val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
+            val episodeData = json.decodeFromString<ConsumetEpisodesResponse>(episodeResponse.body.string())
+            val targetEpisode = episodeData.episodes.firstOrNull { it.number == episodeNumber } 
+                ?: return@coroutineScope emptyList()
+            val episodeId = targetEpisode.id
+
+            // 2. Fetch servers from all 4 providers IN PARALLEL
+            val deferredVideos = consumetProviders.map { provider ->
+                async {
+                    try {
+                        val encodedEpId = java.net.URLEncoder.encode(episodeId, "UTF-8")
+                        val serverUrl = "$consumetApi/watch?episodeId=$encodedEpId&provider=$provider"
+                        val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
+                        val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
+
+                        extractFromSourceList(serverData.sources, serverData.headers, provider)
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                }
+            }
+
+            // 3. Wait for all parallel requests to finish and combine them
+            return@coroutineScope deferredVideos.awaitAll().flatten()
+        } catch (e: Exception) {
+            return@coroutineScope emptyList()
+        }
+    }
+
+    private suspend fun fetchFromAMVStr(anilistId: Int, episodeNumber: Int): List<Video> {
+        val videos = mutableListOf<Video>()
+        try {
+            val episodeListUrl = "$amvstrApi/anime/$anilistId"
+            val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
+            val episodeData = json.decodeFromString<ConsumetEpisodesResponse>(episodeResponse.body.string())
+            val targetEpisode = episodeData.episodes.firstOrNull { it.number == episodeNumber } ?: return videos
+            val episodeId = targetEpisode.id
+
+            val serverUrl = "$amvstrApi/source/$episodeId"
+            val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
+            val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
+
+            videos.addAll(extractFromSourceList(serverData.sources, serverData.headers, "AMVStr"))
+        } catch (e: Exception) {
+            return videos
+        }
+        return videos
+    }
+
+    private suspend fun fetchFromEnime(anilistId: Int, episodeNumber: Int): List<Video> {
+        val videos = mutableListOf<Video>()
+        try {
+            val episodeListUrl = "$enimeApi/anime/$anilistId"
+            val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
+            val episodeData = json.decodeFromString<ConsumetEpisodesResponse>(episodeResponse.body.string())
+            val targetEpisode = episodeData.episodes.firstOrNull { it.number == episodeNumber } ?: return videos
+            val episodeId = targetEpisode.id
+
+            val serverUrl = "$enimeApi/source/$episodeId"
+            val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
+            val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
+
+            videos.addAll(extractFromSourceList(serverData.sources, serverData.headers, "Enime"))
+        } catch (e: Exception) {
+            return videos
+        }
+        return videos
+    }
+
+    private suspend fun extractFromSourceList(
+        sources: List<ConsumetSource>,
+        headersMap: Map<String, String>,
+        providerName: String
+    ): List<Video> {
+        val videos = mutableListOf<Video>()
+        for (source in sources) {
+            val url = source.url
+            val srcHeaders = Headers.Builder().apply {
+                headersMap.forEach { (k, v) -> add(k, v) }
+            }.build()
+
+            when {
+                url.contains(".m3u8") && source.isM3U8 == true -> {
+                    try {
+                        val m3u8Response = client.newCall(GET(url, srcHeaders)).execute()
+                        val masterPlaylist = m3u8Response.body.string()
+                        if (masterPlaylist.contains("#EXT-X-STREAM-INF:")) {
+                            val lines = masterPlaylist.split("\n")
+                            for (i in lines.indices) {
+                                if (lines[i].startsWith("#EXT-X-STREAM-INF:")) {
+                                    val res = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1) ?: "Unknown"
+                                    val quality = "$providerName $res p"
+                                    val videoUrl = lines[i + 1].trim()
+                                    videos.add(Video(videoUrl, quality, videoUrl, headers = srcHeaders))
+                                }
+                            }
+                        } else {
+                            videos.add(Video(url, "$providerName ${source.quality ?: "HLS"}", url, headers = srcHeaders))
+                        }
+                    } catch (e: Exception) {
+                        videos.add(Video(url, "$providerName ${source.quality ?: "HLS"}", url, headers = srcHeaders))
+                    }
+                }
+                url.contains("filemoon") || url.contains("moon") -> {
+                    videos.addAll(filemoonExtractor.videosFromUrl(url, "$providerName Filemoon"))
+                }
+                url.contains("streamwish") || url.contains("wish") || url.contains("swhoi") -> {
+                    videos.addAll(streamwishExtractor.videosFromUrl(url, "$providerName StreamWish"))
+                }
+                url.contains("mp4upload") -> {
+                    videos.addAll(mp4uploadExtractor.videosFromUrl(url, headers))
+                }
+                url.contains("dood") -> {
+                    videos.addAll(doodExtractor.videosFromUrl(url))
+                }
+                url.contains("vidhide") || url.contains("streamtape") -> {
+                    videos.addAll(vidHideExtractor.videosFromUrl(url))
+                }
+                url.contains("vidmoly") -> {
+                    videos.addAll(vidMolyExtractor.videosFromUrl(url))
+                }
+                url.contains("streamlare") -> {
+                    videos.addAll(streamlareExtractor.videosFromUrl(url))
+                }
+                url.contains("ok.ru") || url.contains("okru") -> {
+                    videos.addAll(okruExtractor.videosFromUrl(url))
+                }
+                else -> {
+                    videos.add(Video(url, "$providerName ${source.quality ?: "Unknown"}", url, headers = srcHeaders))
+                }
+            }
+        }
+        return videos
     }
 
     private fun rankVideos(videos: List<Video>): List<Video> {
@@ -128,10 +201,8 @@ class ProviderManager(
 
         return videos.sortedWith(
             compareByDescending<Video> {
-                // Rank by resolution
                 Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             }.thenBy {
-                // Rank by preferred subtitle type
                 when {
                     it.quality.contains(preferredSubType, ignoreCase = true) -> 0
                     it.quality.contains("softsub", ignoreCase = true) -> 1
