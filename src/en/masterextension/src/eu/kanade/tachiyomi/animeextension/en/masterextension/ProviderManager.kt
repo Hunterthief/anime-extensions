@@ -139,7 +139,8 @@ class ProviderManager(
                     videos.addAll(streamwishExtractor.videosFromUrl(url, "$providerName StreamWish"))
                 }
                 url.contains("mp4upload") -> {
-                    videos.addAll(mp4uploadExtractor.videosFromUrl(url, "$providerName Mp4Upload"))
+                    // FIX: Mp4uploadExtractor expects a Headers object
+                    videos.addAll(mp4uploadExtractor.videosFromUrl(url, headers))
                 }
                 url.contains("dood") -> {
                     videos.addAll(doodExtractor.videosFromUrl(url))
