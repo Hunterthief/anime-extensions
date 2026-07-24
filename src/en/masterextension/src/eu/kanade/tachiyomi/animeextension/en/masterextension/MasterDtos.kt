@@ -72,8 +72,7 @@ data class AllAnimeResponse(
 data class AllAnimeData(
     val shows: AllAnimeShows? = null,
     val show: AllAnimeShow? = null,
-    val episode: AllAnimeEpisode? = null,
-    val tobeparsed: String? = null
+    val episode: AllAnimeEpisode? = null
 )
 
 @Serializable
@@ -110,4 +109,19 @@ data class AllAnimeSourceUrl(
     val sourceName: String,
     val type: String? = null,
     val priority: Float? = null
+)
+
+// Internal AllAnime apivtwo DTOs
+@Serializable
+data class AllAnimeApivtwoResponse(
+    val links: List<AllAnimeApivtwoLink> = emptyList()
+)
+
+@Serializable
+data class AllAnimeApivtwoLink(
+    val link: String,
+    val hls: String? = null,
+    val mp4: String? = null,
+    val resolutionStr: String? = null,
+    val src: String? = null
 )
