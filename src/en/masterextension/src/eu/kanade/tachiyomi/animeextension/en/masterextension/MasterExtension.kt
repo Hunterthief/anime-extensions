@@ -10,6 +10,7 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
+import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import keiyoushi.utils.getPreferencesLazy
 import kotlinx.serialization.json.Json
@@ -36,10 +37,10 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     private val json = Json { ignoreUnknownKeys = true }
 
     private val consumetApi = preferences.getString("consumet_api_url", "https://api.consumet.org/meta/anilist") ?: "https://api.consumet.org/meta/anilist"
+    private val jikanApi = "https://api.jikan.moe/v4"
 
     private val providerManager by lazy { ProviderManager(client, headers, preferences) }
 
-    // Bulletproof JSON builder using kotlinx.serialization
     private fun buildGraphQLRequest(query: String, variables: JsonObject): Request {
         val payload = buildJsonObject {
             put("query", query)
@@ -123,7 +124,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     override fun animeDetailsRequest(anime: SAnime): Request {
-        // FIX: Removed invalid isLicensor field. AniList API only supports isAnimationStudio.
         val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes status season seasonYear format genres averageScore studios { nodes { name isAnimationStudio } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
         val variables = buildJsonObject { put("id", anime.url.toInt()) }
         return buildGraphQLRequest(query, variables)
@@ -134,7 +134,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         return SAnime.create().apply {
             title = media?.title?.romaji ?: media?.title?.english ?: "Unknown"
             
-            // Animation Studio is true, Licensors/Producers are false
             val studio = media?.studios?.nodes?.firstOrNull { it.isAnimationStudio == true }?.name ?: "Unknown"
             val producers = media?.studios?.nodes?.filter { it.isAnimationStudio == false }?.joinToString(", ") { it.name ?: "" }?.takeIf { it.isNotBlank() } ?: "Unknown"
             
@@ -169,6 +168,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun episodeListParse(response: Response): List<SEpisode> {
         val media = json.decodeFromString<AniListResponse>(response.body.string()).data?.Media
         val anilistId = media?.id ?: return emptyList()
+        val malId = media.idMal
         
         val nextEp = media.nextAiringEpisode
         val anilistEpCount = media.episodes ?: 0
@@ -182,10 +182,24 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         val episodes = mutableListOf<SEpisode>()
 
+        // Fetch real episode titles from Jikan (MAL)
+        var jikanTitles: Map<Int, String> = emptyMap()
+        if (malId != null) {
+            try {
+                val jikanUrl = "$jikanApi/anime/$malId/episodes"
+                val jikanResponse = client.newCall(GET(jikanUrl, headers)).execute()
+                val jikanData = json.decodeFromString<JikanEpisodesResponse>(jikanResponse.body.string())
+                jikanTitles = jikanData.data.associate { it.mal_id to (it.title ?: "Episode ${it.mal_id}") }
+            } catch (e: Exception) {
+                // Ignore, fallback to default names
+            }
+        }
+
         for (i in 1..latestAired) {
+            val title = jikanTitles[i] ?: "Episode $i"
             episodes.add(SEpisode.create().apply {
                 url = "$anilistId/$i"
-                name = "Episode $i"
+                name = "Ep. $i: $title"
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
             })
