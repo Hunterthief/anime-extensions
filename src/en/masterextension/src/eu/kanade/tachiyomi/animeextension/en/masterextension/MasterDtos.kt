@@ -67,6 +67,18 @@ data class AniListNextAiring(
     val timeUntilAiring: Long? = null
 )
 
+// Jikan API (MAL) DTOs
+@Serializable
+data class JikanEpisodesResponse(
+    val data: List<JikanEpisode> = emptyList()
+)
+
+@Serializable
+data class JikanEpisode(
+    val mal_id: Int,
+    val title: String? = null
+)
+
 @Serializable
 data class ConsumetEpisode(
     val number: Float, 
