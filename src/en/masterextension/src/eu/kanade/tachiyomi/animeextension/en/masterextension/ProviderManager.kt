@@ -5,7 +5,6 @@ import aniyomi.lib.doodextractor.DoodExtractor
 import aniyomi.lib.filemoonextractor.FilemoonExtractor
 import aniyomi.lib.mp4uploadextractor.Mp4uploadExtractor
 import aniyomi.lib.okruextractor.OkruExtractor
-import aniyomi.lib.playlistutils.PlaylistUtils
 import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
 import aniyomi.lib.vidhideextractor.VidHideExtractor
@@ -31,7 +30,6 @@ class ProviderManager(
     
     private val consumetProviders = listOf("gogoanime", "zoro", "9anime", "animepahe")
 
-    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
     private val mp4uploadExtractor by lazy { Mp4uploadExtractor(client) }
@@ -113,8 +111,23 @@ class ProviderManager(
 
             when {
                 url.contains(".m3u8") && source.isM3U8 == true -> {
+                    // Manual m3u8 parsing
                     try {
-                        videos.addAll(playlistUtils.extractFromHls(url, srcHeaders, url))
+                        val m3u8Response = client.newCall(GET(url, srcHeaders)).execute()
+                        val masterPlaylist = m3u8Response.body.string()
+                        if (masterPlaylist.contains("#EXT-X-STREAM-INF:")) {
+                            val lines = masterPlaylist.split("\n")
+                            for (i in lines.indices) {
+                                if (lines[i].startsWith("#EXT-X-STREAM-INF:")) {
+                                    val res = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1) ?: "Unknown"
+                                    val quality = "$providerName $res p"
+                                    val videoUrl = lines[i + 1].trim()
+                                    videos.add(Video(videoUrl, quality, videoUrl, headers = srcHeaders))
+                                }
+                            }
+                        } else {
+                            videos.add(Video(url, "$providerName ${source.quality ?: "HLS"}", url, headers = srcHeaders))
+                        }
                     } catch (e: Exception) {
                         videos.add(Video(url, "$providerName ${source.quality ?: "HLS"}", url, headers = srcHeaders))
                     }
@@ -126,7 +139,7 @@ class ProviderManager(
                     videos.addAll(streamwishExtractor.videosFromUrl(url, "$providerName StreamWish"))
                 }
                 url.contains("mp4upload") -> {
-                    videos.addAll(mp4uploadExtractor.videosFromUrl(url, headers))
+                    videos.addAll(mp4uploadExtractor.videosFromUrl(url, "$providerName Mp4Upload"))
                 }
                 url.contains("dood") -> {
                     videos.addAll(doodExtractor.videosFromUrl(url))
