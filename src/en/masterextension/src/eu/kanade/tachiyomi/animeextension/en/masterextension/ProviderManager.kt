@@ -5,7 +5,6 @@ import aniyomi.lib.doodextractor.DoodExtractor
 import aniyomi.lib.filemoonextractor.FilemoonExtractor
 import aniyomi.lib.mp4uploadextractor.Mp4uploadExtractor
 import aniyomi.lib.okruextractor.OkruExtractor
-import aniyomi.lib.playlistutils.PlaylistUtils
 import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
 import aniyomi.lib.vidhideextractor.VidHideExtractor
@@ -29,7 +28,6 @@ class ProviderManager(
     private val consumetApi = preferences.getString("consumet_api_url", "https://api.consumet.org/meta/anilist") ?: "https://api.consumet.org/meta/anilist"
     private val consumetProviders = listOf("gogoanime", "zoro", "9anime", "animepahe")
 
-    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
     private val mp4uploadExtractor by lazy { Mp4uploadExtractor(client) }
@@ -56,9 +54,8 @@ class ProviderManager(
         val deferredVideos = consumetProviders.map { provider ->
             async {
                 try {
-                    val encodedEpId = java.net.URLEncoder.encode(episodeId, "UTF-8")
-                    // FIX: Consumet watch endpoint uses PATH PARAMS
-                    val serverUrl = "$consumetApi/watch/$encodedEpId?provider=$provider"
+                    // Consumet watch endpoint uses QUERY PARAMS
+                    val serverUrl = "$consumetApi/watch?episodeId=$episodeId&provider=$provider"
                     val response = client.newCall(GET(serverUrl, headers)).execute()
                     val data = json.decodeFromString<ConsumetServersResponse>(response.body.string())
                     extractFromSourceList(data.sources, data.headers, provider)
@@ -98,9 +95,23 @@ class ProviderManager(
 
             when {
                 url.contains(".m3u8") && source.isM3U8 == true -> {
+                    // Manual m3u8 parsing (No PlaylistUtils needed)
                     try {
-                        // FIX: extractFromHls expects a String referer
-                        videos.addAll(playlistUtils.extractFromHls(url, url, srcHeaders))
+                        val m3u8Response = client.newCall(GET(url, srcHeaders)).execute()
+                        val masterPlaylist = m3u8Response.body.string()
+                        if (masterPlaylist.contains("#EXT-X-STREAM-INF:")) {
+                            val lines = masterPlaylist.split("\n")
+                            for (i in lines.indices) {
+                                if (lines[i].startsWith("#EXT-X-STREAM-INF:")) {
+                                    val res = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1) ?: "Unknown"
+                                    val quality = "$providerName $res p"
+                                    val videoUrl = lines[i + 1].trim()
+                                    videos.add(Video(videoUrl, quality, videoUrl, headers = srcHeaders))
+                                }
+                            }
+                        } else {
+                            videos.add(Video(url, "$providerName ${source.quality ?: "HLS"}", url, headers = srcHeaders))
+                        }
                     } catch (e: Exception) {
                         videos.add(Video(url, "$providerName ${source.quality ?: "HLS"}", url, headers = srcHeaders))
                     }
