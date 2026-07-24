@@ -42,25 +42,15 @@ class ProviderManager(
     suspend fun fetchVideos(anilistId: Int, target: String): List<Video> = coroutineScope {
         val videos = mutableListOf<Video>()
         
-        // Check if target is an episode number (fallback) or an ID (Enime)
-        val isNumber = target.toFloatOrNull() != null
+        // Target is always an episode number from MasterExtension
+        val epNum = target.toFloatOrNull() ?: 1f
         
-        if (isNumber) {
-            val epNum = target.toFloat()
-            // Try Enime by number
-            videos.addAll(fetchFromEnimeByNumber(anilistId, epNum))
-            // Try Consumet by number
-            if (videos.isEmpty()) {
-                videos.addAll(fetchFromConsumetByNumber(anilistId, epNum))
-            }
-        } else {
-            // It's an ID
-            // Try Enime
-            videos.addAll(fetchFromEnimeById(target))
-            // Try Consumet
-            if (videos.isEmpty()) {
-                videos.addAll(fetchFromConsumetById(target))
-            }
+        // Try Enime first
+        videos.addAll(fetchFromEnimeByNumber(anilistId, epNum))
+        
+        // Try Consumet
+        if (videos.isEmpty()) {
+            videos.addAll(fetchFromConsumetByNumber(anilistId, epNum))
         }
         
         return@coroutineScope rankVideos(videos)
@@ -72,51 +62,40 @@ class ProviderManager(
             val response = client.newCall(GET(animeUrl, headers)).execute()
             val data = json.decodeFromString<EnimeAnimeResponse>(response.body.string())
             val ep = data.episodes.firstOrNull { it.number.toInt() == episodeNumber.toInt() } ?: return emptyList()
-            fetchFromEnimeById(ep.id)
+            
+            val serverUrl = "$enimeApi/source/${ep.id}"
+            val serverResponse = client.newCall(GET(serverUrl, headers)).execute()
+            val serverData = json.decodeFromString<ConsumetServersResponse>(serverResponse.body.string())
+            extractFromSourceList(serverData.sources, serverData.headers, "Enime")
         } catch (e: Exception) {
             emptyList()
         }
     }
 
-    private suspend fun fetchFromEnimeById(episodeId: String): List<Video> {
-        return try {
-            val serverUrl = "$enimeApi/source/$episodeId"
-            val response = client.newCall(GET(serverUrl, headers)).execute()
-            val data = json.decodeFromString<ConsumetServersResponse>(response.body.string())
-            extractFromSourceList(data.sources, data.headers, "Enime")
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
-
-    private suspend fun fetchFromConsumetById(episodeId: String): List<Video> = coroutineScope {
-        val deferredVideos = consumetProviders.map { provider ->
-            async {
-                try {
-                    // FIX: URL encode the Episode ID for the query string
-                    val encodedEpId = java.net.URLEncoder.encode(episodeId, "UTF-8")
-                    val serverUrl = "$consumetApi/watch?episodeId=$encodedEpId&provider=$provider"
-                    val response = client.newCall(GET(serverUrl, headers)).execute()
-                    val data = json.decodeFromString<ConsumetServersResponse>(response.body.string())
-                    extractFromSourceList(data.sources, data.headers, provider)
-                } catch (e: Exception) {
-                    emptyList()
-                }
-            }
-        }
-        return@coroutineScope deferredVideos.awaitAll().flatten()
-    }
-
-    private suspend fun fetchFromConsumetByNumber(anilistId: Int, episodeNumber: Float): List<Video> {
-        return try {
+    private suspend fun fetchFromConsumetByNumber(anilistId: Int, episodeNumber: Float): List<Video> = coroutineScope {
+        try {
             val episodeListUrl = "$consumetApi/episodes/$anilistId"
             val episodeResponse = client.newCall(GET(episodeListUrl, headers)).execute()
             val episodeData = json.decodeFromString<List<ConsumetEpisode>>(episodeResponse.body.string())
-            val targetEpisode = episodeData.firstOrNull { it.number.toInt() == episodeNumber.toInt() } ?: return emptyList()
+            val targetEpisode = episodeData.firstOrNull { it.number.toInt() == episodeNumber.toInt() } 
+                ?: return@coroutineScope emptyList()
             
-            fetchFromConsumetById(targetEpisode.id)
+            val deferredVideos = consumetProviders.map { provider ->
+                async {
+                    try {
+                        val encodedEpId = java.net.URLEncoder.encode(targetEpisode.id, "UTF-8")
+                        val serverUrl = "$consumetApi/watch?episodeId=$encodedEpId&provider=$provider"
+                        val response = client.newCall(GET(serverUrl, headers)).execute()
+                        val data = json.decodeFromString<ConsumetServersResponse>(response.body.string())
+                        extractFromSourceList(data.sources, data.headers, provider)
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                }
+            }
+            return@coroutineScope deferredVideos.awaitAll().flatten()
         } catch (e: Exception) {
-            emptyList()
+            return@coroutineScope emptyList()
         }
     }
 
