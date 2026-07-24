@@ -151,8 +151,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val media = response.parseGraphQLAs<AniListMediaData>().Media ?: return emptyList()
         val anilistId = media.id
         
-        // Prefer English title as AllAnime mostly indexes English titles
-        val title = media.title?.english ?: media.title?.romaji ?: "Unknown"
+        val englishTitle = media.title?.english
+        val romajiTitle = media.title?.romaji
         
         val nextEp = media.nextAiringEpisode
         val anilistEpCount = media.episodes ?: 0
@@ -169,21 +169,33 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         // Fetch real episode titles from AllAnime
         var allAnimeEpisodes: Map<String, String> = emptyMap()
         var showId = ""
+        var indicator = "S0-E0"
+
         try {
-            showId = providerManager.fetchAllAnimeShowId(title)
-            if (showId.isNotBlank()) {
-                allAnimeEpisodes = providerManager.fetchAllAnimeEpisodes(showId)
+            val titleToSearch = englishTitle ?: romajiTitle ?: ""
+            if (titleToSearch.isNotBlank()) {
+                val (id, showInd) = providerManager.fetchAllAnimeShowId(titleToSearch)
+                showId = id
+                if (showId.isNotBlank()) {
+                    val (epMap, epInd) = providerManager.fetchAllAnimeEpisodes(showId)
+                    allAnimeEpisodes = epMap
+                    indicator = "$showInd-$epInd"
+                } else {
+                    indicator = "S0-E0"
+                }
             }
         } catch (e: Exception) {
             // Ignore, fallback to default names
         }
 
         for (i in 1..latestAired) {
-            val titleStr = allAnimeEpisodes[i.toString()] ?: "Episode $i"
+            val titleStr = allAnimeEpisodes[i.toString()] 
+                ?: allAnimeEpisodes[String.format("%02d", i)] 
+                ?: "Episode $i"
+                
             episodes.add(SEpisode.create().apply {
-                // Store AniList ID and AllAnime Show ID and Episode String
                 url = "$anilistId/${showId.ifBlank { "NA" }}/$i"
-                name = "Ep. $i: $titleStr"
+                name = "Ep. $i: $titleStr [$indicator]"
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
             })
