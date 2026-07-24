@@ -170,35 +170,54 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         var allAnimeEpisodes: Map<String, String> = emptyMap()
         var jikanEpisodes: Map<String, String> = emptyMap()
         var showId = ""
+        var indicator = "S0-E0-J0"
+        var errorInfo = ""
 
         try {
             val titleToSearch = englishTitle ?: romajiTitle ?: ""
+            
+            // 1. Try AllAnime
             if (titleToSearch.isNotBlank()) {
-                val (id, _, _) = providerManager.fetchAllAnimeShowId(titleToSearch)
+                val (id, showInd, showErr) = providerManager.fetchAllAnimeShowId(titleToSearch)
                 showId = id
                 if (showId.isNotBlank()) {
-                    val (epMap, _, _) = providerManager.fetchAllAnimeEpisodes(showId)
+                    val (epMap, epInd, epErr) = providerManager.fetchAllAnimeEpisodes(showId)
                     allAnimeEpisodes = epMap
+                    indicator = "$showInd-$epInd-J0"
+                    if (epInd == "E0") errorInfo = epErr
+                } else {
+                    indicator = "S0-E0-J0"
+                    errorInfo = showErr
                 }
             }
             
-            if (malId != null) {
-                val (jMap, _, _) = providerManager.fetchJikanEpisodes(malId)
+            // 2. Try Jikan (MAL) if AllAnime failed or for fallback
+            if (allAnimeEpisodes.isEmpty() && malId != null) {
+                val (jMap, jInd, jErr) = providerManager.fetchJikanEpisodes(malId)
                 jikanEpisodes = jMap
+                indicator = "${indicator.dropLast(2)}$jInd" // Replace J0 with J1
+                if (jikanEpisodes.isEmpty() && errorInfo.isBlank()) {
+                    errorInfo = jErr
+                } else if (jikanEpisodes.isNotEmpty()) {
+                    errorInfo = "" // Clear error if Jikan saved us
+                }
+            } else if (malId == null) {
+                indicator = "${indicator.dropLast(2)}J0"
+                if (errorInfo.isBlank()) errorInfo = "NoMAL"
             }
         } catch (e: Exception) {
-            // Ignore
+            indicator = "S0-E0-J0"
+            errorInfo = e.message?.take(30) ?: "Exc"
         }
 
         for (i in 1..latestAired) {
-            // Jikan provides titles, AllAnime just confirms which episodes exist
             val titleStr = jikanEpisodes[i.toString()] 
                 ?: jikanEpisodes[String.format("%02d", i)]
                 ?: "Episode $i"
                 
             episodes.add(SEpisode.create().apply {
                 url = "$anilistId/${showId.ifBlank { "NA" }}/$i"
-                name = "Ep. $i: $titleStr"
+                name = "Ep. $i: $titleStr [$indicator${if (errorInfo.isNotBlank()) ":$errorInfo" else ""}]"
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
             })
