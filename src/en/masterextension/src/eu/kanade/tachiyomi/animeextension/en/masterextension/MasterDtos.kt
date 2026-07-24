@@ -78,44 +78,6 @@ data class JikanEpisode(
     val title: String? = null
 )
 
-// AllAnime API DTOs
-@Serializable
-data class AllAnimeSearchResponse(
-    val data: AllAnimeSearchData? = null
-)
-
-@Serializable
-data class AllAnimeSearchData(
-    val shows: AllAnimeShows? = null
-)
-
-@Serializable
-data class AllAnimeShows(
-    val edges: List<AllAnimeShowEdge> = emptyList()
-)
-
-@Serializable
-data class AllAnimeShowEdge(
-    val _id: String,
-    val name: String? = null
-)
-
-@Serializable
-data class AllAnimeEpisodeResponse(
-    val data: AllAnimeEpisodeData? = null
-)
-
-@Serializable
-data class AllAnimeEpisodeData(
-    val episode: AllAnimeEpisode? = null
-)
-
-@Serializable
-data class AllAnimeEpisode(
-    val sourceUrls: List<String> = emptyList()
-)
-
-// Consumet DTOs
 @Serializable
 data class ConsumetEpisode(
     val number: Float, 
