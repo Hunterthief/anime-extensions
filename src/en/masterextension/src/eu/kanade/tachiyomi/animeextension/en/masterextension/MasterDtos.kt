@@ -52,7 +52,8 @@ data class AniListCover(
 
 @Serializable
 data class AniListStudios(
-    val nodes: List<AniListNode>? = null // Made nullable to prevent crashes
+    // Made nullable to prevent crashes
+    val nodes: List<AniListNode>? = null
 )
 
 @Serializable
