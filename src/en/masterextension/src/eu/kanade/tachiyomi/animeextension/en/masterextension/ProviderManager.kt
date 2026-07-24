@@ -12,13 +12,13 @@ import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
 import eu.kanade.tachiyomi.animesource.model.Video
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonRequestBody
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.Headers
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 
 class ProviderManager(
     private val client: OkHttpClient,
@@ -47,9 +47,9 @@ class ProviderManager(
         }.build()
     }
 
-    private fun makeRequest(payload: String): String? {
+    private fun makeRequest(payload: JsonObject): String? {
         return try {
-            val body = payload.toRequestBody("application/json".toMediaType())
+            val body = payload.toString().toJsonRequestBody()
             val request = Request.Builder()
                 .url(allAnimeApi)
                 .post(body)
@@ -70,19 +70,16 @@ class ProviderManager(
     }
 
     fun fetchAllAnimeShowId(title: String): Pair<String, String> {
-        val escapedTitle = title.replace("\\", "\\\\").replace("\"", "\\\"")
-
-        // --- STRATEGY 1: Raw String Payload ---
-        val payload1 = """{"query":"query (\$search: SearchInput!) { shows(search: \$search, limit: 40, page: 1, translationType: \"SUB\", countryOrigin: \"ALL\") { edges { _id name } } }","variables":{"search":{"query":"$escapedTitle","allowAdult":true,"allowUnknown":true}}}"""
-        makeRequest(payload1)?.let { body ->
-            val id = body.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?._id
-            if (!id.isNullOrBlank()) return Pair(id, "S1")
-        }
-
-        // --- STRATEGY 2: kotlinx.serialization JsonObject ---
-        val query2 = "query (\$search: SearchInput!) { shows(search: \$search, limit: 40, page: 1, translationType: \"SUB\", countryOrigin: \"ALL\") { edges { _id name } } }"
-        val payload2 = buildJsonObject {
-            put("query", query2)
+        // --- STRATEGY 1: Normal Object ---
+        val query1 = """
+            query (${'$'}search: SearchInput!) {
+                shows(search: ${'$'}search, limit: 40, page: 1, translationType: "SUB", countryOrigin: "ALL") {
+                    edges { _id name }
+                }
+            }
+        """.trimIndent()
+        val payload1 = buildJsonObject {
+            put("query", query1)
             put("variables", buildJsonObject {
                 put("search", buildJsonObject {
                     put("query", title)
@@ -90,22 +87,51 @@ class ProviderManager(
                     put("allowUnknown", true)
                 })
             })
-        }.toString()
-        makeRequest(payload2)?.let { body ->
+        }
+        makeRequest(payload1)?.let { body ->
             val id = body.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?._id
-            if (!id.isNullOrBlank()) return Pair(id, "S2")
+            if (!id.isNullOrBlank()) return Pair(id, "S1")
         }
 
-        // --- STRATEGY 3: Primitives in Variables ---
-        val query3 = "query (\$search: String!, \$translation: String!, \$country: String!) { shows(search: {query: \$search, allowAdult: true, allowUnknown: true}, limit: 40, page: 1, translationType: \$translation, countryOrigin: \$country) { edges { _id name } } }"
-        val payload3 = buildJsonObject {
-            put("query", query3)
+        // --- STRATEGY 2: Primitives ---
+        val query2 = """
+            query (${'$'}search: String!, ${'$'}translation: String!, ${'$'}country: String!) {
+                shows(search: {query: ${'$'}search, allowAdult: true, allowUnknown: true}, limit: 40, page: 1, translationType: ${'$'}translation, countryOrigin: ${'$'}country) {
+                    edges { _id name }
+                }
+            }
+        """.trimIndent()
+        val payload2 = buildJsonObject {
+            put("query", query2)
             put("variables", buildJsonObject {
                 put("search", title)
                 put("translation", "SUB")
                 put("country", "ALL")
             })
-        }.toString()
+        }
+        makeRequest(payload2)?.let { body ->
+            val id = body.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?._id
+            if (!id.isNullOrBlank()) return Pair(id, "S2")
+        }
+
+        // --- STRATEGY 3: Strict Object ---
+        val query3 = """
+            query (${'$'}search: SearchInput!) {
+                shows(search: ${'$'}search, limit: 40, page: 1, translationType: "sub", countryOrigin: "ALL") {
+                    edges { _id name availableEpisodes }
+                }
+            }
+        """.trimIndent()
+        val payload3 = buildJsonObject {
+            put("query", query3)
+            put("variables", buildJsonObject {
+                put("search", buildJsonObject {
+                    put("query", title)
+                    put("allowAdult", true)
+                    put("allowUnknown", false)
+                })
+            })
+        }
         makeRequest(payload3)?.let { body ->
             val id = body.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?._id
             if (!id.isNullOrBlank()) return Pair(id, "S3")
@@ -115,8 +141,20 @@ class ProviderManager(
     }
 
     fun fetchAllAnimeEpisodes(showId: String): Pair<Map<String, String>, String> {
-        // --- STRATEGY 1: Raw String Payload ---
-        val payload1 = """{"query":"query (\$showId: String!) { show(_id: \$showId) { _id episodes { episodeString note } } }","variables":{"showId":"$showId"}}"""
+        // --- STRATEGY 1: Normal ---
+        val query1 = """
+            query (${'$'}showId: String!) {
+                show(_id: ${'$'}showId) {
+                    _id episodes { episodeString note }
+                }
+            }
+        """.trimIndent()
+        val payload1 = buildJsonObject {
+            put("query", query1)
+            put("variables", buildJsonObject {
+                put("showId", showId)
+            })
+        }
         makeRequest(payload1)?.let { body ->
             val map = body.parseAs<AllAnimeResponse>().data?.show?.episodes?.associate {
                 it.episodeString to (it.note?.takeIf { n -> n.isNotBlank() } ?: "Episode ${it.episodeString}")
@@ -124,14 +162,20 @@ class ProviderManager(
             if (!map.isNullOrEmpty()) return Pair(map, "E1")
         }
 
-        // --- STRATEGY 2: kotlinx.serialization JsonObject ---
-        val query2 = "query (\$showId: String!) { show(_id: \$showId) { _id episodes { episodeString note } } }"
+        // --- STRATEGY 2: Reversed JSON Order ---
+        val query2 = """
+            query (${'$'}showId: String!) {
+                show(_id: ${'$'}showId) {
+                    _id episodes { episodeString note }
+                }
+            }
+        """.trimIndent()
         val payload2 = buildJsonObject {
-            put("query", query2)
             put("variables", buildJsonObject {
                 put("showId", showId)
             })
-        }.toString()
+            put("query", query2)
+        }
         makeRequest(payload2)?.let { body ->
             val map = body.parseAs<AllAnimeResponse>().data?.show?.episodes?.associate {
                 it.episodeString to (it.note?.takeIf { n -> n.isNotBlank() } ?: "Episode ${it.episodeString}")
