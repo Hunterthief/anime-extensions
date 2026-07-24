@@ -64,8 +64,16 @@ data class AniListNextAiring(
 
 // AllAnime API DTOs
 @Serializable
-data class AllAnimeSearchData(
-    val shows: AllAnimeShows? = null
+data class AllAnimeResponse(
+    val data: AllAnimeData? = null
+)
+
+@Serializable
+data class AllAnimeData(
+    val shows: AllAnimeShows? = null,
+    val show: AllAnimeShow? = null,
+    val episode: AllAnimeEpisode? = null,
+    val tobeparsed: String? = null
 )
 
 @Serializable
@@ -80,11 +88,6 @@ data class AllAnimeShowEdge(
 )
 
 @Serializable
-data class AllAnimeShowData(
-    val show: AllAnimeShow? = null
-)
-
-@Serializable
 data class AllAnimeShow(
     val _id: String,
     val episodes: List<AllAnimeEpisodeInfo> = emptyList()
@@ -94,11 +97,6 @@ data class AllAnimeShow(
 data class AllAnimeEpisodeInfo(
     val episodeString: String,
     val note: String? = null
-)
-
-@Serializable
-data class AllAnimeEpisodeData(
-    val episode: AllAnimeEpisode? = null
 )
 
 @Serializable
