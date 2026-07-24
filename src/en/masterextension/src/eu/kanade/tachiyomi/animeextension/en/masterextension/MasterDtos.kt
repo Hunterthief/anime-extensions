@@ -52,7 +52,7 @@ data class AniListCover(
 
 @Serializable
 data class AniListStudios(
-    val nodes: List<AniListNode> = emptyList()
+    val nodes: List<AniListNode>? = null // Made nullable to prevent crashes
 )
 
 @Serializable
@@ -67,7 +67,6 @@ data class AniListNextAiring(
     val timeUntilAiring: Long? = null
 )
 
-// Jikan API (MAL) DTOs for Episode Titles
 @Serializable
 data class JikanEpisodesResponse(
     val data: List<JikanEpisode> = emptyList()
@@ -79,7 +78,6 @@ data class JikanEpisode(
     val title: String? = null
 )
 
-// Consumet/Enime DTOs
 @Serializable
 data class EnimeAnimeResponse(
     val episodes: List<ConsumetEpisode> = emptyList()
