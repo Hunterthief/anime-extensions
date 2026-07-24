@@ -49,7 +49,12 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             put("variables", variables)
         }
         val body = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-        return POST(baseUrl, headers, body)
+        // FIX: Add explicit headers to prevent HTTP 400
+        val aniListHeaders = headers.newBuilder()
+            .add("Content-Type", "application/json")
+            .add("Accept", "application/json")
+            .build()
+        return POST(baseUrl, aniListHeaders, body)
     }
 
     private fun getCurrentSeason(): String {
