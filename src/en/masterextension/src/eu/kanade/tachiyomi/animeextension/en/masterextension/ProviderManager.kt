@@ -138,9 +138,10 @@ class ProviderManager(
         if (res != null && !res.startsWith("ERR") && !res.startsWith("EXC")) {
             val eps = res.parseAs<AllAnimeResponse>().data?.show?.episodes
             if (!eps.isNullOrEmpty()) {
-                val map = eps.associate { 
-                    it.episodeString to (it.note?.takeIf { n -> n.isNotBlank() } ?: "")
-                }
+                val map = eps.mapNotNull { ep ->
+                    val title = ep.note?.takeIf { n -> n.isNotBlank() }
+                    if (title != null) ep.episodeString to title else null
+                }.toMap()
                 return Triple(map, "E1", "")
             }
         }
@@ -162,9 +163,10 @@ class ProviderManager(
                 if (!res.isSuccessful) return Triple(emptyMap(), "J0", "ERR:${res.code}:${bodyStr.take(30)}")
                 
                 val parsed = bodyStr.parseAs<JikanResponse>()
-                val map = parsed.data?.associate { 
-                    it.mal_id.toString() to (it.title ?: "Episode ${it.mal_id}")
-                } ?: emptyMap()
+                val map = parsed.data?.mapNotNull { ep ->
+                    val title = ep.title?.takeIf { it.isNotBlank() }
+                    if (title != null) ep.mal_id.toString() to title else null
+                }?.toMap() ?: emptyMap()
                 
                 if (map.isNotEmpty()) Triple(map, "J1", "") else Triple(emptyMap(), "J0", "Empty")
             }
