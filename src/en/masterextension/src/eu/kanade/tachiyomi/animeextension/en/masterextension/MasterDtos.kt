@@ -21,7 +21,7 @@ data class AniListMediaPage(
 @Serializable
 data class AniListMedia(
     val id: Int,
-    val idMal: Int? = null,
+    val idMal: Int? = null, // Added for AniSkip support
     val title: AniListTitle? = null,
     val description: String? = null,
     val coverImage: AniListCover? = null,
