@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import android.content.SharedPreferences
-import android.net.Uri
 import aniyomi.lib.doodextractor.DoodExtractor
 import aniyomi.lib.filemoonextractor.FilemoonExtractor
 import aniyomi.lib.gogostreamextractor.GogoStreamExtractor
@@ -12,9 +11,14 @@ import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
 import eu.kanade.tachiyomi.animesource.model.Video
 import keiyoushi.utils.parseAs
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.Headers
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 
 class ProviderManager(
     private val client: OkHttpClient,
@@ -43,89 +47,85 @@ class ProviderManager(
         }.build()
     }
 
-    private fun makeRequest(query: String, variables: String): String? {
+    private fun makeRequest(payload: JsonObject): String? {
         return try {
-            // AllAnime requires the payload in the URL query parameters, not the body!
-            val url = Uri.parse(allAnimeApi).buildUpon()
-                .appendQueryParameter("variables", variables)
-                .appendQueryParameter("query", query)
-                .build()
-                .toString()
-
+            val body = payload.toString().toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
-                .url(url)
-                .post(okhttp3.RequestBody.create(null, ByteArray(0))) // Empty body
+                .url(allAnimeApi)
+                .post(body)
                 .headers(allAnimeHeaders)
                 .build()
 
             client.newCall(request).execute().use { res ->
+                val bodyStr = res.body.string()
                 if (!res.isSuccessful) {
-                    return "ERROR:${res.code}"
+                    return "ERR:${res.code}:$bodyStr"
                 }
-                res.body.string()
+                bodyStr
             }
         } catch (e: Exception) {
-            "EXC:${e.message?.take(30)}"
+            "EXC:${e.message?.take(50)}"
         }
     }
 
     fun fetchAllAnimeShowId(title: String): Triple<String, String, String> {
-        // --- STRATEGY 1: SearchInput Object ---
-        val query1 = "query (\$search: SearchInput!, \$limit: Int, \$page: Int, \$translationType: String, \$countryOrigin: String) { shows(search: \$search, limit: \$limit, page: \$page, translationType: \$translationType, countryOrigin: \$countryOrigin) { edges { _id name } } }"
-        val variables1 = """{"search":{"query":"$title","allowAdult":true,"allowUnknown":false},"limit":40,"page":1,"translationType":"sub","countryOrigin":"ALL"}"""
+        val query = """
+            query (${'$'}search: SearchInput!) {
+                shows(search: ${'$'}search, limit: 40, page: 1, translationType: "sub", countryOrigin: "ALL") {
+                    edges { _id name }
+                }
+            }
+        """.trimIndent()
         
-        val res1 = makeRequest(query1, variables1)
-        if (res1 != null && !res1.startsWith("ERROR") && !res1.startsWith("EXC")) {
-            val id = res1.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?._id
+        val payload = buildJsonObject {
+            put("query", query)
+            put("variables", buildJsonObject {
+                put("search", buildJsonObject {
+                    put("query", title)
+                    put("allowAdult", true)
+                    put("allowUnknown", false)
+                })
+            })
+        }
+        
+        val res = makeRequest(payload)
+        if (res != null && !res.startsWith("ERR") && !res.startsWith("EXC")) {
+            val id = res.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?._id
             if (!id.isNullOrBlank()) return Triple(id, "S1", "")
         }
 
-        // --- STRATEGY 2: Raw String Search ---
-        val query2 = "query (\$search: String!) { shows(search: \$search, limit: 40, page: 1, translationType: \"sub\", countryOrigin: \"ALL\") { edges { _id name } } }"
-        val variables2 = """{"search":"$title"}"""
-        
-        val res2 = makeRequest(query2, variables2)
-        if (res2 != null && !res2.startsWith("ERROR") && !res2.startsWith("EXC")) {
-            val id = res2.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?._id
-            if (!id.isNullOrBlank()) return Triple(id, "S2", "")
-        }
-
-        val err = res1 ?: res2 ?: "Null"
-        return Triple("", "S0", err.take(50))
+        return Triple("", "S0", res?.take(60) ?: "Null")
     }
 
     fun fetchAllAnimeEpisodes(showId: String): Triple<Map<String, String>, String, String> {
-        // --- STRATEGY 1: Normal ---
-        val query1 = "query (\$showId: String!) { show(_id: \$showId) { _id episodes { episodeString note } } }"
-        val variables1 = """{"showId":"$showId"}"""
+        val query = """
+            query (${'$'}showId: String!) {
+                show(_id: ${'$'}showId) {
+                    _id episodes { episodeString note }
+                }
+            }
+        """.trimIndent()
         
-        val res1 = makeRequest(query1, variables1)
-        if (res1 != null && !res1.startsWith("ERROR") && !res1.startsWith("EXC")) {
-            val map = res1.parseAs<AllAnimeResponse>().data?.show?.episodes?.associate {
+        val payload = buildJsonObject {
+            put("query", query)
+            put("variables", buildJsonObject {
+                put("showId", showId)
+            })
+        }
+        
+        val res = makeRequest(payload)
+        if (res != null && !res.startsWith("ERR") && !res.startsWith("EXC")) {
+            val map = res.parseAs<AllAnimeResponse>().data?.show?.episodes?.associate {
                 it.episodeString to (it.note?.takeIf { n -> n.isNotBlank() } ?: "Episode ${it.episodeString}")
             }
             if (!map.isNullOrEmpty()) return Triple(map, "E1", "")
         }
 
-        // --- STRATEGY 2: Reversed ---
-        val query2 = "query (\$showId: String!) { show(_id: \$showId) { _id episodes { episodeString note } } }"
-        val variables2 = """{"showId":"$showId"}"""
-        
-        val res2 = makeRequest(query2, variables2)
-        if (res2 != null && !res2.startsWith("ERROR") && !res2.startsWith("EXC")) {
-            val map = res2.parseAs<AllAnimeResponse>().data?.show?.episodes?.associate {
-                it.episodeString to (it.note?.takeIf { n -> n.isNotBlank() } ?: "Episode ${it.episodeString}")
-            }
-            if (!map.isNullOrEmpty()) return Triple(map, "E2", "")
-        }
-
-        val err = res1 ?: res2 ?: "Null"
-        return Triple(emptyMap(), "E0", err.take(50))
+        return Triple(emptyMap(), "E0", res?.take(60) ?: "Null")
     }
 
     suspend fun fetchVideos(anilistId: Int, showId: String, epNum: Int): List<Video> {
         if (showId.isBlank() || showId == "NA") return emptyList()
-        // To be implemented later
         return emptyList()
     }
 }
