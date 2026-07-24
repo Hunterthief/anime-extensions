@@ -57,7 +57,6 @@ class ProviderManager(
             add("Accept", "application/json")
             add("Accept-Language", "en-US,en;q=0.9")
             add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            add("Referer", "https://myanimelist.net/")
         }.build()
     }
 
@@ -114,65 +113,42 @@ class ProviderManager(
         return Triple("", "S0", err.take(60))
     }
 
-    fun fetchAllAnimeEpisodes(showId: String): Triple<Map<String, String>, String, String> {
-        val query = """
-            query(${'$'}_id: String!) {
-              show(_id: ${'$'}_id) {
-                _id
-                episodes {
-                  episodeString
-                  note
-                }
-              }
-            }
-        """.trimIndent()
-        
-        val payload = buildJsonObject {
-            put("query", query)
-            put("variables", buildJsonObject {
-                put("_id", showId)
-            })
-        }
-        
-        val res = makeAllAnimePostRequest(payload)
-        if (res != null && !res.startsWith("ERR") && !res.startsWith("EXC")) {
-            val eps = res.parseAs<AllAnimeResponse>().data?.show?.episodes
-            if (!eps.isNullOrEmpty()) {
-                val map = eps.mapNotNull { ep ->
-                    val title = ep.note?.takeIf { n -> n.isNotBlank() }
-                    if (title != null) ep.episodeString to title else null
-                }.toMap()
-                return Triple(map, "E1", "")
-            }
-        }
-
-        val err = res ?: "Null"
-        return Triple(emptyMap(), "E0", err.take(60))
-    }
-
     fun fetchJikanEpisodes(malId: Int): Triple<Map<String, String>, String, String> {
-        return try {
-            val request = Request.Builder()
-                .url("$jikanApi/anime/$malId/episodes")
-                .headers(jikanHeaders)
-                .get()
-                .build()
-                
-            client.newCall(request).execute().use { res ->
-                val bodyStr = res.body.string()
-                if (!res.isSuccessful) return Triple(emptyMap(), "J0", "ERR:${res.code}:${bodyStr.take(30)}")
-                
-                val parsed = bodyStr.parseAs<JikanResponse>()
-                val map = parsed.data?.mapNotNull { ep ->
-                    val title = ep.title?.takeIf { it.isNotBlank() }
-                    if (title != null) ep.mal_id.toString() to title else null
-                }?.toMap() ?: emptyMap()
-                
-                if (map.isNotEmpty()) Triple(map, "J1", "") else Triple(emptyMap(), "J0", "Empty")
+        var attempt = 0
+        while (attempt < 3) {
+            try {
+                val request = Request.Builder()
+                    .url("$jikanApi/anime/$malId/episodes")
+                    .headers(jikanHeaders)
+                    .get()
+                    .build()
+                    
+                client.newCall(request).execute().use { res ->
+                    val bodyStr = res.body.string()
+                    if (res.code == 429) {
+                        // Rate limited, wait and retry
+                        return@use 
+                    }
+                    if (!res.isSuccessful) return Triple(emptyMap(), "J0", "ERR:${res.code}:${bodyStr.take(30)}")
+                    
+                    val parsed = bodyStr.parseAs<JikanResponse>()
+                    val map = parsed.data?.mapNotNull { ep ->
+                        val title = ep.title?.takeIf { it.isNotBlank() }
+                        if (title != null) ep.mal_id.toString() to title else null
+                    }?.toMap() ?: emptyMap()
+                    
+                    return Triple(if (map.isNotEmpty()) map else emptyMap(), if (map.isNotEmpty()) "J1" else "J0", if (map.isNotEmpty()) "" else "Empty")
+                }
+            } catch (e: Exception) {
+                return Triple(emptyMap(), "J0", "EXC:${e.message?.take(30)}")
             }
-        } catch (e: Exception) {
-            Triple(emptyMap(), "J0", "EXC:${e.message?.take(30)}")
+            // If we reached here, it was a 429
+            attempt++
+            try {
+                Thread.sleep(1500)
+            } catch (_: InterruptedException) {}
         }
+        return Triple(emptyMap(), "J0", "RateLimit")
     }
 
     // --- VIDEO EXTRACTION ---
