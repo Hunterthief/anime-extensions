@@ -57,7 +57,6 @@ data class AniListStudios(
 @Serializable
 data class AniListNode(
     val name: String? = null,
-    val isLicensor: Boolean? = null,
     val isAnimationStudio: Boolean? = null
 )
 
