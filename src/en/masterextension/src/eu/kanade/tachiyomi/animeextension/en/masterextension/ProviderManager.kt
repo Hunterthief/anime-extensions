@@ -45,6 +45,14 @@ class ProviderManager(
     private val streamlareExtractor by lazy { StreamlareExtractor(client) }
     private val okruExtractor by lazy { OkruExtractor(client) }
 
+    // AllAnime requires specific headers to bypass Cloudflare
+    private val allAnimeHeaders by lazy {
+        Headers.Builder().apply {
+            add("Referer", "https://allmanga.to/")
+            add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        }.build()
+    }
+
     suspend fun fetchVideos(anilistId: Int, target: String, title: String): List<Video> = coroutineScope {
         val epNum = target.toFloatOrNull() ?: 1f
         val videos = mutableListOf<Video>()
@@ -62,10 +70,10 @@ class ProviderManager(
 
     private suspend fun fetchFromAllAnime(title: String, episodeNumber: Float): List<Video> = coroutineScope {
         try {
-            val searchQuery = "query (\$search: String!) { shows(search: \$search) { edges { _id name } } }"
+            val searchQuery = "query (\$search: String!) { shows(search: \$search, allowAdult: true) { edges { _id name } } }"
             val searchVars = """{"search":"${title.replace("\"", "\\\"")}"}"""
             val searchPayload = """{"query":"$searchQuery","variables":$searchVars}"""
-            val searchResponse = client.newCall(POST(allAnimeApi, headers, searchPayload.toRequestBody("application/json; charset=utf-8".toMediaType()))).execute()
+            val searchResponse = client.newCall(POST(allAnimeApi, allAnimeHeaders, searchPayload.toRequestBody("application/json; charset=utf-8".toMediaType()))).execute()
             val searchData = json.decodeFromString<AllAnimeSearchResponse>(searchResponse.body.string())
             val showId = searchData.data?.shows?.edges?.firstOrNull()?._id ?: return@coroutineScope emptyList()
             
@@ -77,7 +85,7 @@ class ProviderManager(
                     try {
                         val epVars = """{"showId":"$showId","episodeString":"${episodeNumber.toInt()}","translationType":"SUB","source":"$source"}"""
                         val epPayload = """{"query":"$epQuery","variables":$epVars}"""
-                        val epResponse = client.newCall(POST(allAnimeApi, headers, epPayload.toRequestBody("application/json; charset=utf-8".toMediaType()))).execute()
+                        val epResponse = client.newCall(POST(allAnimeApi, allAnimeHeaders, epPayload.toRequestBody("application/json; charset=utf-8".toMediaType()))).execute()
                         val epData = json.decodeFromString<AllAnimeEpisodeResponse>(epResponse.body.string())
                         val sources = epData.data?.episode?.sourceUrls ?: emptyList()
                         
@@ -100,7 +108,7 @@ class ProviderManager(
     private suspend fun extractFromAllAnimeUrl(url: String, providerName: String): List<Video> {
         val videos = mutableListOf<Video>()
         try {
-            val response = client.newCall(GET(url, headers)).execute()
+            val response = client.newCall(GET(url, allAnimeHeaders)).execute()
             val body = response.body.string()
             
             val unpacked = if (body.contains("eval(function(p,a,c,k,e,d)")) {
@@ -114,12 +122,13 @@ class ProviderManager(
                 val srcUrl = match.groupValues[1]
                 if (srcUrl.contains(".m3u8")) {
                     try {
+                        // FIX: extractFromHls expects a String referer
                         videos.addAll(playlistUtils.extractFromHls(srcUrl, url))
                     } catch (e: Exception) {
-                        videos.add(Video(srcUrl, "$providerName AllAnime", srcUrl, headers = headers))
+                        videos.add(Video(srcUrl, "$providerName AllAnime", srcUrl, headers = allAnimeHeaders))
                     }
                 } else {
-                    videos.add(Video(srcUrl, "$providerName AllAnime MP4", srcUrl, headers = headers))
+                    videos.add(Video(srcUrl, "$providerName AllAnime MP4", srcUrl, headers = allAnimeHeaders))
                 }
             }
             
@@ -174,6 +183,7 @@ class ProviderManager(
             when {
                 url.contains(".m3u8") && source.isM3U8 == true -> {
                     try {
+                        // FIX: extractFromHls expects a String referer
                         videos.addAll(playlistUtils.extractFromHls(url, url))
                     } catch (e: Exception) {
                         videos.add(Video(url, "$providerName ${source.quality ?: "HLS"}", url, headers = srcHeaders))
