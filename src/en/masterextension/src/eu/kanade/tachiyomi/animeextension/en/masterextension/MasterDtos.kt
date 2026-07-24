@@ -21,7 +21,7 @@ data class AniListMediaPage(
 @Serializable
 data class AniListMedia(
     val id: Int,
-    val idMal: Int? = null, // Added for AniSkip support
+    val idMal: Int? = null,
     val title: AniListTitle? = null,
     val description: String? = null,
     val coverImage: AniListCover? = null,
@@ -54,11 +54,7 @@ data class AniListNextAiring(
     val airingAt: Long? = null
 )
 
-@Serializable
-data class ConsumetEpisodesResponse(
-    val episodes: List<ConsumetEpisode> = emptyList()
-)
-
+// Consumet returns a raw JSON Array for episodes, not an object
 @Serializable
 data class ConsumetEpisode(
     val number: Int,
