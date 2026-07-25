@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
+import androidx.preference.MultiSelectListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
@@ -21,6 +22,7 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.TextNode
+import java.net.URLEncoder
 import java.util.Calendar
 import kotlin.math.roundToInt
 
@@ -117,10 +119,10 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val media = response.parseGraphQLAs<AniListMediaData>().Media
         return SAnime.create().apply {
             title = media?.title?.english ?: media?.title?.romaji ?: "Unknown"
-            
+
             val studio = media?.studios?.nodes?.firstOrNull { it.isAnimationStudio == true }?.name ?: "Unknown"
             val producers = media?.studios?.nodes?.filter { it.isAnimationStudio == false }?.joinToString(", ") { it.name ?: "" }?.takeIf { it.isNotBlank() } ?: "Unknown"
-            
+
             val nextEp = media?.nextAiringEpisode
             val nextEpString = if (nextEp != null && nextEp.timeUntilAiring != null) {
                 val days = nextEp.timeUntilAiring / 86400
@@ -132,33 +134,33 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
             // Fetch rich details from MyAnimeList
             val malDetails = media?.idMal?.let { providerManager.fetchMalAnimeDetails(it) }
-            
-            val synopsis = malDetails?.synopsis?.takeIf { it.isNotBlank() } 
-                ?: media?.description?.let { cleanSynopsis(it) }?.takeIf { it.isNotBlank() } 
+
+            val synopsis = malDetails?.synopsis?.takeIf { it.isNotBlank() }
+                ?: media?.description?.let { cleanSynopsis(it) }?.takeIf { it.isNotBlank() }
                 ?: "No synopsis available."
-                
-            val scoreStr = malDetails?.score?.takeIf { it.isNotBlank() } 
+
+            val scoreStr = malDetails?.score?.takeIf { it.isNotBlank() }
                 ?: media?.averageScore?.let { "$it%" }
-                
+
             val starLine = starRatingLine(scoreStr)
             val statusValue = nextEpString.trim()
-            
-            val type = malDetails?.type?.takeIf { it.isNotBlank() } 
-                ?: media?.format?.replace("_", " ")?.lowercase()?.capitalizeFirst() 
+
+            val type = malDetails?.type?.takeIf { it.isNotBlank() }
+                ?: media?.format?.replace("_", " ")?.lowercase()?.capitalizeFirst()
                 ?: ""
-                
-            val seasonStr = malDetails?.premiered?.takeIf { it.isNotBlank() } 
+
+            val seasonStr = malDetails?.premiered?.takeIf { it.isNotBlank() }
                 ?: ((media?.season?.lowercase()?.capitalizeFirst() ?: "") + " " + (media?.seasonYear ?: "")).trim()
-                
-            val episodesStr = malDetails?.episodes?.takeIf { it.isNotBlank() } 
+
+            val episodesStr = malDetails?.episodes?.takeIf { it.isNotBlank() }
                 ?: episodesText(media?.episodes)
-                
-            val durationStr = malDetails?.duration?.takeIf { it.isNotBlank() } 
+
+            val durationStr = malDetails?.duration?.takeIf { it.isNotBlank() }
                 ?: durationText(media?.duration)
-            
+
             val infoLine = buildInfoLine(type, seasonStr, episodesStr, durationStr)
             val genreValue = media?.genres.toDisplayList()
-            
+
             val ratingValue = malDetails?.rating?.takeIf { it.isNotBlank() } ?: "N/A"
             val ratingLine = "**Rating:** $ratingValue"
 
@@ -170,7 +172,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 genreValue?.takeIf { it.isNotBlank() }?.let { "**Genres:** $it" },
                 ratingLine
             )
-            
+
             status = when (media?.status) {
                 "RELEASING" -> SAnime.ONGOING
                 "FINISHED" -> SAnime.COMPLETED
@@ -179,7 +181,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             }
             genre = genreValue
             thumbnail_url = media?.coverImage?.large
-            
+
             author = studio
             artist = producers
         }
@@ -191,10 +193,11 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val media = response.parseGraphQLAs<AniListMediaData>().Media ?: return emptyList()
         val anilistId = media.id
         val malId = media.idMal
-        
+
         val englishTitle = media.title?.english
         val romajiTitle = media.title?.romaji
-        
+        val titleToEncode = englishTitle ?: romajiTitle ?: ""
+
         val nextEp = media.nextAiringEpisode
         val anilistEpCount = media.episodes ?: 0
         val latestAired = if (nextEp != null && nextEp.episode != null) {
@@ -207,17 +210,11 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         val episodes = mutableListOf<SEpisode>()
 
+        // Fetch MAL episode titles/dates (AllAnime showId is NO LONGER fetched here —
+        // each provider resolves its own ID when getVideoList is called)
         var malEpisodes: List<MalEpisode> = emptyList()
-        var showId = ""
 
         try {
-            val titleToSearch = englishTitle ?: romajiTitle ?: ""
-            
-            if (titleToSearch.isNotBlank()) {
-                val (id, _, _) = providerManager.fetchAllAnimeShowId(titleToSearch)
-                showId = id
-            }
-            
             if (malId != null) {
                 val (mList, _, _) = providerManager.fetchMalEpisodes(malId)
                 malEpisodes = mList
@@ -228,12 +225,20 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         val malEpMap = malEpisodes.associateBy { it.number }
 
+        // URL-encode the title so it survives the slash-delimited URL format.
+        // Episode URL format: $anilistId/$malId/$epNum/$urlEncodedTitle
+        val encodedTitle = try {
+            URLEncoder.encode(titleToEncode, "UTF-8")
+        } catch (_: Exception) {
+            ""
+        }
+
         for (i in 1..latestAired) {
             val malEp = malEpMap[i.toString()] ?: malEpMap[String.format("%02d", i)]
             val titleStr = malEp?.title ?: "Episode $i"
-            
+
             episodes.add(SEpisode.create().apply {
-                url = "$anilistId/${showId.ifBlank { "NA" }}/$i"
+                url = "$anilistId/${malId ?: 0}/$i/$encodedTitle"
                 name = "Ep. $i: $titleStr"
                 episode_number = i.toFloat()
                 date_upload = malEp?.date ?: 0L
@@ -244,33 +249,64 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         return episodes.reversed()
     }
 
+    // =================================================================
+    // VIDEO LIST — Multi-provider parallel fetch
+    // =================================================================
+
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val parts = episode.url.split("/")
-        val anilistId = parts.getOrNull(0)?.toIntOrNull() ?: return emptyList()
-        val showId = parts.getOrNull(1) ?: "NA"
-        val epNum = parts.getOrNull(2)?.toIntOrNull() ?: 1
-        
-        return providerManager.fetchVideos(anilistId, showId, epNum)
+        // Parse the episode URL to reconstruct an SAnime with the title.
+        // Providers need anime.title for sites that don't support ID mapping.
+        val meta = EpisodeMeta.from(episode)
+
+        val anime = SAnime.create().apply {
+            url = meta.anilistId.toString()
+            title = meta.title
+        }
+
+        // Delegate to ProviderManager which runs all enabled providers in parallel
+        return providerManager.fetchAllVideos(anime, episode)
     }
 
     override fun videoListParse(response: Response): List<Video> {
         throw UnsupportedOperationException("Not used")
     }
 
+    // =================================================================
+    // PREFERENCES
+    // =================================================================
+
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
+
+        // --- Streaming Source Switcher ---
+        val providerKeys = providerManager.providerDisplayNames.keys.toTypedArray()
+        val providerNames = providerManager.providerDisplayNames.values.toTypedArray()
+
+        MultiSelectListPreference(screen.context).apply {
+            key = "enabled_providers"
+            title = "Streaming Sources"
+            entries = providerNames
+            entryValues = providerKeys
+            summary = "Select which sources to fetch videos from.\n" +
+                      "Multiple sources are fetched in parallel and merged.\n" +
+                      "Selected: %s"
+            setDefaultValue(providerManager.defaultProviderKeys)
+        }.also { screen.addPreference(it) }
+
+        // --- Subtitle Type Preference ---
         ListPreference(screen.context).apply {
             key = "preferred_sub_type"
             title = "Preferred Subtitle Type"
             entries = arrayOf("Soft Sub", "Hard Sub", "Dub")
             entryValues = arrayOf("softsub", "hardsub", "dub")
-            summary = "%s"
+            summary = "Used for sorting merged video results.\n%s"
             setDefaultValue("softsub")
         }.also { screen.addPreference(it) }
 
+        // --- Consumet API URL (kept for potential future use) ---
         EditTextPreference(screen.context).apply {
             key = "consumet_api_url"
             title = "Consumet API URL"
-            summary = "Custom or self-hosted URL for Consumet API"
+            summary = "Custom or self-hosted URL for Consumet API (reserved for future providers)"
             setDefaultValue("https://api.consumet.org/meta/anilist")
         }.also { screen.addPreference(it) }
     }
