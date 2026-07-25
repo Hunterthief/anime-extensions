@@ -254,17 +254,20 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     // =================================================================
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        // Parse the episode URL to reconstruct an SAnime with the title.
-        // Providers need anime.title for sites that don't support ID mapping.
-        val meta = EpisodeMeta.from(episode)
+    val meta = EpisodeMeta.from(episode)
 
-        val anime = SAnime.create().apply {
-            url = meta.anilistId.toString()
-            title = meta.title
-        }
+    android.util.Log.d("MasterExtension", "getVideoList: url='${episode.url}', " +
+        "anilistId=${meta.anilistId}, malId=${meta.malId}, " +
+        "epNum=${meta.epNum}, title='${meta.title}'")
 
-        // Delegate to ProviderManager which runs all enabled providers in parallel
-        return providerManager.fetchAllVideos(anime, episode)
+    val anime = SAnime.create().apply {
+        url = meta.anilistId.toString()
+        title = meta.title
+    }
+
+    val videos = providerManager.fetchAllVideos(anime, episode)
+    android.util.Log.d("MasterExtension", "getVideoList: returning ${videos.size} videos")
+    return videos
     }
 
     override fun videoListParse(response: Response): List<Video> {
