@@ -102,5 +102,5 @@ data class AllAnimeSourceUrl(
 data class MalEpisode(
     val number: String,
     val title: String,
-    val isFiller: Boolean = false
+    val date: Long
 )
