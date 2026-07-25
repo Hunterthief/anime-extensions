@@ -21,6 +21,8 @@ data class AniListMedia(
     val description: String? = null,
     val coverImage: AniListCover? = null,
     val episodes: Int? = null,
+    val duration: Int? = null,
+    val rating: String? = null,
     val status: String? = null,
     val season: String? = null,
     val seasonYear: Int? = null,
