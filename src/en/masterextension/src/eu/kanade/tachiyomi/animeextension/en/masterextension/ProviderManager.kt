@@ -4,6 +4,7 @@ import android.content.SharedPreferences
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animeextension.en.masterextension.video_sources.AnikotoProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -17,30 +18,34 @@ class ProviderManager(
     private val headers: Headers,
     private val preferences: SharedPreferences
 ) {
+    // =================================================================
+    // PROVIDER REGISTRY
+    // To add a new source: add ONE line here.
+    // =================================================================
     private val allProviders: Map<String, VideoProvider> by lazy {
         linkedMapOf(
-            "allanime"  to AllAnimeProvider(client, headers),
-            "gogoanime" to GogoanimeProvider(client, headers),
-            "animepahe" to AnimePaheProvider(client, headers)
+            "anikoto" to AnikotoProvider(client, headers),
+            // "example" to ExampleProvider(client, headers),  ← future sources
         )
     }
 
     val providerDisplayNames: Map<String, String> by lazy {
-        linkedMapOf(
-            "allanime"  to "AllAnime",
-            "gogoanime" to "Gogoanime (Anitaku)",
-            "animepahe" to "AnimePahe"
-        )
+        allProviders.mapValues { it.value.name }
     }
 
-    val defaultProviderKeys: Set<String> = setOf("allanime")
+    val defaultProviderKeys: Set<String> by lazy {
+        allProviders.keys.toSet()
+    }
 
-    fun getEnabledProviders(): List<VideoProvider> {
+    private fun getEnabledProviders(): List<VideoProvider> {
         val enabled = preferences.getStringSet("enabled_providers", defaultProviderKeys)
             ?: defaultProviderKeys
         return allProviders.filterKeys { it in enabled }.values.toList()
     }
 
+    // =================================================================
+    // VIDEO FETCH — runs all enabled providers in parallel
+    // =================================================================
     suspend fun fetchAllVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val providers = getEnabledProviders()
         if (providers.isEmpty()) return emptyList()
@@ -49,28 +54,26 @@ class ProviderManager(
             provider.fetchVideos(anime, episode)
         }
 
-        val deduplicated = allVideos.distinctBy { it.url }
-        return rankVideos(deduplicated)
+        return rankVideos(allVideos.distinctBy { it.url })
     }
 
     private fun rankVideos(videos: List<Video>): List<Video> {
-        val preferredSubType = preferences.getString("preferred_sub_type", "softsub") ?: "softsub"
         return videos.sortedWith(
             compareByDescending<Video> {
                 Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             }.thenBy {
                 when {
-                    it.quality.contains(preferredSubType, ignoreCase = true) -> 0
-                    it.quality.contains("softsub", ignoreCase = true) -> 1
-                    it.quality.contains("hardsub", ignoreCase = true) -> 2
-                    it.quality.contains("dub", ignoreCase = true) -> 3
-                    else -> 4
+                    it.quality.contains("Sub", ignoreCase = true) -> 0
+                    it.quality.contains("Dub", ignoreCase = true) -> 1
+                    else -> 2
                 }
             }
         )
     }
 
-    // ======================== MAL Scrapers (unchanged) ========================
+    // =================================================================
+    // MAL SCRAPERS (metadata only — not video related)
+    // =================================================================
 
     fun fetchMalAnimeDetails(malId: Int): MalAnimeDetails? {
         return try {
