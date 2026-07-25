@@ -135,8 +135,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             val starLine = starRatingLine(scoreStr)
             val statusValue = nextEpString.trim()
             
-            val type = media?.format?.replace("_", " ")?.lowercase()?.replaceFirstChar { it.uppercaseChar() } ?: ""
-            val seasonStr = (media?.season?.lowercase()?.replaceFirstChar { it.uppercaseChar() } ?: "") + " " + (media?.seasonYear?.toString() ?: "")
+            val type = media?.format?.replace("_", " ")?.lowercase()?.capitalizeFirst() ?: ""
+            val seasonStr = (media?.season?.lowercase()?.capitalizeFirst() ?: "") + " " + (media?.seasonYear?.toString() ?: "")
             val infoLine = buildInfoLine(type, seasonStr.trim(), episodesText(media?.episodes), durationText(media?.duration))
             val genreValue = media?.genres?.toDisplayList()
             
@@ -267,6 +267,11 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun getFilterList(): AnimeFilterList = MasterFilters.filterList
 
     // --- DESCRIPTION HELPER FUNCTIONS ---
+
+    private fun String.capitalizeFirst(): String {
+        if (this.isEmpty()) return this
+        return this[0].uppercaseChar() + this.substring(1)
+    }
 
     private fun buildDescription(vararg parts: String?): String {
         return parts
