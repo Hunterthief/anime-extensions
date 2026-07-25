@@ -1,16 +1,15 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import android.content.SharedPreferences
+import android.util.Log
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import keiyoushi.utils.parseAs
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -23,11 +22,10 @@ class ProviderManager(
     private val headers: Headers,
     private val preferences: SharedPreferences
 ) {
-    // =================================================================
-    // PROVIDER MANAGEMENT
-    // =================================================================
+    companion object {
+        private const val TAG = "ProviderManager"
+    }
 
-    /** All available providers, keyed by their preference identifier. */
     private val allProviders: Map<String, VideoProvider> by lazy {
         linkedMapOf(
             "allanime"  to AllAnimeProvider(client, headers),
@@ -36,7 +34,6 @@ class ProviderManager(
         )
     }
 
-    /** Human-readable names for the preference screen, keyed by the same identifier. */
     val providerDisplayNames: Map<String, String> by lazy {
         linkedMapOf(
             "allanime"  to "AllAnime",
@@ -45,54 +42,56 @@ class ProviderManager(
         )
     }
 
-    /** Default-enabled provider keys (used on first install). */
     val defaultProviderKeys: Set<String> = setOf("allanime")
 
-    /**
-     * Returns the list of providers the user has enabled in preferences.
-     * If the preference key doesn't exist yet, falls back to [defaultProviderKeys].
-     */
     fun getEnabledProviders(): List<VideoProvider> {
         val enabled = preferences.getStringSet("enabled_providers", defaultProviderKeys)
             ?: defaultProviderKeys
+        Log.d(TAG, "Enabled providers: $enabled")
         return allProviders.filterKeys { it in enabled }.values.toList()
     }
 
-    /**
-     * Fetches videos from ALL enabled providers in parallel using Kotlin coroutines.
-     * Results are aggregated, deduplicated by URL, and sorted by quality + sub-type preference.
-     *
-     * Each provider runs in its own coroutine via [async]. Failures in individual
-     * providers are caught and return emptyList, so one broken source doesn't
-     * prevent others from succeeding.
-     */
     suspend fun fetchAllVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val providers = getEnabledProviders()
-        if (providers.isEmpty()) return emptyList()
+        Log.d(TAG, "fetchAllVideos: anime='${anime.title}', ep=${episode.episode_number}, " +
+            "providers=${providers.map { it.name }}")
 
-        return coroutineScope {
+        if (providers.isEmpty()) {
+            Log.w(TAG, "No providers enabled!")
+            return emptyList()
+        }
+
+        // FIX: Wrap in Dispatchers.IO to ensure network calls don't block main
+        return withContext(Dispatchers.IO) {
             val deferred = providers.map { provider ->
                 async {
                     try {
-                        provider.fetchVideos(anime, episode)
-                    } catch (_: Exception) {
+                        Log.d(TAG, "[${provider.name}] Starting fetch...")
+                        val videos = provider.fetchVideos(anime, episode)
+                        Log.d(TAG, "[${provider.name}] Returned ${videos.size} videos")
+                        videos
+                    } catch (e: Exception) {
+                        // FIX: LOG the exception instead of silently swallowing
+                        Log.e(TAG, "[${provider.name}] EXCEPTION in fetchVideos", e)
                         emptyList<Video>()
                     }
                 }
             }
 
             val allVideos = deferred.awaitAll().flatten()
+            Log.d(TAG, "Total videos before dedup: ${allVideos.size}")
 
-            // Deduplicate by video URL (same underlying file may appear from multiple sources)
             val deduplicated = allVideos.distinctBy { it.url }
+            Log.d(TAG, "Total videos after dedup: ${deduplicated.size}")
+
+            if (deduplicated.isEmpty()) {
+                Log.w(TAG, "ALL PROVIDERS RETURNED EMPTY! Check Logcat for individual errors.")
+            }
 
             rankVideos(deduplicated)
         }
     }
 
-    /**
-     * Sorts videos by resolution (descending) then by subtitle type preference.
-     */
     private fun rankVideos(videos: List<Video>): List<Video> {
         val preferredSubType = preferences.getString("preferred_sub_type", "softsub") ?: "softsub"
         return videos.sortedWith(
@@ -110,9 +109,7 @@ class ProviderManager(
         )
     }
 
-    // =================================================================
-    // MYANIMELIST HTML SCRAPER  (unchanged from original)
-    // =================================================================
+    // ======================== MAL Scrapers ========================
 
     fun fetchMalAnimeDetails(malId: Int): MalAnimeDetails? {
         return try {
@@ -125,31 +122,29 @@ class ProviderManager(
                 .build()
 
             client.newCall(request).execute().use { res ->
-                if (!res.isSuccessful) return null
+                if (!res.isSuccessful) {
+                    Log.w(TAG, "MAL details: HTTP ${res.code}")
+                    return null
+                }
                 val document = Jsoup.parse(res.body.string())
 
                 val score = document.selectFirst("span[itemprop=ratingValue]")?.text()?.trim() ?: ""
-
                 val rating = document.select("div.spaceit_pad").firstOrNull { it.text().startsWith("Rating:") }
                     ?.ownText()?.replace("Rating:", "")?.trim() ?: ""
-
                 val synopsis = document.selectFirst("p[itemprop=description]")?.text()?.trim() ?: ""
-
                 val type = document.select("div.spaceit_pad").firstOrNull { it.text().startsWith("Type:") }
                     ?.selectFirst("a")?.text()?.trim() ?: ""
-
                 val episodes = document.select("div.spaceit_pad").firstOrNull { it.text().startsWith("Episodes:") }
                     ?.ownText()?.replace("Episodes:", "")?.trim() ?: ""
-
                 val duration = document.select("div.spaceit_pad").firstOrNull { it.text().startsWith("Duration:") }
                     ?.ownText()?.replace("Duration:", "")?.trim() ?: ""
-
                 val premiered = document.select("div.spaceit_pad").firstOrNull { it.text().startsWith("Premiered:") }
                     ?.selectFirst("a")?.text()?.trim() ?: ""
 
                 MalAnimeDetails(score, rating, synopsis, type, episodes, duration, premiered)
             }
         } catch (e: Exception) {
+            Log.e(TAG, "MAL details fetch failed", e)
             null
         }
     }
@@ -166,7 +161,10 @@ class ProviderManager(
 
             client.newCall(request).execute().use { res ->
                 val bodyStr = res.body.string()
-                if (!res.isSuccessful) return Triple(emptyList(), "M0", "ERR:${res.code}:${bodyStr.take(30)}")
+                if (!res.isSuccessful) {
+                    Log.w(TAG, "MAL episodes: HTTP ${res.code}")
+                    return Triple(emptyList(), "M0", "ERR:${res.code}")
+                }
 
                 val document = Jsoup.parse(bodyStr)
                 val episodeRows = document.select("tr.episode-list-data")
@@ -179,25 +177,20 @@ class ProviderManager(
                     val numberStr = row.selectFirst("td.episode-number")?.attr("data-raw")?.trim()
                         ?: row.selectFirst("td.episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
                     val title = row.selectFirst("a.fl-l.fw-b")?.text()?.trim() ?: ""
-
                     val dateStr = row.selectFirst("td.episode-aired")?.text()?.trim()
-                    val dateMillis = try {
-                        dateFormatter.parse(dateStr)?.time ?: 0L
-                    } catch (e: Exception) {
-                        0L
-                    }
+                    val dateMillis = try { dateFormatter.parse(dateStr)?.time ?: 0L } catch (_: Exception) { 0L }
 
                     if (!numberStr.isNullOrBlank() && title.isNotEmpty()) {
                         MalEpisode(numberStr, title, dateMillis)
-                    } else {
-                        null
-                    }
+                    } else null
                 }
 
-                if (episodes.isNotEmpty()) Triple(episodes, "M1", "") else Triple(emptyList(), "M0", "ParseFail")
+                if (episodes.isNotEmpty()) Triple(episodes, "M1", "")
+                else Triple(emptyList(), "M0", "ParseFail")
             }
         } catch (e: Exception) {
-            Triple(emptyList(), "M0", "EXC:${e.message?.take(30)}")
+            Log.e(TAG, "MAL episodes fetch failed", e)
+            Triple(emptyList(), "M0", "EXC:${e.message?.take(50)}")
         }
     }
 }
