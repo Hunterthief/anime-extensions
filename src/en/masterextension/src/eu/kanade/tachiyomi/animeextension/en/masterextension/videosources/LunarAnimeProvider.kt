@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
+import android.util.Base64
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
@@ -16,19 +17,17 @@ import kotlinx.serialization.Serializable
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import org.jsoup.Jsoup
 
 /**
  * LunarAnime video source.
  *
- * Uses the LunarAnime public API which accepts AniList IDs directly.
- * No title search needed — the EpisodeMeta already has the AniList ID.
+ * Two API paths:
+ *   A) /api/animes/vermillion/sources?id=$malId&host=$host&epNum=$ep&type=sub
+ *      → returns sources with URLs (may be base64url-encoded or direct)
+ *   B) /api/3rdprovider?anilist=$anilistId&episode=$ep
+ *      → returns FlixCloud player URLs (m3u8 is encrypted — used as fallback)
  *
- * Flow:
- *   1. GET api.lunaranime.ru/api/3rdprovider?anilist=$id&episode=$ep
- *   2. Parse JSON → list of player_url entries
- *   3. Fetch each embed page → extract m3u8
- *   4. PlaylistUtils → quality variants
+ * Supports HLS (.m3u8) and DASH (.mpd) output.
  */
 class LunarAnimeProvider(
     private val client: OkHttpClient,
@@ -40,6 +39,9 @@ class LunarAnimeProvider(
     companion object {
         private const val API_URL = "https://api.lunaranime.ru"
         private const val SITE_URL = "https://lunaranime.ru"
+
+        // Hosts to try via the vermillion API (order matters)
+        private val VERMILLION_HOSTS = listOf("animeonsen", "kiwi", "flixcloud")
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
@@ -49,37 +51,43 @@ class LunarAnimeProvider(
     // =================================================================
 
     @Serializable
-    private data class LunarResponse(
+    private data class VermillionResponse(
         val success: Boolean = false,
-        val data: List<LunarSource> = emptyList()
+        val data: VermillionData? = null
     )
 
     @Serializable
-    private data class LunarSource(
-        val access_id: String = "",
+    private data class VermillionData(
+        val sources: List<VermillionSource> = emptyList(),
+        val subtitles: List<VermillionSubtitle> = emptyList(),
+        val headers: Map<String, String>? = null
+    )
+
+    @Serializable
+    private data class VermillionSource(
+        val url: String = "",
+        val quality: String = "auto",
+        val type: String = "",
+        val isM3U8: Boolean = false
+    )
+
+    @Serializable
+    private data class VermillionSubtitle(
+        val url: String = "",
+        val lang: String = ""
+    )
+
+    @Serializable
+    private data class ThirdPartyResponse(
+        val success: Boolean = false,
+        val data: List<ThirdPartySource> = emptyList()
+    )
+
+    @Serializable
+    private data class ThirdPartySource(
         val player_url: String = "",
         val server: String = "",
-        val audio: String = "",
-        val episode: Int = 0
-    )
-
-    @Serializable
-    private data class EmbedSourceResponse(
-        val sources: List<EmbedSource>? = null,
-        val tracks: List<EmbedTrack>? = null
-    )
-
-    @Serializable
-    private data class EmbedSource(
-        val file: String = "",
-        val type: String = ""
-    )
-
-    @Serializable
-    private data class EmbedTrack(
-        val file: String = "",
-        val kind: String = "",
-        val label: String = ""
+        val audio: String = ""
     )
 
     // =================================================================
@@ -95,10 +103,101 @@ class LunarAnimeProvider(
     }
 
     // =================================================================
-    // STEP 1: Call the LunarAnime API
+    // PATH A: Vermillion API (preferred — returns direct/encoded URLs)
     // =================================================================
 
-    private suspend fun fetchSources(anilistId: Int, epNum: Int): List<LunarSource> {
+    private suspend fun fetchFromVermillion(
+        malId: Int,
+        epNum: Int,
+        host: String
+    ): List<Video> {
+        val url = "$API_URL/api/animes/vermillion/sources".toHttpUrl().newBuilder()
+            .addQueryParameter("id", malId.toString())
+            .addQueryParameter("host", host)
+            .addQueryParameter("epNum", epNum.toString())
+            .addQueryParameter("type", "sub")
+            .build().toString()
+
+        val body = client.newCall(GET(url, apiHeaders))
+            .awaitSuccess().bodyString()
+
+        val response = body.parseAs<VermillionResponse>()
+        if (!response.success || response.data == null) return emptyList()
+
+        val data = response.data
+        val sourceHeaders = data.headers
+
+        val subtitles = data.subtitles
+            .filter { it.url.isNotBlank() }
+            .map { Track(it.url, it.lang) }
+
+        return data.sources.parallelCatchingFlatMap { source ->
+            val resolvedUrl = resolveSourceUrl(source.url)
+            if (resolvedUrl.isBlank()) return@parallelCatchingFlatMap emptyList<Video>()
+
+            val refererHost = sourceHeaders?.get("Origin")
+                ?: resolvedUrl.toHttpUrl().let { "https://${it.host}" }
+
+            when {
+                // DASH manifest — pass directly (ExoPlayer handles it)
+                resolvedUrl.contains(".mpd") -> {
+                    val vidHeaders = headers.newBuilder()
+                        .set("Referer", "$SITE_URL/")
+                        .set("Origin", SITE_URL)
+                        .build()
+
+                    listOf(Video(
+                        resolvedUrl,
+                        "$name $host DASH ${source.quality}",
+                        resolvedUrl,
+                        headers = vidHeaders,
+                        subtitleTracks = subtitles,
+                    ))
+                }
+
+                // HLS playlist
+                resolvedUrl.contains(".m3u8") || source.isM3U8 -> {
+                    val vidHeaders = headers.newBuilder()
+                        .set("Referer", "$refererHost/")
+                        .set("Origin", refererHost)
+                        .build()
+
+                    playlistUtils.extractFromHls(
+                        resolvedUrl,
+                        videoNameGen = { quality -> "$name $host $quality" },
+                        subtitleList = subtitles,
+                        referer = "$refererHost/",
+                        masterHeaders = vidHeaders,
+                        videoHeaders = vidHeaders,
+                    )
+                }
+
+                // Direct video file
+                else -> {
+                    val vidHeaders = headers.newBuilder()
+                        .set("Referer", "$refererHost/")
+                        .build()
+
+                    listOf(Video(
+                        resolvedUrl,
+                        "$name $host ${source.quality}",
+                        resolvedUrl,
+                        headers = vidHeaders,
+                        subtitleTracks = subtitles,
+                    ))
+                }
+            }
+        }
+    }
+
+    // =================================================================
+    // PATH B: 3rdprovider API (FlixCloud fallback)
+    // =================================================================
+
+    private suspend fun fetchFromThirdParty(
+        anilistId: Int,
+        epNum: Int
+    ): List<Video> {
         val url = "$API_URL/api/3rdprovider".toHttpUrl().newBuilder()
             .addQueryParameter("anilist", anilistId.toString())
             .addQueryParameter("episode", epNum.toString())
@@ -108,17 +207,16 @@ class LunarAnimeProvider(
         val body = client.newCall(GET(url, apiHeaders))
             .awaitSuccess().bodyString()
 
-        val response = body.parseAs<LunarResponse>()
+        val response = body.parseAs<ThirdPartyResponse>()
         if (!response.success) return emptyList()
 
-        return response.data.filter { it.player_url.isNotBlank() }
+        return response.data.parallelCatchingFlatMap { source ->
+            if (source.player_url.isBlank()) return@parallelCatchingFlatMap emptyList<Video>()
+            extractFromFlixCloud(source)
+        }
     }
 
-    // =================================================================
-    // STEP 2: Extract m3u8 from the embed player page
-    // =================================================================
-
-    private suspend fun extractFromPlayer(source: LunarSource): List<Video> {
+    private suspend fun extractFromFlixCloud(source: ThirdPartySource): List<Video> {
         val playerUrl = source.player_url
         val host = playerUrl.toHttpUrl().host
         val audioLabel = when (source.audio) {
@@ -126,7 +224,6 @@ class LunarAnimeProvider(
             "dub" -> "Dub"
             else -> "Sub"
         }
-        val serverLabel = source.server.ifBlank { "Default" }
 
         val playerHeaders = headers.newBuilder()
             .set("Referer", "$SITE_URL/")
@@ -136,80 +233,74 @@ class LunarAnimeProvider(
         val pageBody = client.newCall(GET(playerUrl, playerHeaders))
             .awaitSuccess().bodyString()
 
-        // Strategy 1: data-id → AJAX sources API (MegaCloud / FlixCloud pattern)
+        // Try to find m3u8 URL in the page (multiple patterns)
+        val m3u8Patterns = listOf(
+            Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*"""),
+            Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']"""),
+            Regex("""file\s*[:=]\s*["'](https?://[^"']+)["']"""),
+            Regex("""source\s*[:=]\s*["'](https?://[^"']+)["']"""),
+        )
+
+        for (pattern in m3u8Patterns) {
+            val match = pattern.find(pageBody)
+            if (match != null) {
+                val m3u8Url = match.groupValues.last()
+                if (m3u8Url.startsWith("http")) {
+                    val vidHeaders = headers.newBuilder()
+                        .set("Referer", "https://$host/")
+                        .set("Origin", "https://$host")
+                        .build()
+
+                    val videos = playlistUtils.extractFromHls(
+                        m3u8Url,
+                        videoNameGen = { quality -> "$name FlixCloud $audioLabel $quality" },
+                        referer = "https://$host/",
+                        masterHeaders = vidHeaders,
+                        videoHeaders = vidHeaders,
+                    )
+                    if (videos.isNotEmpty()) return videos
+                }
+            }
+        }
+
+        // Try data-id → sources API pattern
         val dataId = Regex("""data-id\s*=\s*"([^"]+)"""").find(pageBody)?.groupValues?.get(1)
         if (dataId != null) {
-            val videos = fetchFromSourcesApi(dataId, host, playerUrl, serverLabel, audioLabel)
-            if (videos.isNotEmpty()) return videos
-        }
+            for (endpoint in listOf("ajax/embed-6/getSources", "ajax/getSources", "stream/getSources")) {
+                try {
+                    val ajaxUrl = "https://$host/$endpoint?id=$dataId"
+                    val ajaxHeaders = headers.newBuilder()
+                        .set("Accept", "*/*")
+                        .set("X-Requested-With", "XMLHttpRequest")
+                        .set("Referer", playerUrl)
+                        .set("Origin", "https://$host")
+                        .build()
 
-        // Strategy 2: direct m3u8 URL in the page
-        val m3u8Match = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(pageBody)
-        if (m3u8Match != null) {
-            return extractHls(m3u8Match.value, host, serverLabel, audioLabel)
-        }
+                    val ajaxBody = client.newCall(GET(ajaxUrl, ajaxHeaders))
+                        .awaitSuccess().bodyString()
 
-        // Strategy 3: <source> tag with m3u8
-        val doc = Jsoup.parse(pageBody)
-        val sourceTag = doc.selectFirst("source[src*='.m3u8']")?.attr("src")
-        if (!sourceTag.isNullOrBlank()) {
-            return extractHls(sourceTag, host, serverLabel, audioLabel)
-        }
+                    // Try to find m3u8 in the response
+                    val fileMatch = Regex("""["']file["']\s*:\s*["'](https?://[^"']+)["']""").find(ajaxBody)
+                        ?: Regex("""https?://[^\s"']+\.m3u8[^\s"']*""").find(ajaxBody)
 
-        // Strategy 4: JS variable assignment containing m3u8
-        val jsVar = Regex(
-            """(?:file|source|url|src|playlist)\s*[:=]\s*["']([^"']*\.m3u8[^"']*)["']"""
-        ).find(pageBody)
-        if (jsVar != null) {
-            return extractHls(jsVar.groupValues[1], host, serverLabel, audioLabel)
-        }
+                    if (fileMatch != null) {
+                        val m3u8 = fileMatch.groupValues.last()
+                        val vidHeaders = headers.newBuilder()
+                            .set("Referer", "https://$host/")
+                            .set("Origin", "https://$host")
+                            .build()
 
-        // Strategy 5: iframe → follow it one level
-        val iframeSrc = doc.selectFirst("iframe[src]")?.attr("src")
-        if (!iframeSrc.isNullOrBlank()) {
-            val resolved = resolveUrl(iframeSrc, playerUrl)
-            val iframeHost = resolved.toHttpUrl().host
-            val iframeBody = client.newCall(GET(resolved, playerHeaders))
-                .awaitSuccess().bodyString()
-
-            val iframeM3u8 = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(iframeBody)
-            if (iframeM3u8 != null) {
-                return extractHls(iframeM3u8.value, iframeHost, serverLabel, audioLabel)
-            }
-
-            val iframeDataId = Regex("""data-id\s*=\s*"([^"]+)"""").find(iframeBody)?.groupValues?.get(1)
-            if (iframeDataId != null) {
-                val videos = fetchFromSourcesApi(iframeDataId, iframeHost, resolved, serverLabel, audioLabel)
-                if (videos.isNotEmpty()) return videos
-            }
-        }
-
-        // Strategy 6: /ajax/embed patterns (common across HiAnime clones)
-        for (endpoint in listOf("ajax/embed-6/getSources", "ajax/embed-4/getSources", "ajax/getSources")) {
-            try {
-                val ajaxUrl = "https://$host/$endpoint?id=${dataId ?: source.access_id}"
-                val ajaxHeaders = headers.newBuilder()
-                    .set("Accept", "*/*")
-                    .set("X-Requested-With", "XMLHttpRequest")
-                    .set("Referer", playerUrl)
-                    .set("Origin", "https://$host")
-                    .build()
-
-                val ajaxBody = client.newCall(GET(ajaxUrl, ajaxHeaders))
-                    .awaitSuccess().bodyString()
-
-                val sourceData = ajaxBody.parseAs<EmbedSourceResponse>()
-                val m3u8 = sourceData.sources?.firstOrNull { it.file.isNotBlank() }?.file
-                if (m3u8 != null && m3u8.startsWith("http")) {
-                    val subtitles = sourceData.tracks
-                        ?.filter { it.kind == "captions" }
-                        ?.map { Track(it.file, it.label) }
-                        .orEmpty()
-
-                    return extractHlsWithSubs(m3u8, host, subtitles, serverLabel, audioLabel)
+                        return playlistUtils.extractFromHls(
+                            m3u8,
+                            videoNameGen = { quality -> "$name FlixCloud $audioLabel $quality" },
+                            referer = "https://$host/",
+                            masterHeaders = vidHeaders,
+                            videoHeaders = vidHeaders,
+                        )
+                    }
+                } catch (_: Exception) {
+                    continue
                 }
-            } catch (_: Exception) {
-                continue
             }
         }
 
@@ -217,106 +308,33 @@ class LunarAnimeProvider(
     }
 
     // =================================================================
-    // Sources API (data-id pattern)
+    // URL RESOLUTION — handles encoded URLs
     // =================================================================
 
-    private suspend fun fetchFromSourcesApi(
-        dataId: String,
-        host: String,
-        refererUrl: String,
-        serverLabel: String,
-        audioLabel: String
-    ): List<Video> {
-        val ajaxHeaders = headers.newBuilder()
-            .set("Accept", "*/*")
-            .set("X-Requested-With", "XMLHttpRequest")
-            .set("Referer", refererUrl)
-            .set("Origin", "https://$host")
-            .build()
+    private fun resolveSourceUrl(rawUrl: String): String {
+        // Already a direct URL
+        if (rawUrl.startsWith("http")) return rawUrl
 
-        for (endpoint in listOf(
-            "ajax/embed-6/getSources",
-            "ajax/embed-4/getSources",
-            "ajax/getSources",
-            "stream/getSources"
-        )) {
-            try {
-                val url = "https://$host/$endpoint?id=$dataId"
-                val body = client.newCall(GET(url, ajaxHeaders))
-                    .awaitSuccess().bodyString()
+        // Try base64url decode (kiwi host uses this)
+        try {
+            val decoded = String(Base64.decode(rawUrl, Base64.URL_SAFE or Base64.NO_PADDING), Charsets.UTF_8)
+            if (decoded.startsWith("http")) return decoded
+        } catch (_: Exception) { }
 
-                val sourceData = body.parseAs<EmbedSourceResponse>()
-                val m3u8 = sourceData.sources?.firstOrNull { it.file.isNotBlank() }?.file
-                if (m3u8 != null && m3u8.startsWith("http")) {
-                    val subtitles = sourceData.tracks
-                        ?.filter { it.kind == "captions" }
-                        ?.map { Track(it.file, it.label) }
-                        .orEmpty()
+        // Try standard base64 decode
+        try {
+            val decoded = String(Base64.decode(rawUrl, Base64.DEFAULT), Charsets.UTF_8)
+            if (decoded.startsWith("http")) return decoded
+        } catch (_: Exception) { }
 
-                    return extractHlsWithSubs(m3u8, host, subtitles, serverLabel, audioLabel)
-                }
-            } catch (_: Exception) {
-                continue
-            }
-        }
+        // Try base64 with padding added
+        try {
+            val padded = rawUrl + "=".repeat((4 - rawUrl.length % 4) % 4)
+            val decoded = String(Base64.decode(padded, Base64.URL_SAFE), Charsets.UTF_8)
+            if (decoded.startsWith("http")) return decoded
+        } catch (_: Exception) { }
 
-        return emptyList()
-    }
-
-    // =================================================================
-    // HLS EXTRACTION
-    // =================================================================
-
-    private suspend fun extractHls(
-        m3u8Url: String,
-        host: String,
-        serverLabel: String,
-        audioLabel: String
-    ): List<Video> {
-        val vidHeaders = headers.newBuilder()
-            .set("Referer", "https://$host/")
-            .set("Origin", "https://$host")
-            .build()
-
-        return playlistUtils.extractFromHls(
-            m3u8Url,
-            videoNameGen = { quality -> "$name $serverLabel $audioLabel $quality" },
-            referer = "https://$host/",
-            masterHeaders = vidHeaders,
-            videoHeaders = vidHeaders,
-        )
-    }
-
-    private suspend fun extractHlsWithSubs(
-        m3u8Url: String,
-        host: String,
-        subtitles: List<Track>,
-        serverLabel: String,
-        audioLabel: String
-    ): List<Video> {
-        val vidHeaders = headers.newBuilder()
-            .set("Referer", "https://$host/")
-            .set("Origin", "https://$host")
-            .build()
-
-        return playlistUtils.extractFromHls(
-            m3u8Url,
-            videoNameGen = { quality -> "$name $serverLabel $audioLabel $quality" },
-            subtitleList = subtitles,
-            referer = "https://$host/",
-            masterHeaders = vidHeaders,
-            videoHeaders = vidHeaders,
-        )
-    }
-
-    // =================================================================
-    // UTILS
-    // =================================================================
-
-    private fun resolveUrl(url: String, base: String): String = when {
-        url.startsWith("http") -> url
-        url.startsWith("//") -> "https:$url"
-        else -> base.toHttpUrl().resolve(url)?.toString() ?: url
+        return ""
     }
 
     // =================================================================
@@ -325,15 +343,32 @@ class LunarAnimeProvider(
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
-
-        // LunarAnime uses AniList IDs directly — no title search needed
         if (meta.anilistId == 0) return emptyList()
 
-        val sources = fetchSources(meta.anilistId, meta.epNum)
-        if (sources.isEmpty()) return emptyList()
+        val allVideos = mutableListOf<Video>()
 
-        return sources.parallelCatchingFlatMap { source ->
-            extractFromPlayer(source)
+        // Path A: Try vermillion API with each host
+        if (meta.malId != 0) {
+            for (host in VERMILLION_HOSTS) {
+                try {
+                    val videos = fetchFromVermillion(meta.malId, meta.epNum, host)
+                    if (videos.isNotEmpty()) {
+                        allVideos.addAll(videos)
+                        break // Got videos from one host, no need to try others
+                    }
+                } catch (_: Exception) {
+                    continue
+                }
+            }
         }
+
+        // Path B: Fallback to 3rdprovider (FlixCloud)
+        if (allVideos.isEmpty()) {
+            try {
+                allVideos.addAll(fetchFromThirdParty(meta.anilistId, meta.epNum))
+            } catch (_: Exception) { }
+        }
+
+        return allVideos
     }
 }
