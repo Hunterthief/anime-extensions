@@ -20,7 +20,9 @@ import kotlinx.serialization.json.put
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
+import org.jsoup.nodes.TextNode
 import java.util.Calendar
+import kotlin.math.roundToInt
 
 class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
@@ -60,7 +62,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val animes = data.map { media ->
             SAnime.create().apply {
                 url = media.id.toString()
-                // Prioritize English title for better Filler Database matching
                 title = media.title?.english ?: media.title?.romaji ?: "Unknown"
                 thumbnail_url = media.coverImage?.large ?: ""
                 initialized = true
@@ -107,7 +108,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     override fun animeDetailsRequest(anime: SAnime): Request {
-        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes status season seasonYear format genres averageScore studios { nodes { name isAnimationStudio } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
+        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes duration rating status season seasonYear format genres averageScore studios { nodes { name isAnimationStudio } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
         val variables = buildJsonObject { put("id", anime.url.toInt()) }
         return graphQLPost(baseUrl, headers, query, variables = variables)
     }
@@ -115,7 +116,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun animeDetailsParse(response: Response): SAnime {
         val media = response.parseGraphQLAs<AniListMediaData>().Media
         return SAnime.create().apply {
-            // Prioritize English title for better Filler Database matching
             title = media?.title?.english ?: media?.title?.romaji ?: "Unknown"
             
             val studio = media?.studios?.nodes?.firstOrNull { it.isAnimationStudio == true }?.name ?: "Unknown"
@@ -130,8 +130,35 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 "No upcoming episodes scheduled."
             }
 
-            val desc = media?.description?.let { Jsoup.parse(it).text() } ?: "No synopsis available."
-            description = "$desc\n\nStudio: $studio\nProducers: $producers\nStatus: $nextEpString"
+            val synopsis = media?.description?.let { cleanSynopsis(it) }?.takeIf { it.isNotBlank() } ?: "No synopsis available."
+            val scoreStr = media?.averageScore?.let { "$it%" }
+            val starLine = starRatingLine(scoreStr)
+            val statusValue = nextEpString.trim()
+            
+            val type = media?.format?.replace("_", " ")?.lowercase()?.replaceFirstChar { it.titlecase() } ?: ""
+            val seasonStr = (media?.season?.lowercase()?.replaceFirstChar { it.titlecase() } ?: "") + " " + (media?.seasonYear?.toString() ?: "")
+            val infoLine = buildInfoLine(type, seasonStr.trim(), episodesText(media?.episodes), durationText(media?.duration))
+            val genreValue = media?.genres?.toDisplayList()
+            
+            val ratingMap = mapOf(
+                "G" to "G - All Ages",
+                "PG" to "PG - Children",
+                "PG_13" to "PG-13 - Teens 13 or older",
+                "R" to "R - 17+ (violence & profanity)",
+                "R_PLUS" to "R+ - Mild Nudity",
+                "RX" to "Rx - Hentai"
+            )
+            val ratingValue = media?.rating?.let { ratingMap[it] ?: it } ?: "N/A"
+            val ratingLine = "**Rating:** $ratingValue"
+
+            description = buildDescription(
+                starLine,
+                synopsis,
+                "**Status:** $statusValue",
+                infoLine,
+                genreValue?.takeIf { it.isNotBlank() }?.let { "**Genres:** $it" },
+                ratingLine
+            )
             
             status = when (media?.status) {
                 "RELEASING" -> SAnime.ONGOING
@@ -139,7 +166,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 "NOT_YET_RELEASED" -> SAnime.ONGOING
                 else -> SAnime.UNKNOWN
             }
-            genre = media?.genres?.joinToString(", ")
+            genre = genreValue
             thumbnail_url = media?.coverImage?.large
             
             author = studio
@@ -238,4 +265,131 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     override fun getFilterList(): AnimeFilterList = MasterFilters.filterList
+
+    // --- DESCRIPTION HELPER FUNCTIONS ---
+
+    private fun buildDescription(vararg parts: String?): String {
+        return parts
+            .mapNotNull { part ->
+                part?.trim()?.takeIf { it.isNotBlank() }
+            }
+            .joinToString(separator = "\n\n")
+    }
+
+    private fun Any?.toDisplayList(): String {
+        val items: List<*> = when (this) {
+            null -> emptyList()
+            is Iterable<*> -> this.toList()
+            is Array<*> -> this.toList()
+            else -> listOf(this)
+        }
+
+        return items
+            .filterIsInstance<String>()
+            .mapNotNull { it.trim().takeIf { value -> value.isNotBlank() } }
+            .distinct()
+            .joinToString(separator = ", ")
+    }
+
+    private fun cleanSynopsis(html: String): String {
+        if (html.isBlank()) return ""
+
+        val doc = Jsoup.parse(html)
+        doc.outputSettings().prettyPrint(false)
+
+        doc.select("script, style, noscript").remove()
+
+        doc.select("br").forEach { br ->
+            br.replaceWith(TextNode("\n\n"))
+        }
+
+        doc.select("p, div, section, article, li").forEach { element ->
+            element.before(TextNode("\n\n"))
+            element.after(TextNode("\n\n"))
+        }
+
+        return doc.body()
+            ?.wholeText()
+            .orEmpty()
+            .replace("\u00a0", " ")
+            .replace(Regex("\\n{2,}"), "\u0000")
+            .replace(Regex("\\s+"), " ")
+            .replace("\u0000", "\n\n")
+            .trim()
+    }
+
+    private fun buildInfoLine(vararg values: Any?): String {
+        val info = values
+            .mapNotNull { value ->
+                value?.toString()?.trim()?.takeIf { it.isNotBlank() }
+            }
+            .joinToString(separator = " • ")
+
+        return if (info.isNotBlank()) {
+            "**Info:** $info"
+        } else {
+            "**Info:** N/A"
+        }
+    }
+
+    private fun episodesText(value: Any?): String? {
+        val text = value?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: return null
+
+        return if (text.all { it.isDigit() }) {
+            if (text == "1") "1 episode" else "$text episodes"
+        } else {
+            text
+        }
+    }
+
+    private fun durationText(value: Any?): String? {
+        val text = value?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: return null
+
+        return if (text.all { it.isDigit() }) {
+            "$text min"
+        } else {
+            text
+        }
+    }
+
+    private fun starRatingLine(score: String?): String {
+        val raw = score?.trim().orEmpty()
+
+        if (raw.isBlank()) {
+            return "☆☆☆☆☆ N/A"
+        }
+
+        if (raw.contains("★") || raw.contains("☆")) {
+            return raw
+        }
+
+        val numberMatch = Regex("\\d+(?:\\.\\d+)?").find(raw) ?: return "☆☆☆☆☆ $raw"
+        val numberString = numberMatch.value
+        val number = numberString.toDoubleOrNull() ?: return "☆☆☆☆☆ $raw"
+
+        val isFivePointScale = raw.contains("/5", ignoreCase = true) ||
+            raw.contains("out of 5", ignoreCase = true)
+
+        val isPercentScale = raw.contains("%") ||
+            (!isFivePointScale && number > 10.0)
+
+        val normalizedStars = when {
+            isFivePointScale -> number
+            isPercentScale -> number / 100.0 * 5.0
+            else -> number / 10.0 * 5.0
+        }
+
+        val fullStars = (normalizedStars).roundToInt().coerceIn(0, 5)
+        val emptyStars = 5 - fullStars
+
+        val starBar = "★".repeat(fullStars) + "☆".repeat(emptyStars)
+
+        val displayScore = if (raw.contains("%")) {
+            "$numberString%"
+        } else {
+            numberString
+        }
+
+        return "$starBar $displayScore"
+    }
 }
