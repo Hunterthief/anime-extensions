@@ -135,8 +135,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             val starLine = starRatingLine(scoreStr)
             val statusValue = nextEpString.trim()
             
-            val type = media?.format?.replace("_", " ")?.lowercase()?.replaceFirstChar { it.titlecase() } ?: ""
-            val seasonStr = (media?.season?.lowercase()?.replaceFirstChar { it.titlecase() } ?: "") + " " + (media?.seasonYear?.toString() ?: "")
+            val type = media?.format?.replace("_", " ")?.lowercase()?.replaceFirstChar { it.uppercaseChar() } ?: ""
+            val seasonStr = (media?.season?.lowercase()?.replaceFirstChar { it.uppercaseChar() } ?: "") + " " + (media?.seasonYear?.toString() ?: "")
             val infoLine = buildInfoLine(type, seasonStr.trim(), episodesText(media?.episodes), durationText(media?.duration))
             val genreValue = media?.genres?.toDisplayList()
             
@@ -379,7 +379,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             else -> number / 10.0 * 5.0
         }
 
-        val fullStars = (normalizedStars).roundToInt().coerceIn(0, 5)
+        val fullStars = normalizedStars.roundToInt().coerceIn(0, 5)
         val emptyStars = 5 - fullStars
 
         val starBar = "★".repeat(fullStars) + "☆".repeat(emptyStars)
