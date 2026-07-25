@@ -167,7 +167,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         val episodes = mutableListOf<SEpisode>()
 
-        var malEpisodes: Map<String, String> = emptyMap()
+        var malEpisodes: List<MalEpisode> = emptyList()
         var showId = ""
 
         try {
@@ -181,34 +181,43 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             
             // 2. Get Episode Titles from MyAnimeList HTML
             if (malId != null) {
-                val (mMap, _, _) = providerManager.fetchMalEpisodes(malId)
-                malEpisodes = mMap
+                val (mList, _, _) = providerManager.fetchMalEpisodes(malId)
+                malEpisodes = mList
             }
         } catch (e: Exception) {
             // Ignore
         }
 
+        val malEpMap = malEpisodes.associateBy { it.number }
+
         for (i in 1..latestAired) {
-            val titleStr = malEpisodes[i.toString()] 
-                ?: malEpisodes[String.format("%02d", i)]
-                ?: "Episode $i"
-                
+            val malEp = malEpMap[i.toString()] ?: malEpMap[String.format("%02d", i)]
+            val titleStr = malEp?.title ?: "Episode $i"
+            
             episodes.add(SEpisode.create().apply {
                 url = "$anilistId/${showId.ifBlank { "NA" }}/$i"
                 name = "Ep. $i: $titleStr"
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
+                
+                // Official way to mark filler natively
+                if (malEp?.isFiller == true) {
+                    addTag("Filler")
+                }
             })
         }
 
         if (nextEp != null && nextEp.episode != null && nextEp.timeUntilAiring != null) {
-            val days = nextEp.timeUntilAiring / 86400
-            val hours = (nextEp.timeUntilAiring % 86400) / 3600
+            // AniList returns airingAt in seconds, date_upload needs milliseconds
+            val airingAtMs = (nextEp.airingAt ?: 0L) * 1000
+            
             episodes.add(SEpisode.create().apply {
                 url = "UPCOMING"
-                name = "Ep. ${nextEp.episode}: (Upcoming - airs in ${days}d ${hours}h)"
+                name = "Ep. ${nextEp.episode}"
                 episode_number = nextEp.episode.toFloat()
-                date_upload = System.currentTimeMillis()
+                
+                // Official way to mark upcoming natively (greys out if timestamp is in the future)
+                date_upload = airingAtMs
             })
         }
 
