@@ -9,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
-import keiyoushi.utils.parseAs
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -37,7 +36,7 @@ class ProviderManager(
     val providerDisplayNames: Map<String, String> by lazy {
         linkedMapOf(
             "allanime"  to "AllAnime",
-            "gogoanime" to "Gogoanime",
+            "gogoanime" to "Gogoanime (Anitaku)",
             "animepahe" to "AnimePahe"
         )
     }
@@ -61,7 +60,6 @@ class ProviderManager(
             return emptyList()
         }
 
-        // FIX: Wrap in Dispatchers.IO to ensure network calls don't block main
         return withContext(Dispatchers.IO) {
             val deferred = providers.map { provider ->
                 async {
@@ -71,8 +69,7 @@ class ProviderManager(
                         Log.d(TAG, "[${provider.name}] Returned ${videos.size} videos")
                         videos
                     } catch (e: Exception) {
-                        // FIX: LOG the exception instead of silently swallowing
-                        Log.e(TAG, "[${provider.name}] EXCEPTION in fetchVideos", e)
+                        Log.e(TAG, "[${provider.name}] EXCEPTION", e)
                         emptyList<Video>()
                     }
                 }
@@ -85,7 +82,7 @@ class ProviderManager(
             Log.d(TAG, "Total videos after dedup: ${deduplicated.size}")
 
             if (deduplicated.isEmpty()) {
-                Log.w(TAG, "ALL PROVIDERS RETURNED EMPTY! Check Logcat for individual errors.")
+                Log.w(TAG, "ALL PROVIDERS RETURNED EMPTY! Check individual provider logs above.")
             }
 
             rankVideos(deduplicated)
