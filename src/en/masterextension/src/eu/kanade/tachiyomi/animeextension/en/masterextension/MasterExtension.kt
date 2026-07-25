@@ -167,9 +167,10 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         val episodes = mutableListOf<SEpisode>()
 
-        var malEpisodes: Map<String, String> = emptyMap()
+        var epTitles: Map<String, String> = emptyMap()
         var showId = ""
-        var indicator = "S0-M0"
+        var kitsuInd = "K0"
+        var malInd = "M0"
         var errorInfo = ""
 
         try {
@@ -177,38 +178,43 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             
             // 1. Get AllAnime Show ID (for video extraction later)
             if (titleToSearch.isNotBlank()) {
-                val (id, showInd, showErr) = providerManager.fetchAllAnimeShowId(titleToSearch)
+                val (id, _, showErr) = providerManager.fetchAllAnimeShowId(titleToSearch)
                 showId = id
-                if (showId.isNotBlank()) {
-                    indicator = "$showInd-M0"
-                } else {
-                    indicator = "S0-M0"
-                    errorInfo = showErr
-                }
+                if (showId.isBlank()) errorInfo = showErr
             }
             
-            // 2. Get Episode Titles from MyAnimeList HTML
+            // 2. Get Episode Titles (Kitsu -> MAL)
             if (malId != null) {
-                val (mMap, mInd, mErr) = providerManager.fetchMalEpisodes(malId)
-                malEpisodes = mMap
-                indicator = "${indicator.dropLast(2)}$mInd" // Replace M0 with M1 or M0
-                if (malEpisodes.isEmpty()) {
-                    errorInfo = if (errorInfo.isNotBlank()) "$errorInfo | M:$mErr" else "M:$mErr"
+                val (kMap, kInd, kErr) = providerManager.fetchKitsuEpisodes(malId)
+                epTitles = kMap
+                kitsuInd = kInd
+                
+                if (epTitles.isEmpty()) {
+                    val (mMap, mInd, mErr) = providerManager.fetchMalEpisodes(malId)
+                    epTitles = mMap
+                    malInd = mInd
+                    
+                    if (epTitles.isEmpty()) {
+                        errorInfo = if (errorInfo.isNotBlank()) "$errorInfo | K:$kErr | M:$mErr" else "K:$kErr | M:$mErr"
+                    } else {
+                        errorInfo = "" // Clear error if MAL saved us
+                    }
                 } else {
-                    errorInfo = "" // Clear error if MAL saved us
+                    errorInfo = "" // Clear error if Kitsu saved us
                 }
             } else {
-                indicator = "${indicator.dropLast(2)}M0"
                 errorInfo = if (errorInfo.isNotBlank()) "$errorInfo | NoMAL" else "NoMAL"
             }
         } catch (e: Exception) {
-            indicator = "S0-M0"
             errorInfo = e.message?.take(30) ?: "Exc"
         }
 
+        val showInd = if (showId.isNotBlank()) "S1" else "S0"
+        val indicator = "$showInd-$kitsuInd-$malInd"
+
         for (i in 1..latestAired) {
-            val titleStr = malEpisodes[i.toString()] 
-                ?: malEpisodes[String.format("%02d", i)]
+            val titleStr = epTitles[i.toString()] 
+                ?: epTitles[String.format("%02d", i)]
                 ?: "Episode $i"
                 
             episodes.add(SEpisode.create().apply {
