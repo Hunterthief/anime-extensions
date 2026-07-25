@@ -77,7 +77,6 @@ data class AllAnimeResponse(
 data class AllAnimeData(
     val shows: AllAnimeShows? = null,
     val episode: AllAnimeEpisode? = null,
-    // NEW: encrypted response field
     val tobeparsed: String? = null
 )
 
@@ -106,13 +105,13 @@ data class AllAnimeSourceUrl(
     val priority: Float? = null
 )
 
-// NEW: Decrypted tobeparsed wrapper
+// Decrypted tobeparsed wrapper
 @Serializable
 data class DecryptedEpisodeResult(
     val episode: AllAnimeEpisode? = null
 )
 
-// NEW: Internal hoster (/apivtwo/) response DTOs
+// Internal hoster (/apivtwo/) response DTOs
 @Serializable
 data class AllAnimeVersionResponse(
     val episodeIframeHead: String? = null
@@ -168,6 +167,41 @@ data class AllAnimeVideoLink(
         )
     }
 }
+
+// ======================== AnimePahe DTOs ========================
+
+@Serializable
+data class PaheSearchResponse(
+    val total: Int? = null,
+    val data: List<PaheSearchResult>? = null
+)
+
+@Serializable
+data class PaheSearchResult(
+    val id: Int? = null,
+    val title: String? = null,
+    val poster: String? = null,
+    val snapshot: String? = null
+)
+
+@Serializable
+data class PaheReleaseResponse(
+    val total: Int? = null,
+    val last_page: Int? = null,
+    val data: List<PaheReleaseEpisode>? = null
+)
+
+@Serializable
+data class PaheReleaseEpisode(
+    val id: Int? = null,
+    val episode: Double? = null,
+    val title: String? = null,
+    val snapshot: String? = null,
+    val session: String? = null,
+    val audio: String? = null,
+    val duration: Int? = null,
+    val created_at: String? = null
+)
 
 // ======================== MAL Helper DTOs ========================
 
