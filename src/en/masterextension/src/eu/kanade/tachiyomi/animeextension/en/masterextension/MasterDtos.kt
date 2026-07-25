@@ -115,56 +115,58 @@ data class AllAnimeVersionResponse(
     val episodeIframeHead: String? = null
 )
 
+// ======================== AllAnime Internal Hoster DTOs ========================
+
 @Serializable
 data class AllAnimeVideoLink(
     val links: List<AllAnimeLink> = emptyList()
-) {
-    @Serializable
-    data class AllAnimeLink(
-        val link: String,
-        val hls: Boolean? = null,
-        val mp4: Boolean? = null,
-        val dash: Boolean? = null,
-        val crIframe: Boolean? = null,
-        val resolutionStr: String = "",
-        val subtitles: List<AllAnimeSubtitle>? = null,
-        val rawUrls: RawUrl? = null,
-        val portData: Stream? = null
-    )
+)
 
-    @Serializable
-    data class AllAnimeSubtitle(
-        val lang: String,
-        val src: String,
-        val label: String? = null
-    )
+@Serializable
+data class AllAnimeLink(
+    val link: String,
+    val hls: Boolean? = null,
+    val mp4: Boolean? = null,
+    val dash: Boolean? = null,
+    val crIframe: Boolean? = null,
+    val resolutionStr: String = "",
+    val subtitles: List<AllAnimeSubtitle>? = null,
+    val rawUrls: AllAnimeRawUrl? = null,
+    val portData: AllAnimeStream? = null
+)
 
-    @Serializable
-    data class Stream(
-        val streams: List<StreamObject> = emptyList()
-    ) {
-        @Serializable
-        data class StreamObject(
-            val format: String,
-            val url: String,
-            val audio_lang: String = "",
-            val hardsub_lang: String = ""
-        )
-    }
+@Serializable
+data class AllAnimeSubtitle(
+    val lang: String,
+    val src: String,
+    val label: String? = null
+)
 
-    @Serializable
-    data class RawUrl(
-        val vids: List<DashStreamObject>? = null,
-        val audios: List<DashStreamObject>? = null
-    ) {
-        @Serializable
-        data class DashStreamObject(
-            val bandwidth: Long,
-            val height: Int,
-            val url: String
-        )
-    }
-}
+@Serializable
+data class AllAnimeStream(
+    val streams: List<AllAnimeStreamObject> = emptyList()
+)
+
+@Serializable
+data class AllAnimeStreamObject(
+    val format: String,
+    val url: String,
+    val audio_lang: String = "",
+    val hardsub_lang: String = ""
+)
+
+@Serializable
+data class AllAnimeRawUrl(
+    val vids: List<AllAnimeDashStreamObject>? = null,
+    val audios: List<AllAnimeDashStreamObject>? = null
+)
+
+@Serializable
+data class AllAnimeDashStreamObject(
+    val bandwidth: Long,
+    val height: Int,
+    val url: String
+)
 
 // ======================== AnimePahe DTOs ========================
 
