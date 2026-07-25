@@ -52,12 +52,16 @@ class ProviderManager(
         }.build()
     }
 
+    // Exact headers required to bypass Cloudflare on MAL
     private val malHeaders by lazy {
         Headers.Builder().apply {
-            add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-            add("Accept-Language", "en-US,en;q=0.9")
             add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+            add("Accept-Language", "en-US,en;q=0.9")
             add("Referer", "https://myanimelist.net/")
+            add("sec-ch-ua", "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
+            add("sec-ch-ua-mobile", "?0")
+            add("sec-ch-ua-platform", "\"Windows\"")
         }.build()
     }
 
@@ -118,6 +122,7 @@ class ProviderManager(
 
     fun fetchMalEpisodes(malId: Int): Triple<Map<String, String>, String, String> {
         return try {
+            // Using the injected client which contains Aniyomi's Cloudflare interceptors
             val request = Request.Builder()
                 .url("https://myanimelist.net/anime/$malId/episode")
                 .headers(malHeaders)
@@ -129,12 +134,14 @@ class ProviderManager(
                 if (!res.isSuccessful) return Triple(emptyMap(), "M0", "ERR:${res.code}:${bodyStr.take(30)}")
 
                 val document = Jsoup.parse(bodyStr)
+                
+                // Exact selectors from research
                 val episodeElements = document.select(".listing-item.episode")
 
                 if (episodeElements.isEmpty()) return Triple(emptyMap(), "M0", "Empty")
 
                 val map = episodeElements.mapNotNull { element ->
-                    val numberStr = element.selectFirst("span.episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
+                    val numberStr = element.selectFirst(".episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
                     val title = element.selectFirst("h3.name")?.text()?.trim()
 
                     if (!numberStr.isNullOrBlank() && !title.isNullOrBlank()) {
