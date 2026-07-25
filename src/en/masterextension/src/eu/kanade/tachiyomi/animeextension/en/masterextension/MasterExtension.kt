@@ -274,40 +274,28 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
 
-        // --- Streaming Source Switcher ---
-        val providerKeys = providerManager.providerDisplayNames.keys.toTypedArray()
-        val providerNames = providerManager.providerDisplayNames.values.toTypedArray()
+    val providerKeys = providerManager.providerDisplayNames.keys.toTypedArray()
+    val providerNames = providerManager.providerDisplayNames.values.toTypedArray()
 
-        MultiSelectListPreference(screen.context).apply {
-            key = "enabled_providers"
-            title = "Streaming Sources"
-            entries = providerNames
-            entryValues = providerKeys
-            summary = "Select which sources to fetch videos from.\n" +
-                      "Multiple sources are fetched in parallel and merged.\n" +
-                      "Selected: %s"
-            setDefaultValue(providerManager.defaultProviderKeys)
-        }.also { screen.addPreference(it) }
+    MultiSelectListPreference(screen.context).apply {
+        key = "enabled_providers"
+        title = "Streaming Sources"
+        entries = providerNames
+        entryValues = providerKeys
+        summary = "Select which sources to fetch videos from.\nSelected: %s"
+        setDefaultValue(providerManager.defaultProviderKeys)
+    }.also { screen.addPreference(it) }
 
-        // --- Subtitle Type Preference ---
-        ListPreference(screen.context).apply {
-            key = "preferred_sub_type"
-            title = "Preferred Subtitle Type"
-            entries = arrayOf("Soft Sub", "Hard Sub", "Dub")
-            entryValues = arrayOf("softsub", "hardsub", "dub")
-            summary = "Used for sorting merged video results.\n%s"
-            setDefaultValue("softsub")
-        }.also { screen.addPreference(it) }
-
-        // --- Consumet API URL (kept for potential future use) ---
-        EditTextPreference(screen.context).apply {
-            key = "consumet_api_url"
-            title = "Consumet API URL"
-            summary = "Custom or self-hosted URL for Consumet API (reserved for future providers)"
-            setDefaultValue("https://api.consumet.org/meta/anilist")
-        }.also { screen.addPreference(it) }
+    ListPreference(screen.context).apply {
+        key = "preferred_sub_type"
+        title = "Preferred Subtitle Type"
+        entries = arrayOf("Sub", "Dub")
+        entryValues = arrayOf("sub", "dub")
+        summary = "Used for sorting video results.\n%s"
+        setDefaultValue("sub")
+    }.also { screen.addPreference(it) }
     }
-
+    
     override fun getFilterList(): AnimeFilterList = MasterFilters.filterList
 
     // --- DESCRIPTION HELPER FUNCTIONS ---
