@@ -71,7 +71,6 @@ data class AllAnimeResponse(
 @Serializable
 data class AllAnimeData(
     val shows: AllAnimeShows? = null,
-    val show: AllAnimeShow? = null,
     val episode: AllAnimeEpisode? = null
 )
 
@@ -87,18 +86,6 @@ data class AllAnimeShowEdge(
 )
 
 @Serializable
-data class AllAnimeShow(
-    val _id: String,
-    val episodes: List<AllAnimeEpisodeInfo> = emptyList()
-)
-
-@Serializable
-data class AllAnimeEpisodeInfo(
-    val episodeString: String,
-    val note: String? = null
-)
-
-@Serializable
 data class AllAnimeEpisode(
     val sourceUrls: List<AllAnimeSourceUrl> = emptyList()
 )
@@ -109,16 +96,4 @@ data class AllAnimeSourceUrl(
     val sourceName: String,
     val type: String? = null,
     val priority: Float? = null
-)
-
-// Jikan API (MAL) DTOs
-@Serializable
-data class JikanResponse(
-    val data: List<JikanEpisode>? = null
-)
-
-@Serializable
-data class JikanEpisode(
-    val mal_id: Int,
-    val title: String? = null
 )
