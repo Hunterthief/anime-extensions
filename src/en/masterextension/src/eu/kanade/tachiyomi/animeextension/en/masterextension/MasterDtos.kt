@@ -22,7 +22,6 @@ data class AniListMedia(
     val coverImage: AniListCover? = null,
     val episodes: Int? = null,
     val duration: Int? = null,
-    val rating: String? = null,
     val status: String? = null,
     val season: String? = null,
     val seasonYear: Int? = null,
@@ -100,9 +99,19 @@ data class AllAnimeSourceUrl(
     val priority: Float? = null
 )
 
-// MyAnimeList Helper Data Class
+// MyAnimeList Helper Data Classes
 data class MalEpisode(
     val number: String,
     val title: String,
     val date: Long
+)
+
+data class MalAnimeDetails(
+    val score: String,
+    val rating: String,
+    val synopsis: String,
+    val type: String,
+    val episodes: String,
+    val duration: String,
+    val premiered: String
 )
