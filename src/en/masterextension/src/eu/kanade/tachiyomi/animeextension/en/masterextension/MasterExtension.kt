@@ -200,9 +200,9 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
                 
-                // Official way to mark filler natively
+                // Official way to mark filler natively in Aniyomi
                 if (malEp?.isFiller == true) {
-                    tags.add("Filler")
+                    scanlator = "Filler"
                 }
             })
         }
