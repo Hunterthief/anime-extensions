@@ -173,11 +173,13 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         try {
             val titleToSearch = englishTitle ?: romajiTitle ?: ""
             
+            // 1. Get AllAnime Show ID (for video extraction later)
             if (titleToSearch.isNotBlank()) {
                 val (id, _, _) = providerManager.fetchAllAnimeShowId(titleToSearch)
                 showId = id
             }
             
+            // 2. Get Episode Titles from MyAnimeList HTML
             if (malId != null) {
                 val (mList, _, _) = providerManager.fetchMalEpisodes(malId)
                 malEpisodes = mList
@@ -197,27 +199,16 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 name = "Ep. $i: $titleStr"
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
-                
-                // Aniyomi triggers the Yellow Italic 'F' badge when "Filler" is in the scanlator field.
-                scanlator = if (malEp?.isFiller == true) "Filler, AniList" else "AniList"
+                scanlator = "AniList" // Clean metadata, let AniZen handle the UI
             })
         }
 
         if (nextEp != null && nextEp.episode != null && nextEp.timeUntilAiring != null) {
-            val airingAtMs = if (nextEp.airingAt != null && nextEp.airingAt > 0) {
-                nextEp.airingAt * 1000
-            } else {
-                System.currentTimeMillis() + (nextEp.timeUntilAiring * 1000)
-            }
-            
             episodes.add(SEpisode.create().apply {
-                // Use a real URL pattern, not a placeholder, so the app UI handles it natively
                 url = "$anilistId/${showId.ifBlank { "NA" }}/${nextEp.episode}"
                 name = "Ep. ${nextEp.episode}"
                 episode_number = nextEp.episode.toFloat()
-                
-                // Aniyomi triggers the countdown timer and greys out the row when date_upload is in the future
-                date_upload = airingAtMs
+                date_upload = System.currentTimeMillis() // Clean metadata
                 scanlator = "AniList"
             })
         }
