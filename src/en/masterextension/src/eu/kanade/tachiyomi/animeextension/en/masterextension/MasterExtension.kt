@@ -199,17 +199,21 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 name = "Ep. $i: $titleStr"
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
-                scanlator = "AniList" // Clean metadata, let AniZen handle the UI
             })
         }
 
         if (nextEp != null && nextEp.episode != null && nextEp.timeUntilAiring != null) {
+            val airingAtMs = if (nextEp.airingAt != null && nextEp.airingAt > 0) {
+                nextEp.airingAt * 1000L
+            } else {
+                System.currentTimeMillis() + (nextEp.timeUntilAiring * 1000L)
+            }
+            
             episodes.add(SEpisode.create().apply {
                 url = "$anilistId/${showId.ifBlank { "NA" }}/${nextEp.episode}"
                 name = "Ep. ${nextEp.episode}"
                 episode_number = nextEp.episode.toFloat()
-                date_upload = System.currentTimeMillis() // Clean metadata
-                scanlator = "AniList"
+                date_upload = airingAtMs // Future timestamp so app shows "tomorrow" etc.
             })
         }
 
