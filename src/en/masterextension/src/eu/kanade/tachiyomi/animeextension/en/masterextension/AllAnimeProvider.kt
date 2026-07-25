@@ -13,7 +13,14 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.utils.bodyString
+import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonBody
+import keiyoushi.utils.toJsonString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.buildJsonObject
@@ -21,10 +28,8 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import java.security.MessageDigest
 import java.util.Locale
 import javax.crypto.Cipher
@@ -51,6 +56,11 @@ class AllAnimeProvider(
         private const val DECRYPT_KEY_TYPE = "AES"
         private const val DECRYPT_CIPHER_ALGO = "AES/GCM/NoPadding"
 
+        private val INTERAL_HOSTER_NAMES = arrayOf(
+            "Default", "Ac", "Ak", "Kir", "Rab", "Luf-mp4",
+            "Si-Hls", "S-mp4", "Ac-Hls", "Uv-mp4", "Pn-Hls",
+        )
+
         private val XOR_KEYS = arrayOf(
             "allanimenews",
             "1234567890123456789",
@@ -62,34 +72,34 @@ class AllAnimeProvider(
         private val XOR_MASKS = XOR_KEYS.map { key ->
             key.fold(0) { mask, ch -> mask xor ch.code }
         }.toIntArray()
-
-        private val INTERNAL_HOSTER_NAMES = arrayOf(
-            "Default", "Ac", "Ak", "Kir", "Rab", "Luf-mp4",
-            "Si-Hls", "S-mp4", "Ac-Hls", "Uv-mp4", "Pn-Hls",
-        )
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
+    private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
+    private val doodExtractor by lazy { DoodExtractor(client) }
+    private val okruExtractor by lazy { OkruExtractor(client) }
+    private val mp4uploadExtractor by lazy { Mp4uploadExtractor(client) }
+    private val streamlareExtractor by lazy { StreamlareExtractor(client) }
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
-    private val mp4uploadExtractor by lazy { Mp4uploadExtractor(client) }
-    private val doodExtractor by lazy { DoodExtractor(client) }
-    private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
-    private val streamlareExtractor by lazy { StreamlareExtractor(client) }
-    private val okruExtractor by lazy { OkruExtractor(client) }
 
-    private val apiHeaders by lazy {
-        Headers.Builder().apply {
+    // Headers for POST requests (search, etc.) — matches reference buildPost()
+    private fun buildPostHeaders(body: okhttp3.RequestBody): Headers {
+        return headers.newBuilder().apply {
             add("Accept", "*/*")
-            add("Accept-Language", "en-US,en;q=0.9")
-            add("Content-Type", "application/json")
+            add("Content-Length", body.contentLength().toString())
+            add("Content-Type", body.contentType().toString())
+            add("Host", API_URL.toHttpUrl().host)
             add("Origin", GRAPHQL_ORIGIN)
             add("Referer", "$GRAPHQL_ORIGIN/")
-            add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            add("Sec-Fetch-Dest", "empty")
-            add("Sec-Fetch-Mode", "cors")
-            add("Sec-Fetch-Site", "cross-site")
         }.build()
+    }
+
+    // Headers for GET requests (video sources) — uses site referer like reference
+    private val siteHeaders: Headers by lazy {
+        headers.newBuilder()
+            .set("Referer", "$SITE_URL/")
+            .build()
     }
 
     private fun String.decryptSource(): String {
@@ -109,13 +119,11 @@ class AllAnimeProvider(
         }
 
         if (keyType == null) {
-            for (mask in XOR_MASKS) {
+            XOR_MASKS.forEach { mask ->
                 val decrypted = String(CharArray(parsedChunks.size) { i ->
                     ((parsedChunks[i] xor mask) and 0xFF).toChar()
                 })
-                if (decrypted.contains("/clock") || decrypted.contains("http")) {
-                    return decrypted
-                }
+                if (decrypted.contains("/clock") || decrypted.contains("http")) return decrypted
             }
             return this
         }
@@ -127,28 +135,24 @@ class AllAnimeProvider(
     }
 
     private fun decryptTobeparsed(base64Payload: String): String {
-        return try {
-            val blob = Base64.decode(base64Payload, Base64.DEFAULT)
-            if (blob.size < 13) return ""
+        val blob = Base64.decode(base64Payload, Base64.DEFAULT)
+        if (blob.size < 13) return ""
 
-            val versionByte = blob[0].toInt() and 0xFF
-            val iv = blob.sliceArray(1 until 13)
-            val encryptedData = blob.sliceArray(13 until blob.size)
+        val versionByte = blob[0].toInt() and 0xFF
+        val iv = blob.sliceArray(1 until 13)
+        val encryptedData = blob.sliceArray(13 until blob.size)
 
-            val keyBytes = MessageDigest.getInstance(DECRYPT_KEY_ALGO)
-                .digest("$DECRYPT_SECRET:v$versionByte".toByteArray(Charsets.UTF_8))
+        val keyBytes = MessageDigest.getInstance(DECRYPT_KEY_ALGO)
+            .digest("$DECRYPT_SECRET:v$versionByte".toByteArray(Charsets.UTF_8))
 
-            val cipher = Cipher.getInstance(DECRYPT_CIPHER_ALGO)
-            val gcmSpec = GCMParameterSpec(DECRYPT_TAG_LENGTH, iv)
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, DECRYPT_KEY_TYPE), gcmSpec)
+        val cipher = Cipher.getInstance(DECRYPT_CIPHER_ALGO)
+        val gcmSpec = GCMParameterSpec(DECRYPT_TAG_LENGTH, iv)
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, DECRYPT_KEY_TYPE), gcmSpec)
 
-            String(cipher.doFinal(encryptedData), Charsets.UTF_8)
-        } catch (_: Exception) {
-            ""
-        }
+        return String(cipher.doFinal(encryptedData), Charsets.UTF_8)
     }
 
-    private suspend fun fetchShowId(title: String): String = withContext(Dispatchers.IO) {
+    private suspend fun fetchShowId(title: String): String {
         val query = """
             query(${'$'}search: SearchInput, ${'$'}limit: Int, ${'$'}page: Int, ${'$'}translationType: VaildTranslationTypeEnumType, ${'$'}countryOrigin: VaildCountryOriginEnumType) {
               shows(search: ${'$'}search, limit: ${'$'}limit, page: ${'$'}page, translationType: ${'$'}translationType, countryOrigin: ${'$'}countryOrigin) {
@@ -165,147 +169,131 @@ class AllAnimeProvider(
                     put("allowAdult", true)
                     put("allowUnknown", true)
                 }
-                put("limit", 40)
+                put("limit", 30)
                 put("page", 1)
                 put("translationType", "sub")
                 put("countryOrigin", "ALL")
             }
         }
 
-        val res = makePostRequest(payload) ?: return@withContext ""
-        if (res.startsWith("ERR") || res.startsWith("EXC")) return@withContext ""
+        val body = payload.toJsonString().toJsonBody()
+        val postHeaders = buildPostHeaders(body)
 
-        try {
-            res.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?.id ?: ""
-        } catch (_: Exception) {
-            ""
-        }
+        val response = client.newCall(
+            POST("$API_URL/api", headers = postHeaders, body = body)
+        ).awaitSuccess().bodyString()
+
+        return response.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?.id ?: ""
     }
 
-    private fun makePostRequest(payload: kotlinx.serialization.json.JsonObject): String? {
-        return try {
-            val body = payload.toString().toRequestBody("application/json".toMediaType())
-            val request = Request.Builder()
-                .url("$API_URL/api")
-                .post(body)
-                .headers(apiHeaders)
-                .build()
-
-            client.newCall(request).execute().use { res ->
-                val bodyStr = res.body.string()
-                if (!res.isSuccessful) "ERR:${res.code}"
-                else bodyStr
-            }
-        } catch (_: Exception) {
-            "EXC"
+    private fun buildVideoListRequest(showId: String, episodeString: String): Request {
+        val variables = buildJsonObject {
+            put("showId", showId)
+            put("translationType", "sub")
+            put("episodeString", episodeString)
         }
+
+        val extensions = buildJsonObject {
+            putJsonObject("persistedQuery") {
+                put("version", 1)
+                put("sha256Hash", STREAM_HASH)
+            }
+        }
+
+        val url = API_URL.toHttpUrl().newBuilder().apply {
+            addPathSegment("api")
+            addQueryParameter("variables", variables.toJsonString())
+            addQueryParameter("extensions", extensions.toJsonString())
+        }.build().toString()
+
+        return GET(url, siteHeaders)
     }
 
-    private fun fetchIframeEndpoint(): String {
-        return try {
-            val request = Request.Builder()
-                .url("$SITE_URL/getVersion")
-                .headers(apiHeaders)
-                .get()
-                .build()
+    private suspend fun extractInternalHoster(
+        url: String,
+        sourceName: String,
+        endPoint: String
+    ): List<Video> {
+        val linkJson = client.newCall(
+            GET(endPoint + url.replace("/clock?", "/clock.json?"))
+        ).awaitSuccess().parseAs<AllAnimeVideoLink>()
 
-            client.newCall(request).execute().use { res ->
-                if (!res.isSuccessful) return FALLBACK_PLAYER_DOMAIN
-                res.body.string().parseAs<AllAnimeVersionResponse>().episodeIframeHead
-                    ?: FALLBACK_PLAYER_DOMAIN
-            }
-        } catch (_: Exception) {
-            FALLBACK_PLAYER_DOMAIN
-        }
-    }
+        return linkJson.links.parallelCatchingFlatMap { link ->
+            val subtitles = link.subtitles?.map { sub ->
+                val label = sub.label?.let { " - $it" } ?: ""
+                Track(sub.src, Locale(sub.lang).displayLanguage + label)
+            }.orEmpty()
 
-    private fun extractInternalHoster(url: String, sourceName: String, endPoint: String): List<Video> {
-        return try {
-            val clockUrl = endPoint + url.replace("/clock?", "/clock.json?")
-
-            val request = Request.Builder()
-                .url(clockUrl)
-                .headers(apiHeaders)
-                .get()
-                .build()
-
-            val linkJson = client.newCall(request).execute().use { res ->
-                if (!res.isSuccessful) return emptyList()
-                res.body.string().parseAs<AllAnimeVideoLink>()
-            }
-
-            linkJson.links.flatMap { link ->
-                val subtitles = link.subtitles?.map { sub ->
-                    val label = sub.label?.let { " - $it" } ?: ""
-                    Track(sub.src, Locale(sub.lang).displayLanguage + label)
-                }.orEmpty()
-
-                when {
-                    link.mp4 == true -> {
-                        listOf(Video(
-                            link.link,
-                            "Original ($name - ${link.resolutionStr})",
-                            link.link,
-                            subtitleTracks = subtitles,
-                        ))
-                    }
-                    link.hls == true -> {
-                        val masterHeaders = apiHeaders.newBuilder()
-                            .set("Host", link.link.toHttpUrl().host)
-                            .set("Origin", endPoint)
-                            .set("Referer", "$endPoint/")
-                            .build()
-
-                        playlistUtils.extractFromHls(
-                            link.link,
-                            masterHeaders = masterHeaders,
-                            videoHeaders = masterHeaders,
-                            videoNameGen = { quality -> "$quality ($name - ${link.resolutionStr})" },
-                            subtitleList = subtitles,
-                        )
-                    }
-                    link.crIframe == true -> {
-                        link.portData?.streams?.flatMap { stream ->
-                            when (stream.format) {
-                                "adaptive_dash" -> listOf(Video(
-                                    stream.url,
-                                    "Original (AC - Dash${if (stream.hardsub_lang.isEmpty()) "" else " - Hardsub: ${stream.hardsub_lang}"})",
-                                    stream.url,
-                                    subtitleTracks = subtitles,
-                                ))
-                                "adaptive_hls" -> playlistUtils.extractFromHls(
-                                    stream.url,
-                                    masterHeaders = apiHeaders,
-                                    videoHeaders = apiHeaders,
-                                    videoNameGen = { quality ->
-                                        "$quality (AC - HLS${if (stream.hardsub_lang.isEmpty()) "" else " - Hardsub: ${stream.hardsub_lang}"})"
-                                    },
-                                    subtitleList = subtitles,
-                                )
-                                else -> emptyList()
-                            }
-                        }.orEmpty()
-                    }
-                    link.dash == true -> {
-                        val audioList = link.rawUrls?.audios?.map {
-                            Track(it.url, "${it.bandwidth / 1000} kb/s")
-                        }.orEmpty()
-
-                        link.rawUrls?.vids?.map { vid ->
-                            Video(
-                                vid.url,
-                                "$name - ${vid.height}p ${vid.bandwidth / 1000} kb/s",
-                                vid.url,
-                                audioTracks = audioList,
-                                subtitleTracks = subtitles,
-                            )
-                        }.orEmpty()
-                    }
-                    else -> emptyList()
+            when {
+                link.mp4 == true -> {
+                    Video(
+                        link.link,
+                        "Original ($name - ${link.resolutionStr})",
+                        link.link,
+                        subtitleTracks = subtitles,
+                    ).let(::listOf)
                 }
+
+                link.hls == true -> {
+                    val masterHeaders = headers.newBuilder()
+                        .add("Accept", "*/*")
+                        .add("Host", link.link.toHttpUrl().host)
+                        .add("Origin", endPoint)
+                        .add("Referer", "$endPoint/")
+                        .build()
+
+                    playlistUtils.extractFromHls(
+                        link.link,
+                        masterHeaders = masterHeaders,
+                        videoHeaders = masterHeaders,
+                        videoNameGen = { quality -> "$quality ($name - ${link.resolutionStr})" },
+                        subtitleList = subtitles,
+                    )
+                }
+
+                link.crIframe == true -> {
+                    link.portData?.streams?.parallelCatchingFlatMap { stream ->
+                        when (stream.format) {
+                            "adaptive_dash" -> Video(
+                                stream.url,
+                                "Original (AC - Dash${if (stream.hardsub_lang.isEmpty()) "" else " - Hardsub: ${stream.hardsub_lang}"})",
+                                stream.url,
+                                subtitleTracks = subtitles,
+                            ).let(::listOf)
+
+                            "adaptive_hls" -> playlistUtils.extractFromHls(
+                                stream.url,
+                                masterHeaders = headers,
+                                videoHeaders = headers,
+                                videoNameGen = { quality ->
+                                    "$quality (AC - HLS${if (stream.hardsub_lang.isEmpty()) "" else " - Hardsub: ${stream.hardsub_lang}"})"
+                                },
+                                subtitleList = subtitles,
+                            )
+
+                            else -> emptyList()
+                        }
+                    }.orEmpty()
+                }
+
+                link.dash == true -> {
+                    val audioList = link.rawUrls?.audios?.map {
+                        Track(it.url, "${it.bandwidth / 1000} kb/s")
+                    }.orEmpty()
+
+                    link.rawUrls?.vids?.map { vid ->
+                        Video(
+                            vid.url,
+                            "$name - ${vid.height}p ${vid.bandwidth / 1000} kb/s",
+                            vid.url,
+                            audioTracks = audioList,
+                            subtitleTracks = subtitles,
+                        )
+                    }.orEmpty()
+                }
+
+                else -> emptyList()
             }
-        } catch (_: Exception) {
-            emptyList()
         }
     }
 
@@ -317,106 +305,139 @@ class AllAnimeProvider(
         val showId = fetchShowId(title)
         if (showId.isBlank()) return emptyList()
 
-        return withContext(Dispatchers.IO) {
-            try {
-                val variablesJson = buildJsonObject {
-                    put("showId", showId)
-                    put("translationType", "sub")
-                    put("episodeString", meta.epNum.toString())
-                }.toString()
+        // Fetch episode source URLs — matches reference getVideoList exactly
+        val responseBody = client.newCall(
+            buildVideoListRequest(showId, meta.epNum.toString())
+        ).awaitSuccess().bodyString()
 
-                val extensionsJson = buildJsonObject {
-                    putJsonObject("persistedQuery") {
-                        put("version", 1)
-                        put("sha256Hash", STREAM_HASH)
-                    }
-                }.toString()
+        // Check for encrypted response
+        val tobeparsed = runCatching {
+            responseBody.parseAs<AllAnimeResponse>().data?.tobeparsed
+        }.getOrNull()
 
-                val url = "$API_URL/api".toHttpUrl().newBuilder()
-                    .addQueryParameter("variables", variablesJson)
-                    .addQueryParameter("extensions", extensionsJson)
-                    .build()
+        val sourceUrls = if (!tobeparsed.isNullOrBlank()) {
+            decryptTobeparsed(tobeparsed).parseAs<DecryptedEpisodeResult>().episode?.sourceUrls
+        } else {
+            responseBody.parseAs<AllAnimeResponse>().data?.episode?.sourceUrls
+        } ?: emptyList()
 
-                val request = Request.Builder()
-                    .url(url)
-                    .headers(apiHeaders)
-                    .get()
-                    .build()
+        if (sourceUrls.isEmpty()) return emptyList()
 
-                val responseBody = client.newCall(request).execute().use { res ->
-                    if (!res.isSuccessful) return@withContext emptyList<Video>()
-                    res.body.string()
+        // Build server list — matches reference filtering logic
+        val mappings = listOf(
+            "vidstreaming" to listOf("vidstreaming", "https://gogo", "playgo1.cc", "playtaku", "vidcloud"),
+            "doodstream" to listOf("dood"),
+            "okru" to listOf("ok.ru", "okru"),
+            "mp4upload" to listOf("mp4upload.com"),
+            "streamlare" to listOf("streamlare.com"),
+            "filemoon" to listOf("filemoon", "moonplayer"),
+            "streamwish" to listOf("wish"),
+        )
+
+        data class Server(val sourceUrl: String, val sourceName: String, val priority: Float)
+
+        val serverList = mutableListOf<Server>()
+        sourceUrls.forEach { video ->
+            val videoUrl = video.sourceUrl.decryptSource()
+
+            val matchingMapping = mappings.firstOrNull { (_, urlMatches) ->
+                urlMatches.any { videoUrl.contains(it) }
+            }
+
+            when {
+                // Internal hoster: URL starts with /apivtwo/ AND source name matches
+                videoUrl.startsWith("/apivtwo/") && INTERAL_HOSTER_NAMES.any {
+                    Regex("""\b${it.lowercase()}\b""").find(video.sourceName.lowercase()) != null
+                } -> Server(videoUrl, "internal ${video.sourceName}", video.priority ?: 0f)
+                    .let(serverList::add)
+
+                // Player type
+                video.type == "player" ->
+                    Server(videoUrl, "player@${video.sourceName}", video.priority ?: 0f)
+                        .let(serverList::add)
+
+                // Known alt hoster
+                matchingMapping != null ->
+                    Server(videoUrl, matchingMapping.first, video.priority ?: 0f)
+                        .let(serverList::add)
+
+                // Direct URL fallback
+                videoUrl.startsWith("http") ->
+                    Server(videoUrl, "direct@${video.sourceName}", video.priority ?: 0f)
+                        .let(serverList::add)
+            }
+        }
+
+        if (serverList.isEmpty()) return emptyList()
+
+        // Fetch iframe endpoint
+        val iframeEndpoint = runCatching {
+            client.newCall(GET("$SITE_URL/getVersion")).awaitSuccess()
+                .parseAs<AllAnimeVersionResponse>()
+                .episodeIframeHead ?: FALLBACK_PLAYER_DOMAIN
+        }.getOrDefault(FALLBACK_PLAYER_DOMAIN)
+
+        // Extract videos from all servers in parallel — matches reference
+        return serverList.parallelCatchingFlatMap { server ->
+            val sName = server.sourceName
+            when {
+                sName.startsWith("internal ") -> {
+                    extractInternalHoster(server.sourceUrl, server.sourceName, iframeEndpoint)
                 }
 
-                val parsed = responseBody.parseAs<AllAnimeResponse>()
-                val tobeparsed = parsed.data?.tobeparsed
+                sName.startsWith("player@") -> {
+                    val videoHeaders = headers.newBuilder().apply {
+                        add("Accept", "video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5")
+                        add("Host", server.sourceUrl.toHttpUrl().host)
+                        add("Referer", "$iframeEndpoint/")
+                    }.build()
 
-                val sourceUrls = if (!tobeparsed.isNullOrBlank()) {
-                    val decryptedJson = decryptTobeparsed(tobeparsed)
-                    if (decryptedJson.isBlank()) return@withContext emptyList<Video>()
-                    decryptedJson.parseAs<DecryptedEpisodeResult>().episode?.sourceUrls ?: emptyList()
-                } else {
-                    parsed.data?.episode?.sourceUrls ?: emptyList()
+                    Video(
+                        server.sourceUrl,
+                        "Original (player ${server.sourceName.substringAfter("player@")})",
+                        server.sourceUrl,
+                        headers = videoHeaders,
+                    ).let(::listOf)
                 }
 
-                if (sourceUrls.isEmpty()) return@withContext emptyList<Video>()
-
-                val iframeEndpoint = fetchIframeEndpoint()
-                val videos = mutableListOf<Video>()
-
-                for (source in sourceUrls) {
-                    val decryptedUrl = source.sourceUrl.decryptSource()
-
-                    when {
-                        decryptedUrl.startsWith("/apivtwo/") || decryptedUrl.contains("/clock") -> {
-                            videos.addAll(extractInternalHoster(decryptedUrl, source.sourceName, iframeEndpoint))
-                        }
-                        decryptedUrl.contains(".m3u8") -> {
-                            try {
-                                videos.addAll(
-                                    playlistUtils.extractFromHls(
-                                        decryptedUrl, decryptedUrl, apiHeaders, apiHeaders
-                                    )
-                                )
-                            } catch (_: Exception) {
-                                videos.add(Video(decryptedUrl, "$name HLS", decryptedUrl, headers = apiHeaders))
-                            }
-                        }
-                        decryptedUrl.contains("filemoon") || decryptedUrl.contains("moonplayer") -> {
-                            videos.addAll(filemoonExtractor.videosFromUrl(decryptedUrl, prefix = "$name Filemoon:"))
-                        }
-                        decryptedUrl.contains("streamwish") || decryptedUrl.contains("wish") || decryptedUrl.contains("swhoi") -> {
-                            videos.addAll(streamwishExtractor.videosFromUrl(decryptedUrl, videoNameGen = { "$name StreamWish:$it" }))
-                        }
-                        decryptedUrl.contains("mp4upload") -> {
-                            videos.addAll(mp4uploadExtractor.videosFromUrl(decryptedUrl, apiHeaders))
-                        }
-                        decryptedUrl.contains("dood") -> {
-                            videos.addAll(doodExtractor.videosFromUrl(decryptedUrl))
-                        }
-                        decryptedUrl.contains("vidstreaming") || decryptedUrl.contains("gogo") ||
-                        decryptedUrl.contains("vidcloud") || decryptedUrl.contains("playgo1") ||
-                        decryptedUrl.contains("playtaku") -> {
-                            videos.addAll(gogoStreamExtractor.videosFromUrl(
-                                decryptedUrl.replace(Regex("^//"), "https://")
-                            ))
-                        }
-                        decryptedUrl.contains("streamlare") -> {
-                            videos.addAll(streamlareExtractor.videosFromUrl(decryptedUrl))
-                        }
-                        decryptedUrl.contains("ok.ru") || decryptedUrl.contains("okru") -> {
-                            videos.addAll(okruExtractor.videosFromUrl(decryptedUrl))
-                        }
-                        else -> {
-                            if (decryptedUrl.startsWith("http")) {
-                                videos.add(Video(decryptedUrl, "$name ${source.sourceName}", decryptedUrl, headers = apiHeaders))
-                            }
-                        }
-                    }
+                sName == "vidstreaming" -> {
+                    gogoStreamExtractor.videosFromUrl(server.sourceUrl.replace(Regex("^//"), "https://"))
                 }
-                videos
-            } catch (_: Exception) {
-                emptyList()
+
+                sName == "doodstream" -> {
+                    doodExtractor.videosFromUrl(server.sourceUrl)
+                }
+
+                sName == "okru" -> {
+                    okruExtractor.videosFromUrl(server.sourceUrl)
+                }
+
+                sName == "mp4upload" -> {
+                    mp4uploadExtractor.videosFromUrl(server.sourceUrl, headers)
+                }
+
+                sName == "streamlare" -> {
+                    streamlareExtractor.videosFromUrl(server.sourceUrl)
+                }
+
+                sName == "filemoon" -> {
+                    filemoonExtractor.videosFromUrl(server.sourceUrl, prefix = "Filemoon:")
+                }
+
+                sName == "streamwish" -> {
+                    streamwishExtractor.videosFromUrl(server.sourceUrl, videoNameGen = { "StreamWish:$it" })
+                }
+
+                sName.startsWith("direct@") -> {
+                    Video(
+                        server.sourceUrl,
+                        "$name ${server.sourceName.substringAfter("direct@")}",
+                        server.sourceUrl,
+                        headers = siteHeaders,
+                    ).let(::listOf)
+                }
+
+                else -> emptyList()
             }
         }
     }
