@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
-import android.util.Log
 import aniyomi.lib.gogostreamextractor.GogoStreamExtractor
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.model.SAnime
@@ -25,8 +24,7 @@ class GogoanimeProvider(
     override val name = "Gogoanime"
 
     companion object {
-        private const val TAG = "GogoanimeProvider"
-        // Gogoanime rebranded to Anitaku in 2025-2026
+        // Gogoanime rebranded to Anitaku (2025-2026)
         private const val BASE_URL = "https://anitaku.to"
     }
 
@@ -46,8 +44,6 @@ class GogoanimeProvider(
             .addQueryParameter("keyword", title)
             .build()
 
-        Log.d(TAG, "Searching: $url")
-
         val request = Request.Builder()
             .url(url)
             .headers(gogoHeaders)
@@ -56,28 +52,19 @@ class GogoanimeProvider(
 
         try {
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Search HTTP ${response.code} — site may be down or domain changed")
-                    return@withContext null
-                }
+                if (!response.isSuccessful) return@withContext null
                 val html = response.body.string()
                 val document = Jsoup.parse(html)
 
                 val firstResult = document.selectFirst("ul.items li p.name a")
                     ?: document.selectFirst("div.last_recent ul li p.name a")
                     ?: document.selectFirst("a[href*=/category/]")
-
-                if (firstResult == null) {
-                    Log.w(TAG, "No search results for '$title'. HTML snippet: ${html.take(300)}")
-                    return@withContext null
-                }
+                    ?: return@withContext null
 
                 val href = firstResult.attr("abs:href")
-                Log.d(TAG, "Found category URL: $href")
                 if (href.isNotBlank()) href else null
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Search exception (Cloudflare/network block?)", e)
+        } catch (_: Exception) {
             null
         }
     }
@@ -85,21 +72,10 @@ class GogoanimeProvider(
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
         val title = anime.title.ifBlank { meta.title }
-        if (title.isBlank()) {
-            Log.e(TAG, "Title is blank, aborting")
-            return emptyList()
-        }
+        if (title.isBlank()) return emptyList()
 
-        Log.d(TAG, "fetchVideos: '$title' ep ${meta.epNum}")
-
-        val categoryUrl = searchAnime(title)
-        if (categoryUrl == null) {
-            Log.e(TAG, "Search returned null for '$title'")
-            return emptyList()
-        }
-
+        val categoryUrl = searchAnime(title) ?: return emptyList()
         val epUrl = categoryUrl.replace("/category/", "/") + "-episode-${meta.epNum}"
-        Log.d(TAG, "Episode URL: $epUrl")
 
         return withContext(Dispatchers.IO) {
             val request = Request.Builder()
@@ -110,16 +86,12 @@ class GogoanimeProvider(
 
             try {
                 client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        Log.e(TAG, "Episode page HTTP ${response.code}")
-                        return@withContext emptyList<Video>()
-                    }
+                    if (!response.isSuccessful) return@withContext emptyList<Video>()
                     val html = response.body.string()
                     val document = Jsoup.parse(html)
 
                     val serverUrls = mutableListOf<String>()
 
-                    // Primary: data-video attributes in server list
                     document.select("div.anime_muti_link ul li a[data-video]").forEach { element ->
                         val dataVideo = element.attr("data-video")
                         if (dataVideo.isNotBlank()) {
@@ -132,7 +104,6 @@ class GogoanimeProvider(
                         }
                     }
 
-                    // Fallback: iframe embeds
                     if (serverUrls.isEmpty()) {
                         document.select("div.play-video iframe[src]").forEach { iframe ->
                             val src = iframe.attr("abs:src")
@@ -140,12 +111,7 @@ class GogoanimeProvider(
                         }
                     }
 
-                    Log.d(TAG, "Found ${serverUrls.size} server URLs: $serverUrls")
-
-                    if (serverUrls.isEmpty()) {
-                        Log.w(TAG, "No server URLs found. Page HTML (first 500): ${html.take(500)}")
-                        return@withContext emptyList<Video>()
-                    }
+                    if (serverUrls.isEmpty()) return@withContext emptyList<Video>()
 
                     coroutineScope {
                         val deferred = serverUrls.map { videoUrl ->
@@ -165,13 +131,9 @@ class GogoanimeProvider(
                                                 videoUrl, videoUrl, gogoHeaders, gogoHeaders
                                             )
                                         }
-                                        else -> {
-                                            Log.d(TAG, "Unhandled server: $videoUrl")
-                                            emptyList()
-                                        }
+                                        else -> emptyList()
                                     }
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Extractor failed for $videoUrl", e)
+                                } catch (_: Exception) {
                                     emptyList<Video>()
                                 }
                             }
@@ -179,8 +141,7 @@ class GogoanimeProvider(
                         deferred.awaitAll().flatten()
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Episode fetch exception", e)
+            } catch (_: Exception) {
                 emptyList()
             }
         }
