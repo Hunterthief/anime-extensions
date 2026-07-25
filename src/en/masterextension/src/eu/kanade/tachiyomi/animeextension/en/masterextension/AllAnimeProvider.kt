@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import android.util.Base64
-import android.util.Log
 import aniyomi.lib.doodextractor.DoodExtractor
 import aniyomi.lib.filemoonextractor.FilemoonExtractor
 import aniyomi.lib.gogostreamextractor.GogoStreamExtractor
@@ -40,27 +39,18 @@ class AllAnimeProvider(
     override val name = "AllAnime"
 
     companion object {
-        private const val TAG = "AllAnimeProvider"
-
-        // Correct SHA-256 persisted query hash (verified from reference)
         private const val STREAM_HASH = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec"
-
         private const val API_URL = "https://api.allanime.day"
         private const val SITE_URL = "https://allmanga.to"
-
-        // Correct CORS origin (verified from reference)
         private const val GRAPHQL_ORIGIN = "https://youtu-chan.com"
-
         private const val FALLBACK_PLAYER_DOMAIN = "https://blog.allanime.day"
 
-        // AES-GCM decryption constants for tobeparsed
         private const val DECRYPT_SECRET = "Xot36i3lK3"
         private const val DECRYPT_TAG_LENGTH = 128
         private const val DECRYPT_KEY_ALGO = "SHA-256"
         private const val DECRYPT_KEY_TYPE = "AES"
         private const val DECRYPT_CIPHER_ALGO = "AES/GCM/NoPadding"
 
-        // XOR keys — cumulative mask is computed from these
         private val XOR_KEYS = arrayOf(
             "allanimenews",
             "1234567890123456789",
@@ -69,12 +59,10 @@ class AllAnimeProvider(
             "feqx1",
         )
 
-        // Pre-compute cumulative XOR mask for each key
         private val XOR_MASKS = XOR_KEYS.map { key ->
             key.fold(0) { mask, ch -> mask xor ch.code }
         }.toIntArray()
 
-        // Internal hoster names
         private val INTERNAL_HOSTER_NAMES = arrayOf(
             "Default", "Ac", "Ak", "Kir", "Rab", "Luf-mp4",
             "Si-Hls", "S-mp4", "Ac-Hls", "Uv-mp4", "Pn-Hls",
@@ -104,9 +92,6 @@ class AllAnimeProvider(
         }.build()
     }
 
-    // =====================================================================
-    // XOR DECRYPTION — uses cumulative mask (NOT rotating char key)
-    // =====================================================================
     private fun String.decryptSource(): String {
         val (hexPayload, keyType) = when {
             startsWith("--") -> substring(2) to 3
@@ -120,11 +105,9 @@ class AllAnimeProvider(
         val parsedChunks = try {
             hexPayload.chunked(2).map { it.toInt(16) }
         } catch (_: NumberFormatException) {
-            Log.w(TAG, "decryptSource: hex parse failed for '${this.take(40)}'")
             return this
         }
 
-        // If no prefix matched, try all masks and check for valid URL
         if (keyType == null) {
             for (mask in XOR_MASKS) {
                 val decrypted = String(CharArray(parsedChunks.size) { i ->
@@ -143,16 +126,10 @@ class AllAnimeProvider(
         })
     }
 
-    // =====================================================================
-    // AES-GCM decryption for 'tobeparsed' encrypted responses
-    // =====================================================================
     private fun decryptTobeparsed(base64Payload: String): String {
         return try {
             val blob = Base64.decode(base64Payload, Base64.DEFAULT)
-            if (blob.size < 13) {
-                Log.w(TAG, "tobeparsed blob too short: ${blob.size} bytes")
-                return ""
-            }
+            if (blob.size < 13) return ""
 
             val versionByte = blob[0].toInt() and 0xFF
             val iv = blob.sliceArray(1 until 13)
@@ -166,18 +143,12 @@ class AllAnimeProvider(
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, DECRYPT_KEY_TYPE), gcmSpec)
 
             String(cipher.doFinal(encryptedData), Charsets.UTF_8)
-        } catch (e: Exception) {
-            Log.e(TAG, "tobeparsed AES-GCM decryption failed", e)
+        } catch (_: Exception) {
             ""
         }
     }
 
-    // =====================================================================
-    // Show ID search
-    // =====================================================================
     private suspend fun fetchShowId(title: String): String = withContext(Dispatchers.IO) {
-        Log.d(TAG, "Searching for show: '$title'")
-
         val query = """
             query(${'$'}search: SearchInput, ${'$'}limit: Int, ${'$'}page: Int, ${'$'}translationType: VaildTranslationTypeEnumType, ${'$'}countryOrigin: VaildCountryOriginEnumType) {
               shows(search: ${'$'}search, limit: ${'$'}limit, page: ${'$'}page, translationType: ${'$'}translationType, countryOrigin: ${'$'}countryOrigin) {
@@ -201,18 +172,12 @@ class AllAnimeProvider(
             }
         }
 
-        val res = makePostRequest(payload)
-        if (res == null || res.startsWith("ERR") || res.startsWith("EXC")) {
-            Log.e(TAG, "fetchShowId failed: $res")
-            return@withContext ""
-        }
+        val res = makePostRequest(payload) ?: return@withContext ""
+        if (res.startsWith("ERR") || res.startsWith("EXC")) return@withContext ""
 
         try {
-            val showId = res.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?.id ?: ""
-            Log.d(TAG, "fetchShowId: found id='$showId'")
-            showId
-        } catch (e: Exception) {
-            Log.e(TAG, "fetchShowId: parse error", e)
+            res.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?.id ?: ""
+        } catch (_: Exception) {
             ""
         }
     }
@@ -228,22 +193,14 @@ class AllAnimeProvider(
 
             client.newCall(request).execute().use { res ->
                 val bodyStr = res.body.string()
-                if (!res.isSuccessful) {
-                    Log.e(TAG, "POST $API_URL/api → HTTP ${res.code}: ${bodyStr.take(200)}")
-                    "ERR:${res.code}:${bodyStr.take(100)}"
-                } else {
-                    bodyStr
-                }
+                if (!res.isSuccessful) "ERR:${res.code}"
+                else bodyStr
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "POST request exception", e)
-            "EXC:${e.message?.take(100)}"
+        } catch (_: Exception) {
+            "EXC"
         }
     }
 
-    // =====================================================================
-    // Internal hoster: fetch iframe endpoint
-    // =====================================================================
     private fun fetchIframeEndpoint(): String {
         return try {
             val request = Request.Builder()
@@ -257,19 +214,14 @@ class AllAnimeProvider(
                 res.body.string().parseAs<AllAnimeVersionResponse>().episodeIframeHead
                     ?: FALLBACK_PLAYER_DOMAIN
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "getVersion failed, using fallback", e)
+        } catch (_: Exception) {
             FALLBACK_PLAYER_DOMAIN
         }
     }
 
-    // =====================================================================
-    // Internal hoster extraction (/apivtwo/ URLs)
-    // =====================================================================
     private fun extractInternalHoster(url: String, sourceName: String, endPoint: String): List<Video> {
         return try {
             val clockUrl = endPoint + url.replace("/clock?", "/clock.json?")
-            Log.d(TAG, "Internal hoster: $clockUrl")
 
             val request = Request.Builder()
                 .url(clockUrl)
@@ -278,10 +230,7 @@ class AllAnimeProvider(
                 .build()
 
             val linkJson = client.newCall(request).execute().use { res ->
-                if (!res.isSuccessful) {
-                    Log.e(TAG, "Internal hoster HTTP ${res.code}")
-                    return emptyList()
-                }
+                if (!res.isSuccessful) return emptyList()
                 res.body.string().parseAs<AllAnimeVideoLink>()
             }
 
@@ -355,31 +304,18 @@ class AllAnimeProvider(
                     else -> emptyList()
                 }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Internal hoster extraction failed for '$url'", e)
+        } catch (_: Exception) {
             emptyList()
         }
     }
 
-    // =====================================================================
-    // MAIN VIDEO FETCH
-    // =====================================================================
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
         val title = anime.title.ifBlank { meta.title }
-
-        if (title.isBlank()) {
-            Log.e(TAG, "Title is blank! anime.title='${anime.title}', meta.title='${meta.title}'")
-            return emptyList()
-        }
-
-        Log.d(TAG, "fetchVideos: title='$title', ep=${meta.epNum}")
+        if (title.isBlank()) return emptyList()
 
         val showId = fetchShowId(title)
-        if (showId.isBlank()) {
-            Log.e(TAG, "Could not find showId for '$title'")
-            return emptyList()
-        }
+        if (showId.isBlank()) return emptyList()
 
         return withContext(Dispatchers.IO) {
             try {
@@ -401,8 +337,6 @@ class AllAnimeProvider(
                     .addQueryParameter("extensions", extensionsJson)
                     .build()
 
-                Log.d(TAG, "Episode request: $url")
-
                 val request = Request.Builder()
                     .url(url)
                     .headers(apiHeaders)
@@ -410,121 +344,78 @@ class AllAnimeProvider(
                     .build()
 
                 val responseBody = client.newCall(request).execute().use { res ->
-                    if (!res.isSuccessful) {
-                        Log.e(TAG, "Episode HTTP ${res.code}: ${res.body.string().take(200)}")
-                        return@withContext emptyList<Video>()
-                    }
+                    if (!res.isSuccessful) return@withContext emptyList<Video>()
                     res.body.string()
                 }
 
-                Log.d(TAG, "Episode response (first 200): ${responseBody.take(200)}")
-
-                // Check for encrypted 'tobeparsed' response
                 val parsed = responseBody.parseAs<AllAnimeResponse>()
                 val tobeparsed = parsed.data?.tobeparsed
 
                 val sourceUrls = if (!tobeparsed.isNullOrBlank()) {
-                    Log.d(TAG, "Response is encrypted, decrypting tobeparsed...")
                     val decryptedJson = decryptTobeparsed(tobeparsed)
-                    if (decryptedJson.isBlank()) {
-                        Log.e(TAG, "tobeparsed decryption returned empty")
-                        return@withContext emptyList<Video>()
-                    }
-                    Log.d(TAG, "Decrypted (first 200): ${decryptedJson.take(200)}")
+                    if (decryptedJson.isBlank()) return@withContext emptyList<Video>()
                     decryptedJson.parseAs<DecryptedEpisodeResult>().episode?.sourceUrls ?: emptyList()
                 } else {
                     parsed.data?.episode?.sourceUrls ?: emptyList()
                 }
 
-                Log.d(TAG, "Found ${sourceUrls.size} sourceUrls")
-
-                if (sourceUrls.isEmpty()) {
-                    Log.w(TAG, "No sourceUrls in response!")
-                    return@withContext emptyList<Video>()
-                }
+                if (sourceUrls.isEmpty()) return@withContext emptyList<Video>()
 
                 val iframeEndpoint = fetchIframeEndpoint()
-                Log.d(TAG, "iframeEndpoint: $iframeEndpoint")
-
                 val videos = mutableListOf<Video>()
 
                 for (source in sourceUrls) {
                     val decryptedUrl = source.sourceUrl.decryptSource()
-                    Log.d(TAG, "Source '${source.sourceName}': '${decryptedUrl.take(80)}'")
 
                     when {
-                        // Internal hoster URLs
                         decryptedUrl.startsWith("/apivtwo/") || decryptedUrl.contains("/clock") -> {
-                            val v = extractInternalHoster(decryptedUrl, source.sourceName, iframeEndpoint)
-                            Log.d(TAG, "  → Internal: ${v.size} videos")
-                            videos.addAll(v)
+                            videos.addAll(extractInternalHoster(decryptedUrl, source.sourceName, iframeEndpoint))
                         }
                         decryptedUrl.contains(".m3u8") -> {
                             try {
-                                val v = playlistUtils.extractFromHls(
-                                    decryptedUrl, decryptedUrl, apiHeaders, apiHeaders
+                                videos.addAll(
+                                    playlistUtils.extractFromHls(
+                                        decryptedUrl, decryptedUrl, apiHeaders, apiHeaders
+                                    )
                                 )
-                                Log.d(TAG, "  → HLS: ${v.size} videos")
-                                videos.addAll(v)
-                            } catch (e: Exception) {
-                                Log.w(TAG, "  → HLS failed, adding raw", e)
+                            } catch (_: Exception) {
                                 videos.add(Video(decryptedUrl, "$name HLS", decryptedUrl, headers = apiHeaders))
                             }
                         }
                         decryptedUrl.contains("filemoon") || decryptedUrl.contains("moonplayer") -> {
-                            val v = filemoonExtractor.videosFromUrl(decryptedUrl, prefix = "$name Filemoon:")
-                            Log.d(TAG, "  → Filemoon: ${v.size} videos")
-                            videos.addAll(v)
+                            videos.addAll(filemoonExtractor.videosFromUrl(decryptedUrl, prefix = "$name Filemoon:"))
                         }
                         decryptedUrl.contains("streamwish") || decryptedUrl.contains("wish") || decryptedUrl.contains("swhoi") -> {
-                            val v = streamwishExtractor.videosFromUrl(decryptedUrl, videoNameGen = { "$name StreamWish:$it" })
-                            Log.d(TAG, "  → StreamWish: ${v.size} videos")
-                            videos.addAll(v)
+                            videos.addAll(streamwishExtractor.videosFromUrl(decryptedUrl, videoNameGen = { "$name StreamWish:$it" }))
                         }
                         decryptedUrl.contains("mp4upload") -> {
-                            val v = mp4uploadExtractor.videosFromUrl(decryptedUrl, apiHeaders)
-                            Log.d(TAG, "  → Mp4upload: ${v.size} videos")
-                            videos.addAll(v)
+                            videos.addAll(mp4uploadExtractor.videosFromUrl(decryptedUrl, apiHeaders))
                         }
                         decryptedUrl.contains("dood") -> {
-                            val v = doodExtractor.videosFromUrl(decryptedUrl)
-                            Log.d(TAG, "  → Dood: ${v.size} videos")
-                            videos.addAll(v)
+                            videos.addAll(doodExtractor.videosFromUrl(decryptedUrl))
                         }
                         decryptedUrl.contains("vidstreaming") || decryptedUrl.contains("gogo") ||
                         decryptedUrl.contains("vidcloud") || decryptedUrl.contains("playgo1") ||
                         decryptedUrl.contains("playtaku") -> {
-                            val v = gogoStreamExtractor.videosFromUrl(
+                            videos.addAll(gogoStreamExtractor.videosFromUrl(
                                 decryptedUrl.replace(Regex("^//"), "https://")
-                            )
-                            Log.d(TAG, "  → GogoStream: ${v.size} videos")
-                            videos.addAll(v)
+                            ))
                         }
                         decryptedUrl.contains("streamlare") -> {
-                            val v = streamlareExtractor.videosFromUrl(decryptedUrl)
-                            Log.d(TAG, "  → Streamlare: ${v.size} videos")
-                            videos.addAll(v)
+                            videos.addAll(streamlareExtractor.videosFromUrl(decryptedUrl))
                         }
                         decryptedUrl.contains("ok.ru") || decryptedUrl.contains("okru") -> {
-                            val v = okruExtractor.videosFromUrl(decryptedUrl)
-                            Log.d(TAG, "  → Okru: ${v.size} videos")
-                            videos.addAll(v)
+                            videos.addAll(okruExtractor.videosFromUrl(decryptedUrl))
                         }
                         else -> {
                             if (decryptedUrl.startsWith("http")) {
-                                Log.d(TAG, "  → Direct URL")
                                 videos.add(Video(decryptedUrl, "$name ${source.sourceName}", decryptedUrl, headers = apiHeaders))
-                            } else {
-                                Log.w(TAG, "  → Unrecognized: '${decryptedUrl.take(60)}'")
                             }
                         }
                     }
                 }
-
-                Log.d(TAG, "Total videos extracted: ${videos.size}")
                 videos
-            } catch (e: Exception) {
-                Log.e(TAG, "fetchVideos EXCEPTION", e)
+            } catch (_: Exception) {
                 emptyList()
             }
         }
