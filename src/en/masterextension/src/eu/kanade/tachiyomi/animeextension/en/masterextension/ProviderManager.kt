@@ -4,10 +4,7 @@ import android.content.SharedPreferences
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.withContext
+import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -48,21 +45,12 @@ class ProviderManager(
         val providers = getEnabledProviders()
         if (providers.isEmpty()) return emptyList()
 
-        return withContext(Dispatchers.IO) {
-            val deferred = providers.map { provider ->
-                async {
-                    try {
-                        provider.fetchVideos(anime, episode)
-                    } catch (_: Exception) {
-                        emptyList<Video>()
-                    }
-                }
-            }
-
-            val allVideos = deferred.awaitAll().flatten()
-            val deduplicated = allVideos.distinctBy { it.url }
-            rankVideos(deduplicated)
+        val allVideos = providers.parallelCatchingFlatMap { provider ->
+            provider.fetchVideos(anime, episode)
         }
+
+        val deduplicated = allVideos.distinctBy { it.url }
+        return rankVideos(deduplicated)
     }
 
     private fun rankVideos(videos: List<Video>): List<Video> {
@@ -82,7 +70,7 @@ class ProviderManager(
         )
     }
 
-    // ======================== MAL Scrapers ========================
+    // ======================== MAL Scrapers (unchanged) ========================
 
     fun fetchMalAnimeDetails(malId: Int): MalAnimeDetails? {
         return try {
