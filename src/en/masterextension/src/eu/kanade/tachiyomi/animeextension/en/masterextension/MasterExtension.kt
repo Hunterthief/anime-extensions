@@ -213,7 +213,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 url = "$anilistId/${showId.ifBlank { "NA" }}/${nextEp.episode}"
                 name = "Ep. ${nextEp.episode}"
                 episode_number = nextEp.episode.toFloat()
-                date_upload = airingAtMs // Future timestamp so app shows "tomorrow" etc.
+                date_upload = airingAtMs
             })
         }
 
