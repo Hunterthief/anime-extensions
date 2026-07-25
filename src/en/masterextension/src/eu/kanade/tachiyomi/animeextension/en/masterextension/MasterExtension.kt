@@ -173,13 +173,11 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         try {
             val titleToSearch = englishTitle ?: romajiTitle ?: ""
             
-            // 1. Get AllAnime Show ID (for video extraction later)
             if (titleToSearch.isNotBlank()) {
                 val (id, _, _) = providerManager.fetchAllAnimeShowId(titleToSearch)
                 showId = id
             }
             
-            // 2. Get Episode Titles from MyAnimeList HTML
             if (malId != null) {
                 val (mList, _, _) = providerManager.fetchMalEpisodes(malId)
                 malEpisodes = mList
@@ -198,19 +196,14 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 url = "$anilistId/${showId.ifBlank { "NA" }}/$i"
                 name = "Ep. $i: $titleStr"
                 episode_number = i.toFloat()
-                // Set a valid current/past timestamp so the UI doesn't break
                 date_upload = System.currentTimeMillis()
                 
-                // Official way to mark filler natively (triggers the yellow italic 'F' badge)
-                if (malEp?.isFiller == true) {
-                    scanlator = "Filler"
-                }
+                // Aniyomi triggers the Yellow Italic 'F' badge when "Filler" is in the scanlator field.
+                scanlator = if (malEp?.isFiller == true) "Filler, AniList" else "AniList"
             })
         }
 
         if (nextEp != null && nextEp.episode != null && nextEp.timeUntilAiring != null) {
-            // AniList returns airingAt in seconds, date_upload needs milliseconds
-            // If airingAt is missing, we calculate a future date based on timeUntilAiring
             val airingAtMs = if (nextEp.airingAt != null && nextEp.airingAt > 0) {
                 nextEp.airingAt * 1000
             } else {
@@ -218,12 +211,14 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             }
             
             episodes.add(SEpisode.create().apply {
-                url = "UPCOMING"
+                // Use a real URL pattern, not a placeholder, so the app UI handles it natively
+                url = "$anilistId/${showId.ifBlank { "NA" }}/${nextEp.episode}"
                 name = "Ep. ${nextEp.episode}"
                 episode_number = nextEp.episode.toFloat()
                 
-                // Official way to mark upcoming natively (triggers the countdown timer and greys it out)
+                // Aniyomi triggers the countdown timer and greys out the row when date_upload is in the future
                 date_upload = airingAtMs
+                scanlator = "AniList"
             })
         }
 
@@ -231,8 +226,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        if (episode.url == "UPCOMING") return emptyList()
-        
         val parts = episode.url.split("/")
         val anilistId = parts.getOrNull(0)?.toIntOrNull() ?: return emptyList()
         val showId = parts.getOrNull(1) ?: "NA"
