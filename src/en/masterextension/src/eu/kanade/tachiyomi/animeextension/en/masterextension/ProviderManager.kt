@@ -109,6 +109,46 @@ class ProviderManager(
 
     // --- MYANIMELIST HTML SCRAPER ---
 
+    fun fetchMalAnimeDetails(malId: Int): MalAnimeDetails? {
+        return try {
+            val request = Request.Builder()
+                .url("https://myanimelist.net/anime/$malId")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .header("Referer", "https://myanimelist.net/")
+                .get()
+                .build()
+
+            client.newCall(request).execute().use { res ->
+                if (!res.isSuccessful) return null
+                val document = Jsoup.parse(res.body.string())
+
+                val score = document.selectFirst("span[itemprop=ratingValue]")?.text()?.trim() ?: ""
+                
+                val rating = document.select("div.spaceit_pad").firstOrNull { it.text().startsWith("Rating:") }
+                    ?.ownText()?.replace("Rating:", "")?.trim() ?: ""
+                
+                val synopsis = document.selectFirst("p[itemprop=description]")?.text()?.trim() ?: ""
+                
+                val type = document.select("div.spaceit_pad").firstOrNull { it.text().startsWith("Type:") }
+                    ?.selectFirst("a")?.text()?.trim() ?: ""
+                
+                val episodes = document.select("div.spaceit_pad").firstOrNull { it.text().startsWith("Episodes:") }
+                    ?.ownText()?.replace("Episodes:", "")?.trim() ?: ""
+                
+                val duration = document.select("div.spaceit_pad").firstOrNull { it.text().startsWith("Duration:") }
+                    ?.ownText()?.replace("Duration:", "")?.trim() ?: ""
+                
+                val premiered = document.select("div.spaceit_pad").firstOrNull { it.text().startsWith("Premiered:") }
+                    ?.selectFirst("a")?.text()?.trim() ?: ""
+
+                MalAnimeDetails(score, rating, synopsis, type, episodes, duration, premiered)
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     fun fetchMalEpisodes(malId: Int): Triple<List<MalEpisode>, String, String> {
         return try {
             val request = Request.Builder()
@@ -135,7 +175,6 @@ class ProviderManager(
                         ?: row.selectFirst("td.episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
                     val title = row.selectFirst("a.fl-l.fw-b")?.text()?.trim() ?: ""
                     
-                    // Parse the release date string (e.g., "Apr 5, 2009") into a Unix timestamp
                     val dateStr = row.selectFirst("td.episode-aired")?.text()?.trim()
                     val dateMillis = try {
                         dateFormatter.parse(dateStr)?.time ?: 0L
