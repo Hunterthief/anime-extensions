@@ -123,16 +123,18 @@ class ProviderManager(
 
                 val document = Jsoup.parse(bodyStr)
                 
-                // Target the table rows directly based on actual MAL HTML
                 val episodeRows = document.select("tr.episode-list-data")
 
-                if (episodeRows.isEmpty()) return Triple(emptyMap(), "M0", "Empty")
+                if (episodeRows.isEmpty()) {
+                    val cleanBody = bodyStr.replace("\n", "").replace("\r", "")
+                    return Triple(emptyMap(), "M0", "Empty(${bodyStr.length}):${cleanBody.take(40)}")
+                }
 
                 val map = episodeRows.mapNotNull { row ->
-                    val numberStr = row.selectFirst("td.episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
+                    val numberStr = row.selectFirst("td.episode-number")?.attr("data-raw")?.trim() 
+                        ?: row.selectFirst("td.episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
                     var title = row.selectFirst("a.fl-l.fw-b")?.text()?.trim() ?: ""
                     
-                    // Check for Filler/Recap status
                     val typeStr = row.selectFirst("span.icon-episode-type-bg")?.text()?.trim()
                     if (!typeStr.isNullOrBlank()) {
                         title += " ($typeStr)"
