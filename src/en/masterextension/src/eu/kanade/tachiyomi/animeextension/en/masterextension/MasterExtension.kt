@@ -200,7 +200,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
                 
-                // Official way to mark filler natively in Aniyomi
+                // Official way to mark filler natively (triggers the yellow italic 'F' badge)
                 if (malEp?.isFiller == true) {
                     scanlator = "Filler"
                 }
@@ -216,7 +216,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 name = "Ep. ${nextEp.episode}"
                 episode_number = nextEp.episode.toFloat()
                 
-                // Official way to mark upcoming natively (greys out if timestamp is in the future)
+                // Official way to mark upcoming natively (triggers the countdown timer and greys it out)
                 date_upload = airingAtMs
             })
         }
