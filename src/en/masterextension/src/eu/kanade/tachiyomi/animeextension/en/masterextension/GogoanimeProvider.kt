@@ -5,15 +5,13 @@ import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.withContext
+import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.utils.bodyString
+import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.jsoup.Jsoup
 
 class GogoanimeProvider(
@@ -24,49 +22,34 @@ class GogoanimeProvider(
     override val name = "Gogoanime"
 
     companion object {
-        // Gogoanime rebranded to Anitaku (2025-2026)
         private const val BASE_URL = "https://anitaku.to"
     }
 
     private val gogoHeaders by lazy {
-        Headers.Builder().apply {
-            add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-            add("Referer", "$BASE_URL/")
-        }.build()
+        headers.newBuilder()
+            .set("Referer", "$BASE_URL/")
+            .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .build()
     }
 
     private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
-    private suspend fun searchAnime(title: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun searchAnime(title: String): String? {
         val url = "$BASE_URL/search.html".toHttpUrl().newBuilder()
             .addQueryParameter("keyword", title)
-            .build()
+            .build().toString()
 
-        val request = Request.Builder()
-            .url(url)
-            .headers(gogoHeaders)
-            .get()
-            .build()
+        val html = client.newCall(GET(url, gogoHeaders)).awaitSuccess().bodyString()
+        val document = Jsoup.parse(html)
 
-        try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext null
-                val html = response.body.string()
-                val document = Jsoup.parse(html)
+        val firstResult = document.selectFirst("ul.items li p.name a")
+            ?: document.selectFirst("div.last_recent ul li p.name a")
+            ?: document.selectFirst("a[href*=/category/]")
+            ?: return null
 
-                val firstResult = document.selectFirst("ul.items li p.name a")
-                    ?: document.selectFirst("div.last_recent ul li p.name a")
-                    ?: document.selectFirst("a[href*=/category/]")
-                    ?: return@withContext null
-
-                val href = firstResult.attr("abs:href")
-                if (href.isNotBlank()) href else null
-            }
-        } catch (_: Exception) {
-            null
-        }
+        val href = firstResult.attr("abs:href")
+        return href.ifBlank { null }
     }
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
@@ -77,72 +60,50 @@ class GogoanimeProvider(
         val categoryUrl = searchAnime(title) ?: return emptyList()
         val epUrl = categoryUrl.replace("/category/", "/") + "-episode-${meta.epNum}"
 
-        return withContext(Dispatchers.IO) {
-            val request = Request.Builder()
-                .url(epUrl)
-                .headers(gogoHeaders)
-                .get()
-                .build()
+        val html = client.newCall(GET(epUrl, gogoHeaders)).awaitSuccess().bodyString()
+        val document = Jsoup.parse(html)
 
-            try {
-                client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@withContext emptyList<Video>()
-                    val html = response.body.string()
-                    val document = Jsoup.parse(html)
+        val serverUrls = mutableListOf<String>()
 
-                    val serverUrls = mutableListOf<String>()
-
-                    document.select("div.anime_muti_link ul li a[data-video]").forEach { element ->
-                        val dataVideo = element.attr("data-video")
-                        if (dataVideo.isNotBlank()) {
-                            val videoUrl = when {
-                                dataVideo.startsWith("//") -> "https:$dataVideo"
-                                dataVideo.startsWith("http") -> dataVideo
-                                else -> "https://$dataVideo"
-                            }
-                            serverUrls.add(videoUrl)
-                        }
-                    }
-
-                    if (serverUrls.isEmpty()) {
-                        document.select("div.play-video iframe[src]").forEach { iframe ->
-                            val src = iframe.attr("abs:src")
-                            if (src.isNotBlank()) serverUrls.add(src)
-                        }
-                    }
-
-                    if (serverUrls.isEmpty()) return@withContext emptyList<Video>()
-
-                    coroutineScope {
-                        val deferred = serverUrls.map { videoUrl ->
-                            async {
-                                try {
-                                    when {
-                                        videoUrl.contains("streaming") ||
-                                        videoUrl.contains("gogo") ||
-                                        videoUrl.contains("vidcloud") ||
-                                        videoUrl.contains("gogocdn") ||
-                                        videoUrl.contains("playtaku") ||
-                                        videoUrl.contains("playgo1") -> {
-                                            gogoStreamExtractor.videosFromUrl(videoUrl)
-                                        }
-                                        videoUrl.contains(".m3u8") -> {
-                                            playlistUtils.extractFromHls(
-                                                videoUrl, videoUrl, gogoHeaders, gogoHeaders
-                                            )
-                                        }
-                                        else -> emptyList()
-                                    }
-                                } catch (_: Exception) {
-                                    emptyList<Video>()
-                                }
-                            }
-                        }
-                        deferred.awaitAll().flatten()
-                    }
+        document.select("div.anime_muti_link ul li a[data-video]").forEach { element ->
+            val dataVideo = element.attr("data-video")
+            if (dataVideo.isNotBlank()) {
+                val videoUrl = when {
+                    dataVideo.startsWith("//") -> "https:$dataVideo"
+                    dataVideo.startsWith("http") -> dataVideo
+                    else -> "https://$dataVideo"
                 }
-            } catch (_: Exception) {
-                emptyList()
+                serverUrls.add(videoUrl)
+            }
+        }
+
+        if (serverUrls.isEmpty()) {
+            document.select("div.play-video iframe[src]").forEach { iframe ->
+                val src = iframe.attr("abs:src")
+                if (src.isNotBlank()) serverUrls.add(src)
+            }
+        }
+
+        if (serverUrls.isEmpty()) return emptyList()
+
+        return serverUrls.parallelCatchingFlatMap { videoUrl ->
+            when {
+                videoUrl.contains("streaming") ||
+                videoUrl.contains("gogo") ||
+                videoUrl.contains("vidcloud") ||
+                videoUrl.contains("gogocdn") ||
+                videoUrl.contains("playtaku") ||
+                videoUrl.contains("playgo1") -> {
+                    gogoStreamExtractor.videosFromUrl(videoUrl)
+                }
+                videoUrl.contains(".m3u8") -> {
+                    playlistUtils.extractFromHls(
+                        videoUrl,
+                        masterHeaders = gogoHeaders,
+                        videoHeaders = gogoHeaders,
+                    )
+                }
+                else -> emptyList()
             }
         }
     }
