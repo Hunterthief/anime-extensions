@@ -5,6 +5,7 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnikotoProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.LunarAnimeProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -25,6 +26,7 @@ class ProviderManager(
     private val allProviders: Map<String, VideoProvider> by lazy {
         linkedMapOf(
             "anikoto" to AnikotoProvider(client, headers),
+            "lunaranime" to LunarAnimeProvider(client, headers),
             // "example" to ExampleProvider(client, headers),  ← future sources
         )
     }
