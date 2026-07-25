@@ -42,25 +42,25 @@ class AllAnimeProvider(
     companion object {
         private const val TAG = "AllAnimeProvider"
 
-        // FIX #2: Correct SHA-256 persisted query hash (was SHA-1 / outdated)
+        // Correct SHA-256 persisted query hash (verified from reference)
         private const val STREAM_HASH = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec"
 
         private const val API_URL = "https://api.allanime.day"
         private const val SITE_URL = "https://allmanga.to"
 
-        // FIX #5: Correct Origin for CORS (was allmanga.to)
+        // Correct CORS origin (verified from reference)
         private const val GRAPHQL_ORIGIN = "https://youtu-chan.com"
 
         private const val FALLBACK_PLAYER_DOMAIN = "https://blog.allanime.day"
 
-        // FIX #3: AES-GCM decryption constants for tobeparsed
+        // AES-GCM decryption constants for tobeparsed
         private const val DECRYPT_SECRET = "Xot36i3lK3"
         private const val DECRYPT_TAG_LENGTH = 128
         private const val DECRYPT_KEY_ALGO = "SHA-256"
         private const val DECRYPT_KEY_TYPE = "AES"
         private const val DECRYPT_CIPHER_ALGO = "AES/GCM/NoPadding"
 
-        // FIX #1: XOR keys — we compute a CUMULATIVE MASK, not rotating chars
+        // XOR keys — cumulative mask is computed from these
         private val XOR_KEYS = arrayOf(
             "allanimenews",
             "1234567890123456789",
@@ -69,12 +69,12 @@ class AllAnimeProvider(
             "feqx1",
         )
 
-        // Pre-compute cumulative XOR mask for each key (XOR of ALL char codes)
+        // Pre-compute cumulative XOR mask for each key
         private val XOR_MASKS = XOR_KEYS.map { key ->
             key.fold(0) { mask, ch -> mask xor ch.code }
         }.toIntArray()
 
-        // Internal hoster names for /apivtwo/ URLs
+        // Internal hoster names
         private val INTERNAL_HOSTER_NAMES = arrayOf(
             "Default", "Ac", "Ak", "Kir", "Rab", "Luf-mp4",
             "Si-Hls", "S-mp4", "Ac-Hls", "Uv-mp4", "Pn-Hls",
@@ -90,7 +90,6 @@ class AllAnimeProvider(
     private val streamlareExtractor by lazy { StreamlareExtractor(client) }
     private val okruExtractor by lazy { OkruExtractor(client) }
 
-    // FIX #5: Correct headers with proper Origin/Referer
     private val apiHeaders by lazy {
         Headers.Builder().apply {
             add("Accept", "*/*")
@@ -106,7 +105,7 @@ class AllAnimeProvider(
     }
 
     // =====================================================================
-    // FIX #1: CORRECT XOR DECRYPTION — uses cumulative mask, NOT rotating key
+    // XOR DECRYPTION — uses cumulative mask (NOT rotating char key)
     // =====================================================================
     private fun String.decryptSource(): String {
         val (hexPayload, keyType) = when {
@@ -121,11 +120,11 @@ class AllAnimeProvider(
         val parsedChunks = try {
             hexPayload.chunked(2).map { it.toInt(16) }
         } catch (_: NumberFormatException) {
-            Log.w(TAG, "decryptSource: hex parse failed, returning raw: '${this.take(40)}...'")
+            Log.w(TAG, "decryptSource: hex parse failed for '${this.take(40)}'")
             return this
         }
 
-        // If no prefix matched, try all masks and see which produces a valid URL
+        // If no prefix matched, try all masks and check for valid URL
         if (keyType == null) {
             for (mask in XOR_MASKS) {
                 val decrypted = String(CharArray(parsedChunks.size) { i ->
@@ -138,7 +137,6 @@ class AllAnimeProvider(
             return this
         }
 
-        // Use the specific mask for this prefix type
         val mask = XOR_MASKS[keyType]
         return String(CharArray(parsedChunks.size) { i ->
             ((parsedChunks[i] xor mask) and 0xFF).toChar()
@@ -146,7 +144,7 @@ class AllAnimeProvider(
     }
 
     // =====================================================================
-    // FIX #3: AES-GCM decryption for 'tobeparsed' encrypted responses
+    // AES-GCM decryption for 'tobeparsed' encrypted responses
     // =====================================================================
     private fun decryptTobeparsed(base64Payload: String): String {
         return try {
@@ -204,12 +202,8 @@ class AllAnimeProvider(
         }
 
         val res = makePostRequest(payload)
-        if (res == null) {
-            Log.e(TAG, "fetchShowId: POST request returned null")
-            return@withContext ""
-        }
-        if (res.startsWith("ERR") || res.startsWith("EXC")) {
-            Log.e(TAG, "fetchShowId: API error: $res")
+        if (res == null || res.startsWith("ERR") || res.startsWith("EXC")) {
+            Log.e(TAG, "fetchShowId failed: $res")
             return@withContext ""
         }
 
@@ -248,7 +242,7 @@ class AllAnimeProvider(
     }
 
     // =====================================================================
-    // FIX #4: Fetch the iframe endpoint for internal hosters
+    // Internal hoster: fetch iframe endpoint
     // =====================================================================
     private fun fetchIframeEndpoint(): String {
         return try {
@@ -270,12 +264,12 @@ class AllAnimeProvider(
     }
 
     // =====================================================================
-    // FIX #4: Internal hoster extraction (/apivtwo/ URLs)
+    // Internal hoster extraction (/apivtwo/ URLs)
     // =====================================================================
     private fun extractInternalHoster(url: String, sourceName: String, endPoint: String): List<Video> {
         return try {
             val clockUrl = endPoint + url.replace("/clock?", "/clock.json?")
-            Log.d(TAG, "Internal hoster request: $clockUrl")
+            Log.d(TAG, "Internal hoster: $clockUrl")
 
             val request = Request.Builder()
                 .url(clockUrl)
@@ -389,7 +383,6 @@ class AllAnimeProvider(
 
         return withContext(Dispatchers.IO) {
             try {
-                // Build the episode source URL request
                 val variablesJson = buildJsonObject {
                     put("showId", showId)
                     put("translationType", "sub")
@@ -408,7 +401,7 @@ class AllAnimeProvider(
                     .addQueryParameter("extensions", extensionsJson)
                     .build()
 
-                Log.d(TAG, "Episode request URL: $url")
+                Log.d(TAG, "Episode request: $url")
 
                 val request = Request.Builder()
                     .url(url)
@@ -418,7 +411,7 @@ class AllAnimeProvider(
 
                 val responseBody = client.newCall(request).execute().use { res ->
                     if (!res.isSuccessful) {
-                        Log.e(TAG, "Episode request HTTP ${res.code}: ${res.body.string().take(200)}")
+                        Log.e(TAG, "Episode HTTP ${res.code}: ${res.body.string().take(200)}")
                         return@withContext emptyList<Video>()
                     }
                     res.body.string()
@@ -426,12 +419,12 @@ class AllAnimeProvider(
 
                 Log.d(TAG, "Episode response (first 200): ${responseBody.take(200)}")
 
-                // FIX #3: Check for encrypted 'tobeparsed' response
+                // Check for encrypted 'tobeparsed' response
                 val parsed = responseBody.parseAs<AllAnimeResponse>()
                 val tobeparsed = parsed.data?.tobeparsed
 
                 val sourceUrls = if (!tobeparsed.isNullOrBlank()) {
-                    Log.d(TAG, "Response is encrypted (tobeparsed), decrypting...")
+                    Log.d(TAG, "Response is encrypted, decrypting tobeparsed...")
                     val decryptedJson = decryptTobeparsed(tobeparsed)
                     if (decryptedJson.isBlank()) {
                         Log.e(TAG, "tobeparsed decryption returned empty")
@@ -450,7 +443,6 @@ class AllAnimeProvider(
                     return@withContext emptyList<Video>()
                 }
 
-                // FIX #4: Fetch iframe endpoint for internal hosters
                 val iframeEndpoint = fetchIframeEndpoint()
                 Log.d(TAG, "iframeEndpoint: $iframeEndpoint")
 
@@ -458,26 +450,24 @@ class AllAnimeProvider(
 
                 for (source in sourceUrls) {
                     val decryptedUrl = source.sourceUrl.decryptSource()
-                    Log.d(TAG, "Source '${source.sourceName}': decrypted='${decryptedUrl.take(80)}'")
+                    Log.d(TAG, "Source '${source.sourceName}': '${decryptedUrl.take(80)}'")
 
                     when {
-                        // FIX #4: Handle internal hoster URLs
+                        // Internal hoster URLs
                         decryptedUrl.startsWith("/apivtwo/") || decryptedUrl.contains("/clock") -> {
-                            val internalVideos = extractInternalHoster(
-                                decryptedUrl, source.sourceName, iframeEndpoint
-                            )
-                            Log.d(TAG, "  → Internal: ${internalVideos.size} videos")
-                            videos.addAll(internalVideos)
+                            val v = extractInternalHoster(decryptedUrl, source.sourceName, iframeEndpoint)
+                            Log.d(TAG, "  → Internal: ${v.size} videos")
+                            videos.addAll(v)
                         }
                         decryptedUrl.contains(".m3u8") -> {
                             try {
-                                val hlsVideos = playlistUtils.extractFromHls(
+                                val v = playlistUtils.extractFromHls(
                                     decryptedUrl, decryptedUrl, apiHeaders, apiHeaders
                                 )
-                                Log.d(TAG, "  → HLS: ${hlsVideos.size} videos")
-                                videos.addAll(hlsVideos)
+                                Log.d(TAG, "  → HLS: ${v.size} videos")
+                                videos.addAll(v)
                             } catch (e: Exception) {
-                                Log.w(TAG, "  → HLS extraction failed, adding raw", e)
+                                Log.w(TAG, "  → HLS failed, adding raw", e)
                                 videos.add(Video(decryptedUrl, "$name HLS", decryptedUrl, headers = apiHeaders))
                             }
                         }
@@ -525,7 +515,7 @@ class AllAnimeProvider(
                                 Log.d(TAG, "  → Direct URL")
                                 videos.add(Video(decryptedUrl, "$name ${source.sourceName}", decryptedUrl, headers = apiHeaders))
                             } else {
-                                Log.w(TAG, "  → Unrecognized URL format: '${decryptedUrl.take(60)}'")
+                                Log.w(TAG, "  → Unrecognized: '${decryptedUrl.take(60)}'")
                             }
                         }
                     }
