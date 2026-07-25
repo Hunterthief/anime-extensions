@@ -256,18 +256,12 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
     val meta = EpisodeMeta.from(episode)
 
-    android.util.Log.d("MasterExtension", "getVideoList: url='${episode.url}', " +
-        "anilistId=${meta.anilistId}, malId=${meta.malId}, " +
-        "epNum=${meta.epNum}, title='${meta.title}'")
-
     val anime = SAnime.create().apply {
         url = meta.anilistId.toString()
         title = meta.title
     }
 
-    val videos = providerManager.fetchAllVideos(anime, episode)
-    android.util.Log.d("MasterExtension", "getVideoList: returning ${videos.size} videos")
-    return videos
+    return providerManager.fetchAllVideos(anime, episode)
     }
 
     override fun videoListParse(response: Response): List<Video> {
