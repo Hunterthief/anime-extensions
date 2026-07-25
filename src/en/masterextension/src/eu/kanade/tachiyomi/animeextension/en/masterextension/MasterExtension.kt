@@ -198,6 +198,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 url = "$anilistId/${showId.ifBlank { "NA" }}/$i"
                 name = "Ep. $i: $titleStr"
                 episode_number = i.toFloat()
+                // Set a valid current/past timestamp so the UI doesn't break
                 date_upload = System.currentTimeMillis()
                 
                 // Official way to mark filler natively (triggers the yellow italic 'F' badge)
@@ -209,7 +210,12 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         if (nextEp != null && nextEp.episode != null && nextEp.timeUntilAiring != null) {
             // AniList returns airingAt in seconds, date_upload needs milliseconds
-            val airingAtMs = (nextEp.airingAt ?: 0L) * 1000
+            // If airingAt is missing, we calculate a future date based on timeUntilAiring
+            val airingAtMs = if (nextEp.airingAt != null && nextEp.airingAt > 0) {
+                nextEp.airingAt * 1000
+            } else {
+                System.currentTimeMillis() + (nextEp.timeUntilAiring * 1000)
+            }
             
             episodes.add(SEpisode.create().apply {
                 url = "UPCOMING"
