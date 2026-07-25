@@ -107,7 +107,7 @@ class ProviderManager(
 
     // --- MYANIMELIST HTML SCRAPER ---
 
-    fun fetchMalEpisodes(malId: Int): Triple<Map<String, String>, String, String> {
+    fun fetchMalEpisodes(malId: Int): Triple<List<MalEpisode>, String, String> {
         return try {
             // The URL MUST include /_/ to signal MAL that the title slug is omitted
             val request = Request.Builder()
@@ -120,37 +120,32 @@ class ProviderManager(
 
             client.newCall(request).execute().use { res ->
                 val bodyStr = res.body.string()
-                if (!res.isSuccessful) return Triple(emptyMap(), "M0", "ERR:${res.code}:${bodyStr.take(30)}")
+                if (!res.isSuccessful) return Triple(emptyList(), "M0", "ERR:${res.code}:${bodyStr.take(30)}")
 
                 val document = Jsoup.parse(bodyStr)
-                
-                // Target the table rows directly based on actual MAL HTML
                 val episodeRows = document.select("tr.episode-list-data")
 
-                if (episodeRows.isEmpty()) return Triple(emptyMap(), "M0", "Empty")
+                if (episodeRows.isEmpty()) return Triple(emptyList(), "M0", "Empty")
 
-                val map = episodeRows.mapNotNull { row ->
+                val episodes = episodeRows.mapNotNull { row ->
                     val numberStr = row.selectFirst("td.episode-number")?.attr("data-raw")?.trim() 
                         ?: row.selectFirst("td.episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
-                    var title = row.selectFirst("a.fl-l.fw-b")?.text()?.trim() ?: ""
+                    val title = row.selectFirst("a.fl-l.fw-b")?.text()?.trim() ?: ""
                     
-                    // Check for Filler/Recap status
                     val typeStr = row.selectFirst("span.icon-episode-type-bg")?.text()?.trim()
-                    if (!typeStr.isNullOrBlank()) {
-                        title += " ($typeStr)"
-                    }
+                    val isFiller = typeStr?.equals("Filler", ignoreCase = true) == true
                     
                     if (!numberStr.isNullOrBlank() && title.isNotEmpty()) {
-                        numberStr to title
+                        MalEpisode(numberStr, title, isFiller)
                     } else {
                         null
                     }
-                }.toMap()
+                }
 
-                if (map.isNotEmpty()) Triple(map, "M1", "") else Triple(emptyMap(), "M0", "ParseFail")
+                if (episodes.isNotEmpty()) Triple(episodes, "M1", "") else Triple(emptyList(), "M0", "ParseFail")
             }
         } catch (e: Exception) {
-            Triple(emptyMap(), "M0", "EXC:${e.message?.take(30)}")
+            Triple(emptyList(), "M0", "EXC:${e.message?.take(30)}")
         }
     }
 
