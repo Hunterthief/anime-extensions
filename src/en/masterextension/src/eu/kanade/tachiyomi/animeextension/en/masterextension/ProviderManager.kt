@@ -105,11 +105,63 @@ class ProviderManager(
         return Triple("", "S0", err.take(60))
     }
 
-    // --- MYANIMELIST HTML SCRAPER ---
+    // --- KITSU API (Primary) ---
+    
+    fun fetchKitsuEpisodes(malId: Int): Triple<Map<String, String>, String, String> {
+        return try {
+            val mappingRequest = Request.Builder()
+                .url("https://kitsu.app/api/edge/mappings?filter[externalSite]=myanimelist&filter[externalId]=$malId&include=item")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .get()
+                .build()
+
+            var kitsuId = ""
+            client.newCall(mappingRequest).execute().use { res ->
+                if (!res.isSuccessful) return Triple(emptyMap(), "K0", "MapErr:${res.code}")
+                val parsed = res.parseAs<KitsuMappingResponse>()
+                kitsuId = parsed.included?.firstOrNull { it.type == "anime" }?.id ?: return Triple(emptyMap(), "K0", "NoMap")
+            }
+
+            var offset = 0
+            val map = mutableMapOf<String, String>()
+            while (true) {
+                val epRequest = Request.Builder()
+                    .url("https://kitsu.app/api/edge/anime/$kitsuId/episodes?page[limit]=20&page[offset]=$offset")
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .get()
+                    .build()
+
+                var hasNextPage = false
+                client.newCall(epRequest).execute().use { res ->
+                    if (!res.isSuccessful) return Triple(emptyMap(), "K0", "EpErr:${res.code}")
+                    val parsed = res.parseAs<KitsuEpisodesResponse>()
+                    val data = parsed.data
+                    if (data.isNullOrEmpty()) return@use
+                    
+                    if (data.size == 20) hasNextPage = true
+                    
+                    data.forEach { ep ->
+                        val num = ep.attributes?.number?.toString() ?: return@forEach
+                        val title = ep.attributes.titles?.en 
+                            ?: ep.attributes.titles?.en_jp 
+                            ?: ""
+                        if (!map.containsKey(num)) map[num] = title
+                    }
+                }
+                if (!hasNextPage) break
+                offset += 20
+            }
+            
+            if (map.isNotEmpty()) Triple(map, "K1", "") else Triple(emptyMap(), "K0", "Empty")
+        } catch (e: Exception) {
+            Triple(emptyMap(), "K0", "EXC:${e.message?.take(30)}")
+        }
+    }
+
+    // --- MYANIMELIST HTML SCRAPER (Fallback) ---
 
     fun fetchMalEpisodes(malId: Int): Triple<Map<String, String>, String, String> {
         return try {
-            // Use standard browser headers so Cloudflare lets us through
             val request = Request.Builder()
                 .url("https://myanimelist.net/anime/$malId/episode")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -123,8 +175,6 @@ class ProviderManager(
                 if (!res.isSuccessful) return Triple(emptyMap(), "M0", "ERR:${res.code}:${bodyStr.take(30)}")
 
                 val document = Jsoup.parse(bodyStr)
-                
-                // Find all episode links that end with /episode/{number}
                 val episodeLinks = document.select("a[href~=\\.*/episode/[0-9]+$]")
 
                 if (episodeLinks.isEmpty()) return Triple(emptyMap(), "M0", "Empty")
@@ -137,7 +187,6 @@ class ProviderManager(
                         val epNum = numberMatch.groupValues[1]
                         var title = link.text().trim()
                         
-                        // Check if this episode is marked as filler
                         val parentRow = link.parents().firstOrNull { it.tagName() == "tr" || it.tagName() == "div" }
                         val isFiller = parentRow?.selectFirst("span.icon-episode-type-bg") != null
                         if (isFiller) title += " (Filler)"
