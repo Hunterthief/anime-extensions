@@ -4,17 +4,18 @@ import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.lib.jsunpacker.JsUnpacker
+import keiyoushi.utils.bodyString
+import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.jsoup.Jsoup
 
 class AnimePaheProvider(
@@ -25,7 +26,6 @@ class AnimePaheProvider(
     override val name = "AnimePahe"
 
     companion object {
-        // Official domains (2026): animepahe.pw, animepahe.com, animepahe.org
         private const val BASE_URL = "https://animepahe.pw"
     }
 
@@ -38,13 +38,11 @@ class AnimePaheProvider(
 
     private class PaheCookieJar : CookieJar {
         private val cookies = mutableListOf<Cookie>()
-
         @Synchronized
         override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
             this.cookies.removeAll { it.expiresAt < System.currentTimeMillis() }
             this.cookies.addAll(cookies)
         }
-
         @Synchronized
         override fun loadForRequest(url: HttpUrl): List<Cookie> {
             return cookies.filter { it.matches(url) }
@@ -52,89 +50,60 @@ class AnimePaheProvider(
     }
 
     private val paheHeaders by lazy {
-        Headers.Builder().apply {
-            add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-            add("Referer", "$BASE_URL/")
-        }.build()
+        headers.newBuilder()
+            .set("Referer", "$BASE_URL/")
+            .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .build()
     }
 
     private val apiHeaders by lazy {
-        Headers.Builder().apply {
-            add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            add("Accept", "application/json, text/javascript, */*; q=0.01")
-            add("X-Requested-With", "XMLHttpRequest")
-            add("Referer", "$BASE_URL/")
-        }.build()
+        headers.newBuilder()
+            .set("Referer", "$BASE_URL/")
+            .set("Accept", "application/json, text/javascript, */*; q=0.01")
+            .set("X-Requested-With", "XMLHttpRequest")
+            .build()
     }
 
-    private suspend fun initSession() = withContext(Dispatchers.IO) {
-        try {
-            cookieClient.newCall(
-                Request.Builder().url(BASE_URL).headers(paheHeaders).get().build()
-            ).execute().close()
-        } catch (_: Exception) { }
+    private suspend fun initSession() {
+        runCatching {
+            cookieClient.newCall(GET(BASE_URL, paheHeaders)).awaitSuccess().close()
+        }
     }
 
-    private suspend fun searchAnime(title: String): PaheSearchResult? = withContext(Dispatchers.IO) {
+    private suspend fun searchAnime(title: String): PaheSearchResult? {
         initSession()
 
         val url = "$BASE_URL/api".toHttpUrl().newBuilder()
             .addQueryParameter("m", "search")
             .addQueryParameter("l", "8")
             .addQueryParameter("q", title)
-            .build()
+            .build().toString()
 
-        val request = Request.Builder()
-            .url(url)
-            .headers(apiHeaders)
-            .get()
-            .build()
-
-        try {
-            cookieClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext null
-                val body = response.body.string()
-                if (body.isBlank()) return@withContext null
-                body.parseAs<PaheSearchResponse>().data?.firstOrNull()
-            }
-        } catch (_: Exception) {
-            null
-        }
+        val body = cookieClient.newCall(GET(url, apiHeaders)).awaitSuccess().bodyString()
+        if (body.isBlank()) return null
+        return body.parseAs<PaheSearchResponse>().data?.firstOrNull()
     }
 
-    private suspend fun resolveAnimeSession(animeId: Int): String? = withContext(Dispatchers.IO) {
+    private suspend fun resolveAnimeSession(animeId: Int): String? {
         val url = "$BASE_URL/a/$animeId"
+        val response = cookieClient.newCall(GET(url, paheHeaders)).awaitSuccess()
+        val finalUrl = response.request.url.toString()
+        response.close()
 
-        val request = Request.Builder()
-            .url(url)
-            .headers(paheHeaders)
-            .get()
-            .build()
+        val session = finalUrl.substringAfterLast("/anime/").substringBefore("/").substringBefore("?")
+        if (session.isNotBlank() && session != finalUrl) return session
 
-        try {
-            cookieClient.newCall(request).execute().use { response ->
-                val finalUrl = response.request.url.toString()
-                val session = finalUrl.substringAfterLast("/anime/").substringBefore("/").substringBefore("?")
-
-                if (session.isNotBlank() && session != finalUrl) {
-                    session
-                } else {
-                    val html = response.body.string()
-                    val doc = Jsoup.parse(html)
-                    doc.selectFirst("a[href*=/anime/]")?.attr("href")
-                        ?.substringAfterLast("/anime/")?.substringBefore("/")
-                }
-            }
-        } catch (_: Exception) {
-            null
-        }
+        // Fallback: fetch page and look for link
+        val html = cookieClient.newCall(GET(url, paheHeaders)).awaitSuccess().bodyString()
+        val doc = Jsoup.parse(html)
+        return doc.selectFirst("a[href*=/anime/]")?.attr("href")
+            ?.substringAfterLast("/anime/")?.substringBefore("/")
     }
 
     private suspend fun getEpisodeSession(
         animeSession: String,
         epNum: Int
-    ): Pair<String, String>? = withContext(Dispatchers.IO) {
+    ): Pair<String, String>? {
         var page = 1
         var lastPage = 1
 
@@ -145,176 +114,129 @@ class AnimePaheProvider(
                 .addQueryParameter("sort", "episode_desc")
                 .addQueryParameter("page", page.toString())
                 .addQueryParameter("l", "30")
-                .build()
+                .build().toString()
 
-            val request = Request.Builder()
-                .url(url)
-                .headers(apiHeaders)
-                .get()
-                .build()
+            val body = cookieClient.newCall(GET(url, apiHeaders)).awaitSuccess().bodyString()
+            val release = body.parseAs<PaheReleaseResponse>()
+            lastPage = release.last_page ?: 1
 
-            try {
-                cookieClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@withContext null
-                    val body = response.body.string()
-                    val release = body.parseAs<PaheReleaseResponse>()
-                    lastPage = release.last_page ?: 1
-
-                    val episode = release.data?.firstOrNull {
-                        it.episode?.toInt() == epNum
-                    }
-
-                    if (episode != null) {
-                        val session = episode.session ?: return@withContext null
-                        return@withContext session to (episode.audio ?: "jpn")
-                    }
-                }
-            } catch (_: Exception) {
-                return@withContext null
+            val episode = release.data?.firstOrNull { it.episode?.toInt() == epNum }
+            if (episode != null) {
+                val session = episode.session ?: return null
+                return session to (episode.audio ?: "jpn")
             }
             page++
         }
-        null
+        return null
     }
 
     private suspend fun getVideoLinksFromPlayPage(
         animeSession: String,
         epSession: String
-    ): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+    ): List<Pair<String, String>> {
         val url = "$BASE_URL/play/$animeSession/$epSession"
+        val html = cookieClient.newCall(GET(url, paheHeaders)).awaitSuccess().bodyString()
+        val document = Jsoup.parse(html)
 
-        val request = Request.Builder()
-            .url(url)
-            .headers(paheHeaders)
-            .get()
-            .build()
-
-        try {
-            cookieClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext emptyList()
-                val html = response.body.string()
-                val document = Jsoup.parse(html)
-
-                // Primary: resolution menu buttons
-                val buttons = document.select("div#resolutionMenu > button[data-src]")
-                if (buttons.isNotEmpty()) {
-                    return@withContext buttons.mapNotNull { btn ->
-                        val src = btn.attr("data-src")
-                        val quality = btn.text().trim()
-                        if (src.isNotBlank()) src to quality else null
-                    }
-                }
-
-                // Fallback: any element with kwik data-src
-                val fallbackLinks = document.select("[data-src*='kwik'], [data-href*='kwik']")
-                    .mapNotNull { el ->
-                        val src = el.attr("data-src").ifBlank { el.attr("data-href") }
-                        val quality = el.text().trim().ifBlank { "unknown" }
-                        if (src.isNotBlank()) src to quality else null
-                    }
-
-                if (fallbackLinks.isNotEmpty()) return@withContext fallbackLinks
-
-                // Last resort: regex
-                val kwikRegex = Regex("""https://[^"'\s]*kwik[^"'\s]*""")
-                kwikRegex.findAll(html).map { it.value to "unknown" }.toList()
+        // Primary: resolution menu buttons
+        val buttons = document.select("div#resolutionMenu > button[data-src]")
+        if (buttons.isNotEmpty()) {
+            return buttons.mapNotNull { btn ->
+                val src = btn.attr("data-src")
+                val quality = btn.text().trim()
+                if (src.isNotBlank()) src to quality else null
             }
-        } catch (_: Exception) {
-            emptyList()
         }
+
+        // Fallback: any element with kwik data-src
+        val fallbackLinks = document.select("[data-src*='kwik'], [data-href*='kwik']")
+            .mapNotNull { el ->
+                val src = el.attr("data-src").ifBlank { el.attr("data-href") }
+                val quality = el.text().trim().ifBlank { "unknown" }
+                if (src.isNotBlank()) src to quality else null
+            }
+        if (fallbackLinks.isNotEmpty()) return fallbackLinks
+
+        // Last resort: regex
+        return Regex("""https://[^"'\s]*kwik[^"'\s]*""")
+            .findAll(html).map { it.value to "unknown" }.toList()
     }
 
-    private suspend fun resolveKwik(kwikUrl: String, quality: String): List<Video> = withContext(Dispatchers.IO) {
-        val kwikHeaders = Headers.Builder().apply {
-            add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            add("Referer", "$BASE_URL/")
-            add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        }.build()
-
-        val request = Request.Builder()
-            .url(kwikUrl)
-            .headers(kwikHeaders)
-            .get()
+    private suspend fun resolveKwik(kwikUrl: String, quality: String): List<Video> {
+        val kwikHeaders = headers.newBuilder()
+            .set("Referer", "$BASE_URL/")
+            .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .build()
 
-        try {
-            cookieClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext emptyList<Video>()
-                val html = response.body.string()
+        val html = cookieClient.newCall(GET(kwikUrl, kwikHeaders)).awaitSuccess().bodyString()
 
-                // Method 1: Direct HLS URL in page
-                val hlsUrl = extractHlsFromKwik(html)
-                if (hlsUrl != null) {
-                    val videos = playlistUtils.extractFromHls(
-                        hlsUrl, kwikUrl, kwikHeaders, kwikHeaders,
-                        videoNameGen = { res -> "$name $quality $res" }
-                    )
-                    if (videos.isNotEmpty()) return@withContext videos
-                }
-
-                // Method 2: Packed JS unpacking
-                val unpackedUrl = extractFromPackedJs(html)
-                if (unpackedUrl != null) {
-                    return@withContext when {
-                        unpackedUrl.contains(".m3u8") -> {
-                            playlistUtils.extractFromHls(
-                                unpackedUrl, kwikUrl, kwikHeaders, kwikHeaders,
-                                videoNameGen = { res -> "$name $quality $res" }
-                            )
-                        }
-                        else -> listOf(Video(unpackedUrl, "$name $quality", unpackedUrl, headers = kwikHeaders))
-                    }
-                }
-
-                // Method 3: Regex fallback
-                val directUrl = Regex("""(https://[^"'\s]+\.mp4[^"'\s]*)""").find(html)
-                if (directUrl != null) {
-                    return@withContext listOf(Video(directUrl.value, "$name $quality", directUrl.value, headers = kwikHeaders))
-                }
-
-                val m3u8Url = Regex("""(https://[^"'\s]+\.m3u8[^"'\s]*)""").find(html)
-                if (m3u8Url != null) {
-                    return@withContext playlistUtils.extractFromHls(
-                        m3u8Url.value, kwikUrl, kwikHeaders, kwikHeaders,
-                        videoNameGen = { res -> "$name $quality $res" }
-                    )
-                }
-
-                emptyList()
-            }
-        } catch (_: Exception) {
-            emptyList()
+        // Method 1: Direct HLS URL in page
+        val hlsUrl = extractHlsFromKwik(html)
+        if (hlsUrl != null) {
+            val videos = playlistUtils.extractFromHls(
+                hlsUrl,
+                masterHeaders = kwikHeaders,
+                videoHeaders = kwikHeaders,
+                videoNameGen = { res -> "$name $quality $res" }
+            )
+            if (videos.isNotEmpty()) return videos
         }
+
+        // Method 2: Packed JS
+        val unpackedUrl = extractFromPackedJs(html)
+        if (unpackedUrl != null) {
+            return when {
+                unpackedUrl.contains(".m3u8") -> playlistUtils.extractFromHls(
+                    unpackedUrl,
+                    masterHeaders = kwikHeaders,
+                    videoHeaders = kwikHeaders,
+                    videoNameGen = { res -> "$name $quality $res" }
+                )
+                else -> listOf(Video(unpackedUrl, "$name $quality", unpackedUrl, headers = kwikHeaders))
+            }
+        }
+
+        // Method 3: Regex fallback
+        val directUrl = Regex("""(https://[^"'\s]+\.mp4[^"'\s]*)""").find(html)
+        if (directUrl != null) {
+            return listOf(Video(directUrl.value, "$name $quality", directUrl.value, headers = kwikHeaders))
+        }
+
+        val m3u8Url = Regex("""(https://[^"'\s]+\.m3u8[^"'\s]*)""").find(html)
+        if (m3u8Url != null) {
+            return playlistUtils.extractFromHls(
+                m3u8Url.value,
+                masterHeaders = kwikHeaders,
+                videoHeaders = kwikHeaders,
+                videoNameGen = { res -> "$name $quality $res" }
+            )
+        }
+
+        return emptyList()
     }
 
     private fun extractHlsFromKwik(html: String): String? {
         val doc = Jsoup.parse(html)
-
         doc.selectFirst("source[src*='.m3u8']")?.attr("src")?.let {
             if (it.isNotBlank()) return it
         }
-
         doc.selectFirst("video[src*='.m3u8']")?.attr("src")?.let {
             if (it.isNotBlank()) return it
         }
-
         val scriptContent = doc.select("script").joinToString("\n") { it.data() }
-        val hlsMatch = Regex("""["'](https://[^"']+\.m3u8[^"']*)["']""").find(scriptContent)
-        return hlsMatch?.groupValues?.get(1)
+        return Regex("""["'](https://[^"']+\.m3u8[^"']*)["']""")
+            .find(scriptContent)?.groupValues?.get(1)
     }
 
     private fun extractFromPackedJs(html: String): String? {
-        // Try library JsUnpacker first
         val unpacked = JsUnpacker.unpackAndCombine(html)
         if (unpacked != null) {
-            val urlMatch = Regex("""["'](https://[^"']+\.(?:mp4|m3u8)[^"']*)["']""").find(unpacked)
-            if (urlMatch != null) return urlMatch.groupValues[1]
-
-            val srcMatch = Regex("""src\s*[=:]\s*["']([^"']+)["']""").find(unpacked)
-            if (srcMatch != null) return srcMatch.groupValues[1]
+            Regex("""["'](https://[^"']+\.(?:mp4|m3u8)[^"']*)["']""")
+                .find(unpacked)?.let { return it.groupValues[1] }
+            Regex("""src\s*[=:]\s*["']([^"']+)["']""")
+                .find(unpacked)?.let { return it.groupValues[1] }
         }
 
-        // Manual fallback for classic packed JS
         val packedRegex = Regex(
             """eval\(function\(p,a,c,k,e,d\)\{.*?\}\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\),0,\{\}\)\)""",
             RegexOption.DOT_MATCHES_ALL
@@ -325,7 +247,6 @@ class AnimePaheProvider(
         val a = match.groupValues[2].toIntOrNull() ?: return null
         val c = match.groupValues[3].toIntOrNull() ?: return null
         val k = match.groupValues[4].split("|")
-
         if (k.size != c) return null
 
         val d = mutableMapOf<String, String>()
@@ -344,7 +265,6 @@ class AnimePaheProvider(
         }
 
         result = result.replace("\\/", "/").replace("\\'", "'").replace("\\\"", "\"")
-
         return Regex("""src=["']([^"']+)["']""").find(result)?.groupValues?.get(1)
     }
 
@@ -354,10 +274,7 @@ class AnimePaheProvider(
         if (num == 0) return "0"
         var n = num
         val sb = StringBuilder()
-        while (n > 0) {
-            sb.insert(0, chars[n % base])
-            n /= base
-        }
+        while (n > 0) { sb.insert(0, chars[n % base]); n /= base }
         return sb.toString()
     }
 
@@ -371,29 +288,22 @@ class AnimePaheProvider(
 
         val animeSession = resolveAnimeSession(animeId) ?: return emptyList()
 
-        val (epSession, audio) = getEpisodeSession(animeSession, meta.epNum)
-            ?: return emptyList()
+        val (epSession, audio) = getEpisodeSession(animeSession, meta.epNum) ?: return emptyList()
 
         val videoLinks = getVideoLinksFromPlayPage(animeSession, epSession)
         if (videoLinks.isEmpty()) return emptyList()
 
-        val videos = mutableListOf<Video>()
         val audioLabel = if (audio == "eng") "Dub" else "Sub"
 
-        for ((kwikUrl, quality) in videoLinks) {
-            val kwikVideos = resolveKwik(kwikUrl, quality)
-            for (v in kwikVideos) {
-                videos.add(
-                    Video(
-                        v.url,
-                        "$name $quality $audioLabel ${v.quality}",
-                        v.videoUrl ?: v.url,
-                        headers = v.headers
-                    )
+        return videoLinks.parallelCatchingFlatMap { (kwikUrl, quality) ->
+            resolveKwik(kwikUrl, quality).map { v ->
+                Video(
+                    v.url,
+                    "$name $quality $audioLabel ${v.quality}",
+                    v.videoUrl ?: v.url,
+                    headers = v.headers
                 )
             }
         }
-
-        return videos
     }
 }
