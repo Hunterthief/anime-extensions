@@ -135,15 +135,12 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             val starLine = starRatingLine(scoreStr)
             val statusValue = nextEpString.trim()
             
-            val typeStr = media?.format?.replace("_", " ")?.lowercase() ?: ""
-            val type = if (typeStr.isNotEmpty()) typeStr[0].uppercase() + typeStr.drop(1) else ""
-            
-            val seasonLower = media?.season?.lowercase() ?: ""
-            val seasonName = if (seasonLower.isNotEmpty()) seasonLower[0].uppercase() + seasonLower.drop(1) else ""
+            val type = media?.format?.replace("_", " ")?.lowercase()?.capitalizeFirst() ?: ""
+            val seasonName = media?.season?.lowercase()?.capitalizeFirst() ?: ""
             val seasonStr = "$seasonName ${media?.seasonYear ?: ""}".trim()
             
             val infoLine = buildInfoLine(type, seasonStr, episodesText(media?.episodes), durationText(media?.duration))
-            val genreValue = media?.genres?.toDisplayList()
+            val genreValue = media?.genres.toDisplayList()
             
             val ratingMap = mapOf(
                 "G" to "G - All Ages",
@@ -273,6 +270,11 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
     // --- DESCRIPTION HELPER FUNCTIONS ---
 
+    private fun String.capitalizeFirst(): String {
+        if (this.isEmpty()) return this
+        return this[0].uppercaseChar() + this.substring(1)
+    }
+
     private fun buildDescription(vararg parts: String?): String {
         return parts
             .mapNotNull { part ->
@@ -281,19 +283,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             .joinToString(separator = "\n\n")
     }
 
-    private fun Any?.toDisplayList(): String {
-        val items: List<*> = when (this) {
-            null -> emptyList()
-            is Iterable<*> -> this.toList()
-            is Array<*> -> this.toList()
-            else -> listOf(this)
-        }
-
-        return items
-            .filterIsInstance<String>()
-            .mapNotNull { it.trim().takeIf { value -> value.isNotBlank() } }
-            .distinct()
-            .joinToString(separator = ", ")
+    private fun List<String>?.toDisplayList(): String {
+        return this?.filter { it.isNotBlank() }?.joinToString(", ") ?: ""
     }
 
     private fun cleanSynopsis(html: String): String {
