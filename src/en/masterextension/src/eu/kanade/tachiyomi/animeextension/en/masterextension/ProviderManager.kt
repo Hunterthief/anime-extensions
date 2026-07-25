@@ -20,6 +20,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.jsoup.Jsoup
 
 class ProviderManager(
     private val client: OkHttpClient,
@@ -27,7 +28,6 @@ class ProviderManager(
     private val preferences: SharedPreferences
 ) {
     private val allAnimeApi = "https://api.allanime.day/api"
-    private val jikanApi = "https://api.jikan.moe/v4"
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
@@ -52,11 +52,12 @@ class ProviderManager(
         }.build()
     }
 
-    private val jikanHeaders by lazy {
+    private val malHeaders by lazy {
         Headers.Builder().apply {
-            add("Accept", "application/json")
+            add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             add("Accept-Language", "en-US,en;q=0.9")
             add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            add("Referer", "https://myanimelist.net/")
         }.build()
     }
 
@@ -114,7 +115,6 @@ class ProviderManager(
     }
 
     fun fetchAllAnimeEpisodes(showId: String): Triple<Map<String, String>, String, String> {
-        // Added translationType: "sub" inside episodes argument
         val query = """
             query(${'$'}_id: String!) {
               show(_id: ${'$'}_id) {
@@ -150,44 +150,41 @@ class ProviderManager(
         return Triple(emptyMap(), "E0", err.take(60))
     }
 
-    fun fetchJikanEpisodes(malId: Int): Triple<Map<String, String>, String, String> {
-        var attempt = 0
-        while (attempt < 3) {
-            try {
-                val request = Request.Builder()
-                    .url("$jikanApi/anime/$malId/episodes")
-                    .headers(jikanHeaders)
-                    .get()
-                    .build()
-                    
-                client.newCall(request).execute().use { res ->
-                    val bodyStr = res.body.string()
-                    
-                    if (res.code == 429 || res.code in 500..599) {
-                        attempt++
-                        if (attempt < 3) {
-                            try { Thread.sleep(2000) } catch (_: InterruptedException) {}
-                            return@use
-                        } else {
-                            return Triple(emptyMap(), "J0", "RetryFail:${res.code}")
-                        }
+    // --- MYANIMELIST HTML SCRAPER ---
+
+    fun fetchMalEpisodes(malId: Int): Triple<Map<String, String>, String, String> {
+        return try {
+            val request = Request.Builder()
+                .url("https://myanimelist.net/anime/$malId/episode")
+                .headers(malHeaders)
+                .get()
+                .build()
+
+            client.newCall(request).execute().use { res ->
+                val bodyStr = res.body.string()
+                if (!res.isSuccessful) return Triple(emptyMap(), "M0", "ERR:${res.code}:${bodyStr.take(30)}")
+
+                val document = Jsoup.parse(bodyStr)
+                val episodeElements = document.select(".listing-item.episode")
+
+                if (episodeElements.isEmpty()) return Triple(emptyMap(), "M0", "Empty")
+
+                val map = episodeElements.mapNotNull { element ->
+                    val numberStr = element.selectFirst("span.episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
+                    val title = element.selectFirst("h3.name")?.text()?.trim()
+
+                    if (!numberStr.isNullOrBlank() && !title.isNullOrBlank()) {
+                        numberStr to title
+                    } else {
+                        null
                     }
-                    
-                    if (!res.isSuccessful) return Triple(emptyMap(), "J0", "ERR:${res.code}:${bodyStr.take(30)}")
-                    
-                    val parsed = bodyStr.parseAs<JikanResponse>()
-                    val map = parsed.data?.mapNotNull { ep ->
-                        val title = ep.title?.takeIf { it.isNotBlank() }
-                        if (title != null) ep.mal_id.toString() to title else null
-                    }?.toMap() ?: emptyMap()
-                    
-                    return Triple(if (map.isNotEmpty()) map else emptyMap(), if (map.isNotEmpty()) "J1" else "J0", if (map.isNotEmpty()) "" else "Empty")
-                }
-            } catch (e: Exception) {
-                return Triple(emptyMap(), "J0", "EXC:${e.message?.take(30)}")
+                }.toMap()
+
+                if (map.isNotEmpty()) Triple(map, "M1", "") else Triple(emptyMap(), "M0", "ParseFail")
             }
+        } catch (e: Exception) {
+            Triple(emptyMap(), "M0", "EXC:${e.message?.take(30)}")
         }
-        return Triple(emptyMap(), "J0", "MaxRetries")
     }
 
     // --- VIDEO EXTRACTION ---
