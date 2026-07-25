@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
 import android.content.SharedPreferences
-import android.util.Log
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -21,10 +20,6 @@ class ProviderManager(
     private val headers: Headers,
     private val preferences: SharedPreferences
 ) {
-    companion object {
-        private const val TAG = "ProviderManager"
-    }
-
     private val allProviders: Map<String, VideoProvider> by lazy {
         linkedMapOf(
             "allanime"  to AllAnimeProvider(client, headers),
@@ -46,45 +41,26 @@ class ProviderManager(
     fun getEnabledProviders(): List<VideoProvider> {
         val enabled = preferences.getStringSet("enabled_providers", defaultProviderKeys)
             ?: defaultProviderKeys
-        Log.d(TAG, "Enabled providers: $enabled")
         return allProviders.filterKeys { it in enabled }.values.toList()
     }
 
     suspend fun fetchAllVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val providers = getEnabledProviders()
-        Log.d(TAG, "fetchAllVideos: anime='${anime.title}', ep=${episode.episode_number}, " +
-            "providers=${providers.map { it.name }}")
-
-        if (providers.isEmpty()) {
-            Log.w(TAG, "No providers enabled!")
-            return emptyList()
-        }
+        if (providers.isEmpty()) return emptyList()
 
         return withContext(Dispatchers.IO) {
             val deferred = providers.map { provider ->
                 async {
                     try {
-                        Log.d(TAG, "[${provider.name}] Starting fetch...")
-                        val videos = provider.fetchVideos(anime, episode)
-                        Log.d(TAG, "[${provider.name}] Returned ${videos.size} videos")
-                        videos
-                    } catch (e: Exception) {
-                        Log.e(TAG, "[${provider.name}] EXCEPTION", e)
+                        provider.fetchVideos(anime, episode)
+                    } catch (_: Exception) {
                         emptyList<Video>()
                     }
                 }
             }
 
             val allVideos = deferred.awaitAll().flatten()
-            Log.d(TAG, "Total videos before dedup: ${allVideos.size}")
-
             val deduplicated = allVideos.distinctBy { it.url }
-            Log.d(TAG, "Total videos after dedup: ${deduplicated.size}")
-
-            if (deduplicated.isEmpty()) {
-                Log.w(TAG, "ALL PROVIDERS RETURNED EMPTY! Check individual provider logs above.")
-            }
-
             rankVideos(deduplicated)
         }
     }
@@ -119,10 +95,7 @@ class ProviderManager(
                 .build()
 
             client.newCall(request).execute().use { res ->
-                if (!res.isSuccessful) {
-                    Log.w(TAG, "MAL details: HTTP ${res.code}")
-                    return null
-                }
+                if (!res.isSuccessful) return null
                 val document = Jsoup.parse(res.body.string())
 
                 val score = document.selectFirst("span[itemprop=ratingValue]")?.text()?.trim() ?: ""
@@ -140,8 +113,7 @@ class ProviderManager(
 
                 MalAnimeDetails(score, rating, synopsis, type, episodes, duration, premiered)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "MAL details fetch failed", e)
+        } catch (_: Exception) {
             null
         }
     }
@@ -158,14 +130,10 @@ class ProviderManager(
 
             client.newCall(request).execute().use { res ->
                 val bodyStr = res.body.string()
-                if (!res.isSuccessful) {
-                    Log.w(TAG, "MAL episodes: HTTP ${res.code}")
-                    return Triple(emptyList(), "M0", "ERR:${res.code}")
-                }
+                if (!res.isSuccessful) return Triple(emptyList(), "M0", "ERR:${res.code}")
 
                 val document = Jsoup.parse(bodyStr)
                 val episodeRows = document.select("tr.episode-list-data")
-
                 if (episodeRows.isEmpty()) return Triple(emptyList(), "M0", "Empty")
 
                 val dateFormatter = SimpleDateFormat("MMM d, yyyy", Locale.ENGLISH)
@@ -185,9 +153,8 @@ class ProviderManager(
                 if (episodes.isNotEmpty()) Triple(episodes, "M1", "")
                 else Triple(emptyList(), "M0", "ParseFail")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "MAL episodes fetch failed", e)
-            Triple(emptyList(), "M0", "EXC:${e.message?.take(50)}")
+        } catch (_: Exception) {
+            Triple(emptyList(), "M0", "EXC")
         }
     }
 }
