@@ -1,19 +1,11 @@
 ext {
     extName = 'Master Extension'
     extClass = '.MasterExtension'
-    extVersionCode = 2
+    extVersionCode = 3
 }
 
 apply plugin: "kei.plugins.extension.legacy"
 
 dependencies {
     implementation(project(':lib:playlistutils'))
-    implementation(project(':lib:filemoonextractor'))
-    implementation(project(':lib:streamwishextractor'))
-    implementation(project(':lib:mp4uploadextractor'))
-    implementation(project(':lib:doodextractor'))
-    implementation(project(':lib:gogostreamextractor'))
-    implementation(project(':lib:streamlareextractor'))
-    implementation(project(':lib:okruextractor'))
-    implementation(project(':lib:unpacker'))
 }
