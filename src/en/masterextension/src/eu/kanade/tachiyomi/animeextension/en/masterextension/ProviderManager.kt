@@ -52,19 +52,6 @@ class ProviderManager(
         }.build()
     }
 
-    // Exact headers required to bypass Cloudflare on MAL
-    private val malHeaders by lazy {
-        Headers.Builder().apply {
-            add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-            add("Accept-Language", "en-US,en;q=0.9")
-            add("Referer", "https://myanimelist.net/")
-            add("sec-ch-ua", "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
-            add("sec-ch-ua-mobile", "?0")
-            add("sec-ch-ua-platform", "\"Windows\"")
-        }.build()
-    }
-
     private fun makeAllAnimePostRequest(payload: JsonObject): String? {
         return try {
             val body = payload.toString().toRequestBody("application/json".toMediaType())
@@ -122,10 +109,12 @@ class ProviderManager(
 
     fun fetchMalEpisodes(malId: Int): Triple<Map<String, String>, String, String> {
         return try {
-            // Using the injected client which contains Aniyomi's Cloudflare interceptors
+            // Use standard browser headers so Cloudflare lets us through
             val request = Request.Builder()
                 .url("https://myanimelist.net/anime/$malId/episode")
-                .headers(malHeaders)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .header("Referer", "https://myanimelist.net/")
                 .get()
                 .build()
 
@@ -135,21 +124,29 @@ class ProviderManager(
 
                 val document = Jsoup.parse(bodyStr)
                 
-                // Exact selectors from research
-                val episodeElements = document.select(".listing-item.episode")
+                // Find all episode links that end with /episode/{number}
+                val episodeLinks = document.select("a[href~=\\.*/episode/[0-9]+$]")
 
-                if (episodeElements.isEmpty()) return Triple(emptyMap(), "M0", "Empty")
+                if (episodeLinks.isEmpty()) return Triple(emptyMap(), "M0", "Empty")
 
-                val map = episodeElements.mapNotNull { element ->
-                    val numberStr = element.selectFirst(".episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
-                    val title = element.selectFirst("h3.name")?.text()?.trim()
-
-                    if (!numberStr.isNullOrBlank() && !title.isNullOrBlank()) {
-                        numberStr to title
-                    } else {
-                        null
+                val map = mutableMapOf<String, String>()
+                for (link in episodeLinks) {
+                    val href = link.attr("href")
+                    val numberMatch = Regex("episode/(\\d+)$").find(href)
+                    if (numberMatch != null) {
+                        val epNum = numberMatch.groupValues[1]
+                        var title = link.text().trim()
+                        
+                        // Check if this episode is marked as filler
+                        val parentRow = link.parents().firstOrNull { it.tagName() == "tr" || it.tagName() == "div" }
+                        val isFiller = parentRow?.selectFirst("span.icon-episode-type-bg") != null
+                        if (isFiller) title += " (Filler)"
+                        
+                        if (title.isNotEmpty()) {
+                            map[epNum] = title
+                        }
                     }
-                }.toMap()
+                }
 
                 if (map.isNotEmpty()) Triple(map, "M1", "") else Triple(emptyMap(), "M0", "ParseFail")
             }
