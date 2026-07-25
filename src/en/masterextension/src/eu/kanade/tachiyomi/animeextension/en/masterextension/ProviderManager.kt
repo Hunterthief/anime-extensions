@@ -28,6 +28,7 @@ class ProviderManager(
         linkedMapOf(
             "anikoto" to AnikotoProvider(client, headers),
             "lunaranime" to LunarAnimeProvider(client, headers),
+            "animekizz"  to AnimeKizzProvider(client, headers),
             // "example" to ExampleProvider(client, headers),  ← future sources
         )
     }
