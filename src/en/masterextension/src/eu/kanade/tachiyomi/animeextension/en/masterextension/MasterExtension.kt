@@ -169,41 +169,23 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         var malEpisodes: Map<String, String> = emptyMap()
         var showId = ""
-        var indicator = "S0-M0"
-        var errorInfo = ""
 
         try {
             val titleToSearch = englishTitle ?: romajiTitle ?: ""
             
             // 1. Get AllAnime Show ID (for video extraction later)
             if (titleToSearch.isNotBlank()) {
-                val (id, showInd, showErr) = providerManager.fetchAllAnimeShowId(titleToSearch)
+                val (id, _, _) = providerManager.fetchAllAnimeShowId(titleToSearch)
                 showId = id
-                if (showId.isNotBlank()) {
-                    indicator = "$showInd-M0"
-                } else {
-                    indicator = "S0-M0"
-                    errorInfo = showErr
-                }
             }
             
             // 2. Get Episode Titles from MyAnimeList HTML
             if (malId != null) {
-                val (mMap, mInd, mErr) = providerManager.fetchMalEpisodes(malId)
+                val (mMap, _, _) = providerManager.fetchMalEpisodes(malId)
                 malEpisodes = mMap
-                indicator = "${indicator.dropLast(2)}$mInd"
-                if (malEpisodes.isEmpty()) {
-                    errorInfo = if (errorInfo.isNotBlank()) "$errorInfo | M:$mErr" else "M:$mErr"
-                } else {
-                    errorInfo = ""
-                }
-            } else {
-                indicator = "${indicator.dropLast(2)}M0"
-                errorInfo = if (errorInfo.isNotBlank()) "$errorInfo | NoMAL" else "NoMAL"
             }
         } catch (e: Exception) {
-            indicator = "S0-M0"
-            errorInfo = e.message?.take(30) ?: "Exc"
+            // Ignore
         }
 
         for (i in 1..latestAired) {
@@ -213,7 +195,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 
             episodes.add(SEpisode.create().apply {
                 url = "$anilistId/${showId.ifBlank { "NA" }}/$i"
-                name = "Ep. $i: $titleStr [$indicator${if (errorInfo.isNotBlank()) ":$errorInfo" else ""}]"
+                name = "Ep. $i: $titleStr"
                 episode_number = i.toFloat()
                 date_upload = System.currentTimeMillis()
             })
