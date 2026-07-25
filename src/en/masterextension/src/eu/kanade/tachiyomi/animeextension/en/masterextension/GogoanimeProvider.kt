@@ -133,7 +133,8 @@ class GogoanimeProvider(
                                     videoUrl.contains("gogo") ||
                                     videoUrl.contains("vidcloud") ||
                                     videoUrl.contains("gogocdn") -> {
-                                        gogoStreamExtractor.videosFromUrl(videoUrl, name)
+                                        // Fix: GogoStreamExtractor.videosFromUrl only takes 1 argument
+                                        gogoStreamExtractor.videosFromUrl(videoUrl)
                                     }
                                     videoUrl.contains(".m3u8") -> {
                                         playlistUtils.extractFromHls(
