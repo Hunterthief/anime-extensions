@@ -175,13 +175,11 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         try {
             val titleToSearch = englishTitle ?: romajiTitle ?: ""
             
-            // 1. Get AllAnime Show ID (for video extraction later)
             if (titleToSearch.isNotBlank()) {
                 val (id, _, _) = providerManager.fetchAllAnimeShowId(titleToSearch)
                 showId = id
             }
             
-            // 2. Get Episode Titles from MyAnimeList HTML
             if (malId != null) {
                 val (mList, _, _) = providerManager.fetchMalEpisodes(malId)
                 malEpisodes = mList
@@ -200,12 +198,11 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 url = "$anilistId/${showId.ifBlank { "NA" }}/$i"
                 name = "Ep. $i: $titleStr"
                 episode_number = i.toFloat()
-                date_upload = System.currentTimeMillis()
+                // Set the actual release date parsed from MAL. 
+                // Aniyomi will format and display this natively.
+                date_upload = malEp?.date ?: 0L
             })
         }
-
-        // Removed the manual upcoming episode block.
-        // AniZen handles the countdown natively at the top of the list.
 
         return episodes.reversed()
     }
