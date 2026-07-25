@@ -97,3 +97,37 @@ data class AllAnimeSourceUrl(
     val type: String? = null,
     val priority: Float? = null
 )
+
+// Kitsu API DTOs
+@Serializable
+data class KitsuMappingResponse(
+    val included: List<KitsuMappingIncluded>? = null
+)
+
+@Serializable
+data class KitsuMappingIncluded(
+    val id: String,
+    val type: String? = null
+)
+
+@Serializable
+data class KitsuEpisodesResponse(
+    val data: List<KitsuEpisodeData>? = null
+)
+
+@Serializable
+data class KitsuEpisodeData(
+    val attributes: KitsuEpisodeAttributes? = null
+)
+
+@Serializable
+data class KitsuEpisodeAttributes(
+    val number: Int? = null,
+    val titles: KitsuEpisodeTitles? = null
+)
+
+@Serializable
+data class KitsuEpisodeTitles(
+    val en: String? = null,
+    val en_jp: String? = null
+)
