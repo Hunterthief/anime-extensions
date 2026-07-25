@@ -202,7 +202,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 
                 // Official way to mark filler natively
                 if (malEp?.isFiller == true) {
-                    addTag("Filler")
+                    tags.add("Filler")
                 }
             })
         }
