@@ -4,7 +4,7 @@ import android.content.SharedPreferences
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animeextension.en.masterextension.video_sources.AnikotoProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnikotoProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
