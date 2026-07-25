@@ -6,11 +6,17 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import java.net.URLDecoder
 
+/**
+ * Common interface for all streaming providers.
+ */
 interface VideoProvider {
     val name: String
     suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video>
 }
 
+/**
+ * Parsed from SEpisode.url: "$anilistId/$malId/$epNum/$urlEncodedTitle"
+ */
 data class EpisodeMeta(
     val anilistId: Int,
     val malId: Int,
@@ -24,8 +30,7 @@ data class EpisodeMeta(
             val rawUrl = episode.url
             Log.d(TAG, "Parsing episode URL: '$rawUrl'")
 
-            // Use limit=4 so the title (which may contain encoded slashes %2F)
-            // is never split further.
+            // limit=4 prevents the encoded title from being split further
             val parts = rawUrl.split("/", limit = 4)
             Log.d(TAG, "Split into ${parts.size} parts: $parts")
 
@@ -44,11 +49,11 @@ data class EpisodeMeta(
                 } ?: ""
             )
 
-            Log.d(TAG, "Parsed meta: anilistId=${meta.anilistId}, malId=${meta.malId}, " +
+            Log.d(TAG, "Parsed: anilistId=${meta.anilistId}, malId=${meta.malId}, " +
                 "epNum=${meta.epNum}, title='${meta.title}'")
 
             if (meta.title.isBlank()) {
-                Log.w(TAG, "WARNING: title is blank! Providers will abort early.")
+                Log.w(TAG, "WARNING: title is blank! All providers will abort.")
             }
 
             return meta
