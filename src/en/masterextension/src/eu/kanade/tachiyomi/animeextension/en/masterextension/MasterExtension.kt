@@ -60,7 +60,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val animes = data.map { media ->
             SAnime.create().apply {
                 url = media.id.toString()
-                title = media.title?.romaji ?: media.title?.english ?: "Unknown"
+                // Prioritize English title for better Filler Database matching
+                title = media.title?.english ?: media.title?.romaji ?: "Unknown"
                 thumbnail_url = media.coverImage?.large ?: ""
                 initialized = true
             }
@@ -114,7 +115,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun animeDetailsParse(response: Response): SAnime {
         val media = response.parseGraphQLAs<AniListMediaData>().Media
         return SAnime.create().apply {
-            title = media?.title?.romaji ?: media?.title?.english ?: "Unknown"
+            // Prioritize English title for better Filler Database matching
+            title = media?.title?.english ?: media?.title?.romaji ?: "Unknown"
             
             val studio = media?.studios?.nodes?.firstOrNull { it.isAnimationStudio == true }?.name ?: "Unknown"
             val producers = media?.studios?.nodes?.filter { it.isAnimationStudio == false }?.joinToString(", ") { it.name ?: "" }?.takeIf { it.isNotBlank() } ?: "Unknown"
@@ -202,20 +204,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             })
         }
 
-        if (nextEp != null && nextEp.episode != null && nextEp.timeUntilAiring != null) {
-            val airingAtMs = if (nextEp.airingAt != null && nextEp.airingAt > 0) {
-                nextEp.airingAt * 1000L
-            } else {
-                System.currentTimeMillis() + (nextEp.timeUntilAiring * 1000L)
-            }
-            
-            episodes.add(SEpisode.create().apply {
-                url = "$anilistId/${showId.ifBlank { "NA" }}/${nextEp.episode}"
-                name = "Ep. ${nextEp.episode}"
-                episode_number = nextEp.episode.toFloat()
-                date_upload = airingAtMs
-            })
-        }
+        // Removed the manual upcoming episode block.
+        // AniZen handles the countdown natively at the top of the list.
 
         return episodes.reversed()
     }
