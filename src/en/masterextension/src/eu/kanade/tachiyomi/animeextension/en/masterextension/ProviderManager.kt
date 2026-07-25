@@ -21,6 +21,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.Jsoup
+import java.text.SimpleDateFormat
+import java.util.Locale
 
 class ProviderManager(
     private val client: OkHttpClient,
@@ -109,7 +111,6 @@ class ProviderManager(
 
     fun fetchMalEpisodes(malId: Int): Triple<List<MalEpisode>, String, String> {
         return try {
-            // The URL MUST include /_/ to signal MAL that the title slug is omitted
             val request = Request.Builder()
                 .url("https://myanimelist.net/anime/$malId/_/episode")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -127,16 +128,23 @@ class ProviderManager(
 
                 if (episodeRows.isEmpty()) return Triple(emptyList(), "M0", "Empty")
 
+                val dateFormatter = SimpleDateFormat("MMM d, yyyy", Locale.ENGLISH)
+
                 val episodes = episodeRows.mapNotNull { row ->
                     val numberStr = row.selectFirst("td.episode-number")?.attr("data-raw")?.trim() 
                         ?: row.selectFirst("td.episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
                     val title = row.selectFirst("a.fl-l.fw-b")?.text()?.trim() ?: ""
                     
-                    val typeStr = row.selectFirst("span.icon-episode-type-bg")?.text()?.trim()
-                    val isFiller = typeStr?.equals("Filler", ignoreCase = true) == true
-                    
+                    // Parse the release date string (e.g., "Apr 5, 2009") into a Unix timestamp
+                    val dateStr = row.selectFirst("td.episode-aired")?.text()?.trim()
+                    val dateMillis = try {
+                        dateFormatter.parse(dateStr)?.time ?: 0L
+                    } catch (e: Exception) {
+                        0L
+                    }
+
                     if (!numberStr.isNullOrBlank() && title.isNotEmpty()) {
-                        MalEpisode(numberStr, title, isFiller)
+                        MalEpisode(numberStr, title, dateMillis)
                     } else {
                         null
                     }
