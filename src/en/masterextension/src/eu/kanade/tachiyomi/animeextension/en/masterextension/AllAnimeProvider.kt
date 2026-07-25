@@ -12,6 +12,8 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import keiyoushi.utils.parseAs
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -22,11 +24,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
-/**
- * AllAnime provider — searches by title via the AllAnime GraphQL API,
- * then fetches episode sources using a persisted query hash.
- * Source URLs are XOR-encrypted and must be decrypted before routing to extractors.
- */
 class AllAnimeProvider(
     private val client: OkHttpClient,
     private val headers: Headers
@@ -58,8 +55,6 @@ class AllAnimeProvider(
             add("Sec-Fetch-Site", "cross-site")
         }.build()
     }
-
-    // --- XOR decryption for AllAnime source URLs ---
 
     private val xorKeys = arrayOf(
         "allanimenews".toCharArray(),
@@ -93,9 +88,7 @@ class AllAnimeProvider(
         })
     }
 
-    // --- ID Resolution: search AllAnime by title ---
-
-    private fun fetchShowId(title: String): String {
+    private suspend fun fetchShowId(title: String): String = withContext(Dispatchers.IO) {
         val query = """
             query(${'$'}search: SearchInput, ${'$'}limit: Int, ${'$'}page: Int, ${'$'}translationType: VaildTranslationTypeEnumType, ${'$'}countryOrigin: VaildCountryOriginEnumType) {
               shows(search: ${'$'}search, limit: ${'$'}limit, page: ${'$'}page, translationType: ${'$'}translationType, countryOrigin: ${'$'}countryOrigin) {
@@ -119,10 +112,10 @@ class AllAnimeProvider(
             })
         }
 
-        val res = makePostRequest(payload) ?: return ""
-        if (res.startsWith("ERR") || res.startsWith("EXC")) return ""
+        val res = makePostRequest(payload) ?: return@withContext ""
+        if (res.startsWith("ERR") || res.startsWith("EXC")) return@withContext ""
 
-        return try {
+        try {
             res.parseAs<AllAnimeResponse>().data?.shows?.edges?.firstOrNull()?._id ?: ""
         } catch (_: Exception) {
             ""
@@ -148,8 +141,6 @@ class AllAnimeProvider(
         }
     }
 
-    // --- Main fetch ---
-
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
         val title = anime.title.ifBlank { meta.title }
@@ -158,82 +149,84 @@ class AllAnimeProvider(
         val showId = fetchShowId(title)
         if (showId.isBlank()) return emptyList()
 
-        return try {
-            val variablesJson = buildJsonObject {
-                put("showId", showId)
-                put("translationType", "sub")
-                put("episodeString", meta.epNum.toString())
-            }.toString()
+        return withContext(Dispatchers.IO) {
+            try {
+                val variablesJson = buildJsonObject {
+                    put("showId", showId)
+                    put("translationType", "sub")
+                    put("episodeString", meta.epNum.toString())
+                }.toString()
 
-            val extensionsJson = buildJsonObject {
-                put("persistedQuery", buildJsonObject {
-                    put("version", 1)
-                    put("sha256Hash", "4257d8039f3e68b1c41941a7091721483d3d3050")
-                })
-            }.toString()
+                val extensionsJson = buildJsonObject {
+                    put("persistedQuery", buildJsonObject {
+                        put("version", 1)
+                        put("sha256Hash", "4257d8039f3e68b1c41941a7091721483d3d3050")
+                    })
+                }.toString()
 
-            val url = apiUrl.toHttpUrl().newBuilder()
-                .addQueryParameter("variables", variablesJson)
-                .addQueryParameter("extensions", extensionsJson)
-                .build()
+                val url = apiUrl.toHttpUrl().newBuilder()
+                    .addQueryParameter("variables", variablesJson)
+                    .addQueryParameter("extensions", extensionsJson)
+                    .build()
 
-            val request = Request.Builder()
-                .url(url)
-                .headers(apiHeaders)
-                .get()
-                .build()
+                val request = Request.Builder()
+                    .url(url)
+                    .headers(apiHeaders)
+                    .get()
+                    .build()
 
-            val responseBody = client.newCall(request).execute().body.string()
-            val parsed = responseBody.parseAs<AllAnimeResponse>()
-            val sourceUrls = parsed.data?.episode?.sourceUrls ?: emptyList()
+                val responseBody = client.newCall(request).execute().body.string()
+                val parsed = responseBody.parseAs<AllAnimeResponse>()
+                val sourceUrls = parsed.data?.episode?.sourceUrls ?: emptyList()
 
-            val videos = mutableListOf<Video>()
-            for (source in sourceUrls) {
-                val decryptedUrl = source.sourceUrl.decryptSource()
+                val videos = mutableListOf<Video>()
+                for (source in sourceUrls) {
+                    val decryptedUrl = source.sourceUrl.decryptSource()
 
-                when {
-                    decryptedUrl.contains(".m3u8") -> {
-                        try {
-                            videos.addAll(
-                                playlistUtils.extractFromHls(
-                                    decryptedUrl, decryptedUrl, apiHeaders, apiHeaders
+                    when {
+                        decryptedUrl.contains(".m3u8") -> {
+                            try {
+                                videos.addAll(
+                                    playlistUtils.extractFromHls(
+                                        decryptedUrl, decryptedUrl, apiHeaders, apiHeaders
+                                    )
                                 )
-                            )
-                        } catch (_: Exception) {
-                            videos.add(Video(decryptedUrl, "$name HLS", decryptedUrl, headers = apiHeaders))
+                            } catch (_: Exception) {
+                                videos.add(Video(decryptedUrl, "$name HLS", decryptedUrl, headers = apiHeaders))
+                            }
                         }
-                    }
-                    decryptedUrl.contains("filemoon") || decryptedUrl.contains("moon") -> {
-                        videos.addAll(filemoonExtractor.videosFromUrl(decryptedUrl, "$name Filemoon"))
-                    }
-                    decryptedUrl.contains("streamwish") || decryptedUrl.contains("wish") || decryptedUrl.contains("swhoi") -> {
-                        videos.addAll(streamwishExtractor.videosFromUrl(decryptedUrl, "$name StreamWish"))
-                    }
-                    decryptedUrl.contains("mp4upload") -> {
-                        videos.addAll(mp4uploadExtractor.videosFromUrl(decryptedUrl, apiHeaders))
-                    }
-                    decryptedUrl.contains("dood") -> {
-                        videos.addAll(doodExtractor.videosFromUrl(decryptedUrl))
-                    }
-                    decryptedUrl.contains("vidstreaming") || decryptedUrl.contains("gogo") || decryptedUrl.contains("vidcloud") -> {
-                        videos.addAll(gogoStreamExtractor.videosFromUrl(decryptedUrl.replace(Regex("^//"), "https://")))
-                    }
-                    decryptedUrl.contains("streamlare") -> {
-                        videos.addAll(streamlareExtractor.videosFromUrl(decryptedUrl))
-                    }
-                    decryptedUrl.contains("ok.ru") || decryptedUrl.contains("okru") -> {
-                        videos.addAll(okruExtractor.videosFromUrl(decryptedUrl))
-                    }
-                    else -> {
-                        if (decryptedUrl.startsWith("http")) {
-                            videos.add(Video(decryptedUrl, "$name ${source.sourceName}", decryptedUrl, headers = apiHeaders))
+                        decryptedUrl.contains("filemoon") || decryptedUrl.contains("moon") -> {
+                            videos.addAll(filemoonExtractor.videosFromUrl(decryptedUrl, "$name Filemoon"))
+                        }
+                        decryptedUrl.contains("streamwish") || decryptedUrl.contains("wish") || decryptedUrl.contains("swhoi") -> {
+                            videos.addAll(streamwishExtractor.videosFromUrl(decryptedUrl, "$name StreamWish"))
+                        }
+                        decryptedUrl.contains("mp4upload") -> {
+                            videos.addAll(mp4uploadExtractor.videosFromUrl(decryptedUrl, apiHeaders))
+                        }
+                        decryptedUrl.contains("dood") -> {
+                            videos.addAll(doodExtractor.videosFromUrl(decryptedUrl))
+                        }
+                        decryptedUrl.contains("vidstreaming") || decryptedUrl.contains("gogo") || decryptedUrl.contains("vidcloud") -> {
+                            videos.addAll(gogoStreamExtractor.videosFromUrl(decryptedUrl.replace(Regex("^//"), "https://")))
+                        }
+                        decryptedUrl.contains("streamlare") -> {
+                            videos.addAll(streamlareExtractor.videosFromUrl(decryptedUrl))
+                        }
+                        decryptedUrl.contains("ok.ru") || decryptedUrl.contains("okru") -> {
+                            videos.addAll(okruExtractor.videosFromUrl(decryptedUrl))
+                        }
+                        else -> {
+                            if (decryptedUrl.startsWith("http")) {
+                                videos.add(Video(decryptedUrl, "$name ${source.sourceName}", decryptedUrl, headers = apiHeaders))
+                            }
                         }
                     }
                 }
+                videos
+            } catch (_: Exception) {
+                emptyList()
             }
-            videos
-        } catch (_: Exception) {
-            emptyList()
         }
     }
 }
