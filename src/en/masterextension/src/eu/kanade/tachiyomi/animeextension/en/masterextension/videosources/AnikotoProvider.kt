@@ -1,4 +1,4 @@
-package eu.kanade.tachiyomi.animeextension.en.masterextension.video_sources
+package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
