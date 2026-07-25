@@ -198,9 +198,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 url = "$anilistId/${showId.ifBlank { "NA" }}/$i"
                 name = "Ep. $i: $titleStr"
                 episode_number = i.toFloat()
-                // Set the actual release date parsed from MAL. 
-                // Aniyomi will format and display this natively.
                 date_upload = malEp?.date ?: 0L
+                scanlator = "" // Explicitly empty so no text shows next to the date
             })
         }
 
