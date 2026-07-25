@@ -1,6 +1,9 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+
+// ======================== AniList DTOs ========================
 
 @Serializable
 data class AniListMediaData(
@@ -63,7 +66,8 @@ data class AniListNextAiring(
     val timeUntilAiring: Long? = null
 )
 
-// AllAnime API DTOs
+// ======================== AllAnime DTOs ========================
+
 @Serializable
 data class AllAnimeResponse(
     val data: AllAnimeData? = null
@@ -72,7 +76,9 @@ data class AllAnimeResponse(
 @Serializable
 data class AllAnimeData(
     val shows: AllAnimeShows? = null,
-    val episode: AllAnimeEpisode? = null
+    val episode: AllAnimeEpisode? = null,
+    // NEW: encrypted response field
+    val tobeparsed: String? = null
 )
 
 @Serializable
@@ -82,7 +88,8 @@ data class AllAnimeShows(
 
 @Serializable
 data class AllAnimeShowEdge(
-    val _id: String,
+    @SerialName("_id")
+    val id: String,
     val name: String? = null
 )
 
@@ -99,7 +106,71 @@ data class AllAnimeSourceUrl(
     val priority: Float? = null
 )
 
-// MyAnimeList Helper Data Classes
+// NEW: Decrypted tobeparsed wrapper
+@Serializable
+data class DecryptedEpisodeResult(
+    val episode: AllAnimeEpisode? = null
+)
+
+// NEW: Internal hoster (/apivtwo/) response DTOs
+@Serializable
+data class AllAnimeVersionResponse(
+    val episodeIframeHead: String? = null
+)
+
+@Serializable
+data class AllAnimeVideoLink(
+    val links: List<AllAnimeLink> = emptyList()
+) {
+    @Serializable
+    data class AllAnimeLink(
+        val link: String,
+        val hls: Boolean? = null,
+        val mp4: Boolean? = null,
+        val dash: Boolean? = null,
+        val crIframe: Boolean? = null,
+        val resolutionStr: String = "",
+        val subtitles: List<AllAnimeSubtitle>? = null,
+        val rawUrls: RawUrl? = null,
+        val portData: Stream? = null
+    )
+
+    @Serializable
+    data class AllAnimeSubtitle(
+        val lang: String,
+        val src: String,
+        val label: String? = null
+    )
+
+    @Serializable
+    data class Stream(
+        val streams: List<StreamObject> = emptyList()
+    ) {
+        @Serializable
+        data class StreamObject(
+            val format: String,
+            val url: String,
+            val audio_lang: String = "",
+            val hardsub_lang: String = ""
+        )
+    }
+
+    @Serializable
+    data class RawUrl(
+        val vids: List<DashStreamObject>? = null,
+        val audios: List<DashStreamObject>? = null
+    ) {
+        @Serializable
+        data class DashStreamObject(
+            val bandwidth: Long,
+            val height: Int,
+            val url: String
+        )
+    }
+}
+
+// ======================== MAL Helper DTOs ========================
+
 data class MalEpisode(
     val number: String,
     val title: String,
