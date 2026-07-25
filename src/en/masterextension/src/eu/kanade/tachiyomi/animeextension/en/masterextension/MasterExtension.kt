@@ -168,9 +168,9 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val episodes = mutableListOf<SEpisode>()
 
         var allAnimeEpisodes: Map<String, String> = emptyMap()
-        var jikanEpisodes: Map<String, String> = emptyMap()
+        var malEpisodes: Map<String, String> = emptyMap()
         var showId = ""
-        var indicator = "S0-E0-J0"
+        var indicator = "S0-E0-M0"
         var errorInfo = ""
 
         try {
@@ -183,38 +183,37 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 if (showId.isNotBlank()) {
                     val (epMap, epInd, epErr) = providerManager.fetchAllAnimeEpisodes(showId)
                     allAnimeEpisodes = epMap
-                    indicator = "$showInd-$epInd-J0"
+                    indicator = "$showInd-$epInd-M0"
                     if (epInd == "E0") errorInfo = epErr
                 } else {
-                    indicator = "S0-E0-J0"
+                    indicator = "S0-E0-M0"
                     errorInfo = showErr
                 }
             }
             
-            // 2. Try Jikan (MAL) if AllAnime failed or for fallback
+            // 2. Try MyAnimeList HTML Scraper if AllAnime failed or for fallback
             if (allAnimeEpisodes.isEmpty() && malId != null) {
-                val (jMap, jInd, jErr) = providerManager.fetchJikanEpisodes(malId)
-                jikanEpisodes = jMap
-                indicator = "${indicator.dropLast(2)}$jInd" // Replace J0 with J1
-                if (jikanEpisodes.isEmpty() && errorInfo.isBlank()) {
-                    errorInfo = jErr
-                } else if (jikanEpisodes.isNotEmpty()) {
-                    errorInfo = "" // Clear error if Jikan saved us
+                val (mMap, mInd, mErr) = providerManager.fetchMalEpisodes(malId)
+                malEpisodes = mMap
+                indicator = "${indicator.dropLast(2)}$mInd" // Replace M0 with M1 or M0
+                if (malEpisodes.isEmpty() && errorInfo.isBlank()) {
+                    errorInfo = mErr
+                } else if (malEpisodes.isNotEmpty()) {
+                    errorInfo = "" // Clear error if MAL saved us
                 }
             } else if (malId == null) {
-                indicator = "${indicator.dropLast(2)}J0"
+                indicator = "${indicator.dropLast(2)}M0"
                 if (errorInfo.isBlank()) errorInfo = "NoMAL"
             }
         } catch (e: Exception) {
-            indicator = "S0-E0-J0"
+            indicator = "S0-E0-M0"
             errorInfo = e.message?.take(30) ?: "Exc"
         }
 
         for (i in 1..latestAired) {
             val titleStr = allAnimeEpisodes[i.toString()] 
                 ?: allAnimeEpisodes[String.format("%02d", i)]
-                ?: jikanEpisodes[i.toString()] 
-                ?: jikanEpisodes[String.format("%02d", i)]
+                ?: malEpisodes[i.toString()] 
                 ?: "Episode $i"
                 
             episodes.add(SEpisode.create().apply {
