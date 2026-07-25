@@ -108,7 +108,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     override fun animeDetailsRequest(anime: SAnime): Request {
-        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes duration rating status season seasonYear format genres averageScore studios { nodes { name isAnimationStudio } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
+        val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes duration status season seasonYear format genres averageScore studios { nodes { name isAnimationStudio } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
         val variables = buildJsonObject { put("id", anime.url.toInt()) }
         return graphQLPost(baseUrl, headers, query, variables = variables)
     }
@@ -130,27 +130,36 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 "No upcoming episodes scheduled."
             }
 
-            val synopsis = media?.description?.let { cleanSynopsis(it) }?.takeIf { it.isNotBlank() } ?: "No synopsis available."
-            val scoreStr = media?.averageScore?.let { "$it%" }
+            // Fetch rich details from MyAnimeList
+            val malDetails = media?.idMal?.let { providerManager.fetchMalAnimeDetails(it) }
+            
+            val synopsis = malDetails?.synopsis?.takeIf { it.isNotBlank() } 
+                ?: media?.description?.let { cleanSynopsis(it) }?.takeIf { it.isNotBlank() } 
+                ?: "No synopsis available."
+                
+            val scoreStr = malDetails?.score?.takeIf { it.isNotBlank() } 
+                ?: media?.averageScore?.let { "$it%" }
+                
             val starLine = starRatingLine(scoreStr)
             val statusValue = nextEpString.trim()
             
-            val type = media?.format?.replace("_", " ")?.lowercase()?.capitalizeFirst() ?: ""
-            val seasonName = media?.season?.lowercase()?.capitalizeFirst() ?: ""
-            val seasonStr = "$seasonName ${media?.seasonYear ?: ""}".trim()
+            val type = malDetails?.type?.takeIf { it.isNotBlank() } 
+                ?: media?.format?.replace("_", " ")?.lowercase()?.capitalizeFirst() 
+                ?: ""
+                
+            val seasonStr = malDetails?.premiered?.takeIf { it.isNotBlank() } 
+                ?: ((media?.season?.lowercase()?.capitalizeFirst() ?: "") + " " + (media?.seasonYear ?: "")).trim()
+                
+            val episodesStr = malDetails?.episodes?.takeIf { it.isNotBlank() } 
+                ?: episodesText(media?.episodes)
+                
+            val durationStr = malDetails?.duration?.takeIf { it.isNotBlank() } 
+                ?: durationText(media?.duration)
             
-            val infoLine = buildInfoLine(type, seasonStr, episodesText(media?.episodes), durationText(media?.duration))
+            val infoLine = buildInfoLine(type, seasonStr, episodesStr, durationStr)
             val genreValue = media?.genres.toDisplayList()
             
-            val ratingMap = mapOf(
-                "G" to "G - All Ages",
-                "PG" to "PG - Children",
-                "PG_13" to "PG-13 - Teens 13 or older",
-                "R" to "R - 17+ (violence & profanity)",
-                "R_PLUS" to "R+ - Mild Nudity",
-                "RX" to "Rx - Hentai"
-            )
-            val ratingValue = media?.rating?.let { ratingMap[it] ?: it } ?: "N/A"
+            val ratingValue = malDetails?.rating?.takeIf { it.isNotBlank() } ?: "N/A"
             val ratingLine = "**Rating:** $ratingValue"
 
             description = buildDescription(
