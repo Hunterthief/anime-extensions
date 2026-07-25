@@ -105,13 +105,11 @@ data class AllAnimeSourceUrl(
     val priority: Float? = null
 )
 
-// Decrypted tobeparsed wrapper
 @Serializable
 data class DecryptedEpisodeResult(
     val episode: AllAnimeEpisode? = null
 )
 
-// Internal hoster (/apivtwo/) response DTOs
 @Serializable
 data class AllAnimeVersionResponse(
     val episodeIframeHead: String? = null
