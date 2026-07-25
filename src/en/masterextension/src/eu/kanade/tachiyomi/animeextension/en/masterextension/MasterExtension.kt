@@ -167,53 +167,48 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         val episodes = mutableListOf<SEpisode>()
 
-        var allAnimeEpisodes: Map<String, String> = emptyMap()
         var malEpisodes: Map<String, String> = emptyMap()
         var showId = ""
-        var indicator = "S0-E0-M0"
+        var indicator = "S0-M0"
         var errorInfo = ""
 
         try {
             val titleToSearch = englishTitle ?: romajiTitle ?: ""
             
-            // 1. Try AllAnime
+            // 1. Get AllAnime Show ID (for video extraction later)
             if (titleToSearch.isNotBlank()) {
                 val (id, showInd, showErr) = providerManager.fetchAllAnimeShowId(titleToSearch)
                 showId = id
                 if (showId.isNotBlank()) {
-                    val (epMap, epInd, epErr) = providerManager.fetchAllAnimeEpisodes(showId)
-                    allAnimeEpisodes = epMap
-                    indicator = "$showInd-$epInd-M0"
-                    if (epInd == "E0") errorInfo = epErr
+                    indicator = "$showInd-M0"
                 } else {
-                    indicator = "S0-E0-M0"
+                    indicator = "S0-M0"
                     errorInfo = showErr
                 }
             }
             
-            // 2. Try MyAnimeList HTML Scraper if AllAnime failed or for fallback
-            if (allAnimeEpisodes.isEmpty() && malId != null) {
+            // 2. Get Episode Titles from MyAnimeList HTML
+            if (malId != null) {
                 val (mMap, mInd, mErr) = providerManager.fetchMalEpisodes(malId)
                 malEpisodes = mMap
                 indicator = "${indicator.dropLast(2)}$mInd" // Replace M0 with M1 or M0
-                if (malEpisodes.isEmpty() && errorInfo.isBlank()) {
-                    errorInfo = mErr
-                } else if (malEpisodes.isNotEmpty()) {
+                if (malEpisodes.isEmpty()) {
+                    errorInfo = if (errorInfo.isNotBlank()) "$errorInfo | M:$mErr" else "M:$mErr"
+                } else {
                     errorInfo = "" // Clear error if MAL saved us
                 }
-            } else if (malId == null) {
+            } else {
                 indicator = "${indicator.dropLast(2)}M0"
-                if (errorInfo.isBlank()) errorInfo = "NoMAL"
+                errorInfo = if (errorInfo.isNotBlank()) "$errorInfo | NoMAL" else "NoMAL"
             }
         } catch (e: Exception) {
-            indicator = "S0-E0-M0"
+            indicator = "S0-M0"
             errorInfo = e.message?.take(30) ?: "Exc"
         }
 
         for (i in 1..latestAired) {
-            val titleStr = allAnimeEpisodes[i.toString()] 
-                ?: allAnimeEpisodes[String.format("%02d", i)]
-                ?: malEpisodes[i.toString()] 
+            val titleStr = malEpisodes[i.toString()] 
+                ?: malEpisodes[String.format("%02d", i)]
                 ?: "Episode $i"
                 
             episodes.add(SEpisode.create().apply {
