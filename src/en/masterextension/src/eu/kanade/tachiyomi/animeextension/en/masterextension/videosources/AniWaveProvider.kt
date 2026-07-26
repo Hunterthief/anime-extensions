@@ -39,13 +39,11 @@ class AniWaveProvider(
     override val name = "AniWave"
 
     companion object {
-        // FIX: Add fallback domain
         private val DOMAINS = listOf(
-            "https://animewave.to",
+            "https://aniwave.to",
             "https://aniwave.cz",
         )
 
-        // VRF encryption constants (verified against reference AnikotoUtils)
         private val EXCHANGE_KEY_1 = listOf("AP6GeR8H0lwUz1", "UAz8Gwl10P6ReH")
         private const val KEY_1 = "ItFKjuWokn4ZpB"
         private const val KEY_2 = "fOyt97QWFB3"
@@ -56,9 +54,6 @@ class AniWaveProvider(
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
-    // =================================================================
-    // DEBUG HELPER — same pattern as AllAnimeProvider
-    // =================================================================
     private fun debugVideo(msg: String): List<Video> {
         return listOf(
             Video(
@@ -69,9 +64,6 @@ class AniWaveProvider(
         )
     }
 
-    // =================================================================
-    // DTOs
-    // =================================================================
     @Serializable
     private data class ResultResponse(val result: String)
 
@@ -111,9 +103,6 @@ class AniWaveProvider(
             throw UnsupportedOperationException()
     }
 
-    // =================================================================
-    // HEADERS
-    // =================================================================
     private fun siteHeaders(baseUrl: String) = headers.newBuilder()
         .set("Referer", "$baseUrl/")
         .build()
@@ -124,9 +113,6 @@ class AniWaveProvider(
         .set("X-Requested-With", "XMLHttpRequest")
         .build()
 
-    // =================================================================
-    // VRF ENCRYPTION (required for AJAX calls)
-    // =================================================================
     private fun vrfEncrypt(input: String): String {
         var vrf = input
         vrf = exchange(vrf, EXCHANGE_KEY_1)
@@ -159,9 +145,6 @@ class AniWaveProvider(
         }.joinToString("")
     }
 
-    // =================================================================
-    // STEP 1: Search → anime page path + data-id
-    // =================================================================
     private suspend fun searchAnime(
         title: String,
     ): Triple<String, String, String>? {
@@ -176,24 +159,28 @@ class AniWaveProvider(
                 val html = client.newCall(GET(url, siteHeaders(domain)))
                     .awaitSuccess().bodyString()
 
-                val doc = Jsoup.parse(html)
+                // FIX: pass domain to Jsoup so abs:href works properly
+                val doc = Jsoup.parse(html, domain)
+                
                 val item = doc.selectFirst("div.ani.items div.item a.name")
                     ?: doc.selectFirst("div.item a[href*=/watch/]")
                     ?: doc.selectFirst("a[href*=/watch/]")
 
                 if (item != null) {
-                    val href = item.attr("href").substringBefore("?")
-                        .replace(Regex("/ep-\\d+$"), "")
+                    val href = item.attr("abs:href").ifBlank { item.attr("href") }
+                        .substringBefore("?").replace(Regex("/ep-\\d+$"), "")
+                        
                     if (href.isNotBlank()) {
+                        val path = if (href.startsWith("http")) href.substringAfter(domain) else href
                         // Load the anime page to get data-id
-                        val animeHtml = client.newCall(GET("$domain$href", siteHeaders(domain)))
+                        val animeHtml = client.newCall(GET("$domain$path", siteHeaders(domain)))
                             .awaitSuccess().bodyString()
-                        val animeDoc = Jsoup.parse(animeHtml)
+                        val animeDoc = Jsoup.parse(animeHtml, domain)
                         val dataId = animeDoc.selectFirst("[data-id]")?.attr("data-id")
                             ?: animeDoc.selectFirst("[data-tip]")?.attr("data-tip")
                             ?: ""
                         if (dataId.isNotBlank()) {
-                            return Triple(domain, href, dataId)
+                            return Triple(domain, path, dataId)
                         }
                     }
                 }
@@ -204,9 +191,6 @@ class AniWaveProvider(
         return null
     }
 
-    // =================================================================
-    // STEP 2: Get episode server IDs via AJAX
-    // =================================================================
     private suspend fun getEpisodeServerIds(
         baseUrl: String,
         animePath: String,
@@ -222,7 +206,6 @@ class AniWaveProvider(
         val result = body.parseAs<ResultResponse>()
         val doc = Jsoup.parseBodyFragment(result.result)
 
-        // Find the episode element with matching data-num
         val epElement = doc.select("div.episodes ul > li > a").firstOrNull {
             it.attr("data-num") == epNum.toString()
         } ?: doc.select("a[data-num]").firstOrNull {
@@ -232,9 +215,6 @@ class AniWaveProvider(
         return epElement?.attr("data-ids")?.takeIf { it.isNotBlank() }
     }
 
-    // =================================================================
-    // STEP 3: Get server list via AJAX
-    // =================================================================
     private data class ServerData(
         val type: String,
         val serverId: String,
@@ -269,9 +249,6 @@ class AniWaveProvider(
         }
     }
 
-    // =================================================================
-    // STEP 4: Get embed URL for a server
-    // =================================================================
     private suspend fun getEmbedUrl(
         baseUrl: String,
         serverId: String,
@@ -283,15 +260,11 @@ class AniWaveProvider(
         return body.parseAs<ServerResponseDto>().result.url
     }
 
-    // =================================================================
-    // STEP 5: Extract video from embed
-    // =================================================================
     private suspend fun extractFromEmbed(
         embedUrl: String,
         server: ServerData,
         baseUrl: String,
     ): List<Video> {
-        // Direct m3u8
         if (embedUrl.contains(".m3u8") && !embedUrl.contains("/stream/")) {
             return extractHls(embedUrl, server, embedUrl.substringBeforeLast("/"))
         }
@@ -309,33 +282,28 @@ class AniWaveProvider(
         val pageBody = client.newCall(GET(embedUrl, pageHeaders))
             .awaitSuccess().bodyString()
 
-        // Strategy A: data-id → /stream/getSources
         val dataId = Regex("""data-id="([^"]+)"""").find(pageBody)?.groupValues?.get(1)
         if (dataId != null) {
             return fetchFromGetSources(dataId, host, embedUrl, server)
         }
 
-        // Strategy B: iframe → follow
         val iframeSrc = Regex("""<iframe[^>]+src="([^"]+)"""").find(pageBody)?.groupValues?.get(1)
         if (iframeSrc != null) {
             val resolved = resolveUrl(iframeSrc, embedUrl)
             return extractFromEmbed(resolved, server, baseUrl)
         }
 
-        // Strategy C: direct m3u8 in page
         val m3u8Match = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(pageBody)
         if (m3u8Match != null) {
             return extractHls(m3u8Match.value, server, "https://$host/")
         }
 
-        // Strategy D: <source> tag
         val sourceSrc = Regex("""<source[^>]+src="([^"]+\.m3u8[^"]*)"""")
             .find(pageBody)?.groupValues?.get(1)
         if (sourceSrc != null) {
             return extractHls(resolveUrl(sourceSrc, embedUrl), server, "https://$host/")
         }
 
-        // Strategy E: JS variable
         val jsVar = Regex(
             """(?:var|let|const)\s+\w+\s*=\s*["']([^"']*\.m3u8[^"']*)["']""" +
                 """|(?:file|source|url|src)\s*[:=]\s*["']([^"']*\.m3u8[^"']*)["']""",
@@ -363,7 +331,6 @@ class AniWaveProvider(
             .set("Origin", "https://$host")
             .build()
 
-        // FIX: Match reference — try getSources then getSourcesNew
         val sourceData = try {
             client.newCall(GET("https://$host/stream/getSources?id=$dataId", apiHeaders))
                 .awaitSuccess().parseAs<SourceResponseDto>()
@@ -418,9 +385,6 @@ class AniWaveProvider(
         else -> base.toHttpUrl().resolve(url)?.toString() ?: url
     }
 
-    // =================================================================
-    // ENTRY POINT — DEBUG VERSION
-    // =================================================================
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
         val title = anime.title.ifBlank { meta.title }
@@ -428,14 +392,12 @@ class AniWaveProvider(
 
         val epNum = if (meta.epNum > 0) meta.epNum else 1
 
-        // Step 1: Search
         val (baseUrl, animePath, animeId) = try {
             searchAnime(title)
         } catch (e: Exception) {
             return debugVideo("search threw: ${e.message}")
         } ?: return debugVideo("search null for '$title' (${DOMAINS.size} domains tried)")
 
-        // Step 2: Get episode server IDs
         val serverIds = try {
             getEpisodeServerIds(baseUrl, animePath, animeId, epNum)
         } catch (e: Exception) {
@@ -445,7 +407,6 @@ class AniWaveProvider(
             return debugVideo("no epIds for '$title' ep$epNum (id=$animeId)")
         }
 
-        // Step 3: Get server list
         val epUrl = "$animePath/ep-$epNum"
         val servers = try {
             getServerList(baseUrl, serverIds, epUrl)
@@ -456,7 +417,6 @@ class AniWaveProvider(
             return debugVideo("0 servers for '$title' ep$epNum")
         }
 
-        // Step 4+5: Get embed + extract videos
         val allVideos = mutableListOf<Video>()
         val errors = mutableListOf<String>()
 
