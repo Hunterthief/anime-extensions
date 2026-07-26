@@ -162,7 +162,6 @@ class AniWaveProvider(
                     addQueryParameter("vrf", vrf)
                 }.build().toString()
 
-                // FIX: Capture HTTP code and body snippet for debugging
                 val response = client.newCall(GET(url, siteHeaders(domain))).execute()
                 val html = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
@@ -177,23 +176,32 @@ class AniWaveProvider(
                     ?: doc.selectFirst("a[href*=/watch/]")
 
                 if (item != null) {
-                    val href = item.attr("abs:href").ifBlank { item.attr("href") }
+                    val rawHref = item.attr("abs:href").ifBlank { item.attr("href") }
                         .substringBefore("?").replace(Regex("/ep-\\d+$"), "")
                         
-                    if (href.isNotBlank()) {
-                        var path = if (href.startsWith("http")) href.substringAfter(domain) else href
-                        if (!path.startsWith("/")) path = "/$path"
-                        
-                        val animeHtml = client.newCall(GET("$domain$path", siteHeaders(domain)))
-                            .execute().body?.string().orEmpty()
-                        val animeDoc = Jsoup.parse(animeHtml, domain)
-                        val dataId = animeDoc.selectFirst("[data-id]")?.attr("data-id")
-                            ?: animeDoc.selectFirst("[data-tip]")?.attr("data-tip")
-                            ?: ""
-                        if (dataId.isNotBlank()) {
-                            return Triple(domain, path, dataId)
+                    if (rawHref.isNotBlank()) {
+                        // FIX: Use OkHttp to safely extract the path without string manipulation bugs
+                        val path = try {
+                            rawHref.toHttpUrl().encodedPath
+                        } catch (_: Exception) {
+                            // Fallback if it's a relative URL
+                            rawHref.substringAfter(domain).substringBefore("?")
                         }
-                        lastError = Exception("No data-id found at $path")
+                        
+                        if (path.startsWith("/watch/")) {
+                            val animeHtml = client.newCall(GET("$domain$path", siteHeaders(domain)))
+                                .execute().body?.string().orEmpty()
+                            val animeDoc = Jsoup.parse(animeHtml, domain)
+                            val dataId = animeDoc.selectFirst("[data-id]")?.attr("data-id")
+                                ?: animeDoc.selectFirst("[data-tip]")?.attr("data-tip")
+                                ?: ""
+                            if (dataId.isNotBlank()) {
+                                return Triple(domain, path, dataId)
+                            }
+                            lastError = Exception("No data-id found at $path")
+                        } else {
+                            lastError = Exception("Invalid path extracted: $path")
+                        }
                     } else {
                         lastError = Exception("Empty href")
                     }
