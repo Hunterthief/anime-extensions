@@ -123,7 +123,7 @@ class RapidCloudProvider(
         return try {
             val animeSlug = getAnimeId(title) ?: return emptyList()
             val embedUrl = getRapidCloudUrl(animeSlug, meta.epNum) ?: return emptyList()
-            val type = if (meta.isDub) "dub" else "sub"
+            val type = "sub"
             extractor.getVideosFromUrl(embedUrl, type, name)
         } catch (_: Exception) {
             emptyList()
