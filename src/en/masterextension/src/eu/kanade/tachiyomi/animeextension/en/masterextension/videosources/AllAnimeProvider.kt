@@ -23,6 +23,7 @@ import kotlinx.serialization.json.putJsonObject
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.security.MessageDigest
 import java.util.Locale
 import javax.crypto.Cipher
@@ -48,8 +49,8 @@ class AllAnimeProvider(
         private const val DECRYPT_KEY_TYPE = "AES"
         private const val DECRYPT_CIPHER_ALGO = "AES/GCM/NoPadding"
 
-        // Correct hash from the working repo
-        private const val STREAM_HASH = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec"
+        private const val STREAM_HASH =
+            "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec"
 
         private val XOR_KEYS = arrayOf(
             "allanimenews",
@@ -67,33 +68,35 @@ class AllAnimeProvider(
             "Si-Hls", "S-mp4", "Ac-Hls", "Uv-mp4", "Pn-Hls",
         )
 
-        private const val SEARCH_QUERY = """
+        private val SEARCH_QUERY = """
             query(
-                ${'$'}search: SearchInput,
-                ${'$'}limit: Int,
-                ${'$'}page: Int,
-                ${'$'}translationType: VaildTranslationTypeEnumType,
+                ${'$'}search: SearchInput
+                ${'$'}limit: Int
+                ${'$'}page: Int
+                ${'$'}translationType: VaildTranslationTypeEnumType
                 ${'$'}countryOrigin: VaildCountryOriginEnumType
             ) {
                 shows(
-                    search: ${'$'}search,
-                    limit: ${'$'}limit,
-                    page: ${'$'}page,
-                    translationType: ${'$'}translationType,
+                    search: ${'$'}search
+                    limit: ${'$'}limit
+                    page: ${'$'}page
+                    translationType: ${'$'}translationType
                     countryOrigin: ${'$'}countryOrigin
                 ) {
+                    pageInfo {
+                        total
+                    }
                     edges {
                         _id
                         name
+                        thumbnail
                         englishName
                         nativeName
-                        thumbnail
-                        availableEpisodes
-                        __typename
+                        slugTime
                     }
                 }
             }
-        """
+        """.trimIndent()
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
@@ -193,7 +196,7 @@ class AllAnimeProvider(
     // buildPost — matches working extension EXACTLY
     // =================================================================
 
-    private fun buildPost(data: kotlinx.serialization.json.JsonObject): okhttp3.Request {
+    private fun buildPost(data: kotlinx.serialization.json.JsonObject): Request {
         val payload = data.toJsonString().toJsonBody()
         val postHeaders = headers.newBuilder().apply {
             add("Accept", "*/*")
@@ -329,7 +332,7 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // CRYPTO
+    // CRYPTO: XOR source URL decryption
     // =================================================================
 
     private fun String.decryptSource(): String {
@@ -360,6 +363,10 @@ class AllAnimeProvider(
             ((parsedChunks[i] xor mask) and 0xFF).toChar()
         })
     }
+
+    // =================================================================
+    // CRYPTO: AES-GCM tobeparsed decryption
+    // =================================================================
 
     private fun decryptTobeparsed(base64Payload: String): String {
         val blob = Base64.decode(base64Payload, Base64.DEFAULT)
