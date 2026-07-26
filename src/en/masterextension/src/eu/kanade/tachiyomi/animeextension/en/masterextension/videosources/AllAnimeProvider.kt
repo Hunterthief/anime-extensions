@@ -1,9 +1,11 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
-import android.util.Base64
+import android.content.SharedPreferences
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.allanime.AaApiError
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.allanime.AllAnimeKeyManager
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
@@ -12,6 +14,7 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
+import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonBody
 import keiyoushi.utils.toJsonString
@@ -24,33 +27,29 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.security.MessageDigest
 import java.util.Locale
-import javax.crypto.Cipher
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 class AllAnimeProvider(
     private val client: OkHttpClient,
     private val headers: Headers,
+    private val preferences: SharedPreferences,
 ) : VideoProvider {
 
     override val name = "AllAnime"
 
     companion object {
-        private const val API_URL = "https://api.allanime.day"
-        private const val SITE_URL = "https://allmanga.to"
+        private const val API_URL = "https://api.mkissa.net"
+        private const val SITE_URL = "https://mkissa.to"
         private const val GRAPHQL_ORIGIN = "https://youtu-chan.com"
-        private const val FALLBACK_PLAYER_DOMAIN = "https://blog.allanime.day"
-
-        private const val DECRYPT_SECRET = "Xot36i3lK3"
-        private const val DECRYPT_TAG_LENGTH = 128
-        private const val DECRYPT_KEY_ALGO = "SHA-256"
-        private const val DECRYPT_KEY_TYPE = "AES"
-        private const val DECRYPT_CIPHER_ALGO = "AES/GCM/NoPadding"
-
+        private const val PLAYER_DOMAIN = "https://allanime.day"
         private const val STREAM_HASH =
-            "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec"
+            "f4662f4b7510b26795dd53ef824a0bf1740fbbc5d1273fab18222ac831bca8d0"
+        private const val MAX_KEY_ATTEMPTS = 3
+
+        private val INTERAL_HOSTER_NAMES = arrayOf(
+            "Default", "Ac", "Ak", "Kir", "Rab", "Luf-mp4",
+            "Si-Hls", "S-mp4", "Ac-Hls", "Uv-mp4", "Pn-Hls",
+        )
 
         private val XOR_KEYS = arrayOf(
             "allanimenews",
@@ -62,11 +61,6 @@ class AllAnimeProvider(
         private val XOR_MASKS = XOR_KEYS.map { key ->
             key.fold(0) { mask, ch -> mask xor ch.code }
         }.toIntArray()
-
-        private val INTERNAL_HOSTER_NAMES = arrayOf(
-            "Default", "Ac", "Ak", "Kir", "Rab", "Luf-mp4",
-            "Si-Hls", "S-mp4", "Ac-Hls", "Uv-mp4", "Pn-Hls",
-        )
 
         private val SEARCH_QUERY = """
             query(
@@ -101,10 +95,13 @@ class AllAnimeProvider(
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
-    // =================================================================
-    // DEBUG HELPER — returns a fake video with the message as quality
-    // =================================================================
+    private val keyManager by lazy {
+        AllAnimeKeyManager(client, headers, preferences, SITE_URL, STREAM_HASH)
+    }
 
+    // =================================================================
+    // DEBUG HELPER
+    // =================================================================
     private fun debugVideo(msg: String): List<Video> {
         return listOf(
             Video(
@@ -118,7 +115,6 @@ class AllAnimeProvider(
     // =================================================================
     // DTOs
     // =================================================================
-
     @Serializable
     private data class SearchResult(val data: SearchResultData) {
         @Serializable
@@ -164,9 +160,6 @@ class AllAnimeProvider(
     )
 
     @Serializable
-    private data class VersionResponse(val episodeIframeHead: String)
-
-    @Serializable
     private data class VideoLink(val links: List<Link>) {
         @Serializable
         data class Link(
@@ -182,9 +175,8 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // buildPost
+    // HEADERS
     // =================================================================
-
     private fun buildPost(data: kotlinx.serialization.json.JsonObject): Request {
         val payload = data.toJsonString().toJsonBody()
         val postHeaders = headers.newBuilder().apply {
@@ -199,9 +191,8 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // STEP 1: Search
+    // STEP 1: Search — match by name, not firstOrNull
     // =================================================================
-
     private suspend fun searchShow(title: String): String? {
         val data = buildJsonObject {
             putJsonObject("variables") {
@@ -222,70 +213,114 @@ class AllAnimeProvider(
             val responseBody = client.newCall(buildPost(data))
                 .awaitSuccess().bodyString()
             val result = responseBody.parseAs<SearchResult>()
-            result.data.shows.edges.firstOrNull()?.id
+            val edges = result.data.shows.edges
+
+            // Match by exact name (case-insensitive), then englishName, then first
+            val cleanTitle = title.trim()
+            edges.firstOrNull {
+                it.name.equals(cleanTitle, ignoreCase = true) ||
+                    it.englishName.equals(cleanTitle, ignoreCase = true)
+            }?.id
+                ?: edges.firstOrNull {
+                    it.name.contains(cleanTitle, ignoreCase = true) ||
+                        it.englishName?.contains(cleanTitle, ignoreCase = true) == true
+                }?.id
+                ?: edges.firstOrNull()?.id
         } catch (_: Exception) {
             null
         }
     }
 
     // =================================================================
-    // STEP 2: Get source URLs
+    // STEP 2: Get source URLs — with aaReq crypto
     // =================================================================
-
-    private suspend fun getSourceUrls(
+    private suspend fun fetchSourceUrls(
         showId: String,
         epNum: Int,
-        translationType: String,
     ): List<EpisodeResult.DataEpisode.Episode.SourceUrl> {
-        val variables = buildJsonObject {
-            put("showId", showId)
-            put("translationType", translationType)
-            put("episodeString", epNum.toString())
-        }
-        val extensions = buildJsonObject {
-            putJsonObject("persistedQuery") {
-                put("version", 1)
-                put("sha256Hash", STREAM_HASH)
+        var lastError: Throwable? = null
+        var maskHealed = false
+
+        repeat(MAX_KEY_ATTEMPTS) { attempt ->
+            val material = keyManager.material(forceRefresh = attempt > 0)
+
+            val variables = buildJsonObject {
+                put("showId", showId)
+                put("translationType", "sub")
+                put("episodeString", epNum.toString())
             }
+
+            val extensions = buildJsonObject {
+                putJsonObject("persistedQuery") {
+                    put("version", 1)
+                    put("sha256Hash", STREAM_HASH)
+                }
+                put("aaReq", keyManager.aaReq(material))
+            }
+
+            val url = API_URL.toHttpUrl().newBuilder().apply {
+                addPathSegment("api")
+                addQueryParameter("variables", variables.toJsonString())
+                addQueryParameter("extensions", extensions.toJsonString())
+            }.build()
+
+            val getHeaders = headers.newBuilder().apply {
+                set("Accept", "*/*")
+                set("Referer", "$SITE_URL/anime/")
+            }.build()
+
+            val responseBody = runCatching {
+                client.newCall(GET(url.toString(), getHeaders)).awaitSuccess().bodyString()
+            }.getOrElse {
+                lastError = it
+                null
+            }
+
+            if (responseBody != null) {
+                val tobeparsed = runCatching {
+                    responseBody.parseAs<EncryptedEpisodeResult>().data.tobeparsed
+                }.getOrNull()
+
+                when {
+                    !tobeparsed.isNullOrBlank() -> {
+                        runCatching {
+                            keyManager.decrypt(tobeparsed, material)
+                                ?.parseAs<DecryptedEpisodeResult>()
+                        }.getOrNull()
+                            ?.let { return it.episode?.sourceUrls.orEmpty() }
+                    }
+                    !keyManager.isCryptoError(responseBody) -> {
+                        runCatching {
+                            responseBody.parseAs<EpisodeResult>().data.episode?.sourceUrls.orEmpty()
+                        }.getOrNull()
+                            ?.let { return it }
+                    }
+                }
+
+                lastError = Exception("AllAnime stream encryption changed")
+
+                if (attempt >= 1 && !maskHealed && keyManager.isCryptoError(responseBody)) {
+                    maskHealed = keyManager.healMask()
+                }
+            }
+            keyManager.invalidate()
         }
 
-        val url = API_URL.toHttpUrl().newBuilder().apply {
-            addPathSegment("api")
-            addQueryParameter("variables", variables.toJsonString())
-            addQueryParameter("extensions", extensions.toJsonString())
-        }.build().toString()
-
-        val responseBody = client.newCall(GET(url, headers))
-            .awaitSuccess().bodyString()
-
-        val tobeparsed = runCatching {
-            responseBody.parseAs<EncryptedEpisodeResult>().data.tobeparsed
-        }.getOrNull()
-
-        return if (!tobeparsed.isNullOrBlank()) {
-            decryptTobeparsed(tobeparsed)
-                .parseAs<DecryptedEpisodeResult>()
-                .episode?.sourceUrls
-        } else {
-            responseBody.parseAs<EpisodeResult>()
-                .data.episode?.sourceUrls
-        } ?: emptyList()
+        throw lastError ?: Exception("AllAnime stream encryption changed")
     }
 
     // =================================================================
     // STEP 3: Extract from internal hosters
     // =================================================================
-
     private suspend fun extractFromInternal(
         sourceUrl: String,
         sourceName: String,
-        endPoint: String,
     ): List<Video> {
         val linkJson = client.newCall(
-            GET(endPoint + sourceUrl.replace("/clock?", "/clock.json?")),
+            GET(PLAYER_DOMAIN + sourceUrl.replace("/clock?", "/clock.json?")),
         ).awaitSuccess().parseAs<VideoLink>()
 
-        return linkJson.links.flatMap { link ->
+        return linkJson.links.parallelCatchingFlatMap { link ->
             val subtitles = link.subtitles?.map { sub ->
                 val label = sub.label?.let { " - $it" } ?: ""
                 Track(sub.src, Locale(sub.lang).displayLanguage + label)
@@ -304,8 +339,8 @@ class AllAnimeProvider(
                     val masterHeaders = headers.newBuilder()
                         .add("Accept", "*/*")
                         .add("Host", link.link.toHttpUrl().host)
-                        .add("Origin", endPoint)
-                        .add("Referer", "$endPoint/")
+                        .add("Origin", PLAYER_DOMAIN)
+                        .add("Referer", "$PLAYER_DOMAIN/")
                         .build()
                     playlistUtils.extractFromHls(
                         link.link,
@@ -321,9 +356,8 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // CRYPTO
+    // XOR DECRYPTION
     // =================================================================
-
     private fun String.decryptSource(): String {
         val (hexPayload, keyType) = when {
             startsWith("--") -> substring(2) to 3
@@ -333,11 +367,13 @@ class AllAnimeProvider(
             startsWith("#") -> substring(1) to 0
             else -> this to null
         }
+
         val parsedChunks = try {
             hexPayload.chunked(2).map { it.toInt(16) }
         } catch (_: NumberFormatException) {
             return this
         }
+
         if (keyType == null) {
             XOR_MASKS.forEach { mask ->
                 val decrypted = String(CharArray(parsedChunks.size) { i ->
@@ -347,85 +383,50 @@ class AllAnimeProvider(
             }
             return this
         }
+
         val mask = XOR_MASKS[keyType]
         return String(CharArray(parsedChunks.size) { i ->
             ((parsedChunks[i] xor mask) and 0xFF).toChar()
         })
     }
 
-    private fun decryptTobeparsed(base64Payload: String): String {
-        val blob = Base64.decode(base64Payload, Base64.DEFAULT)
-        if (blob.size < 13) return ""
-        val versionByte = blob[0].toInt() and 0xFF
-        val iv = blob.sliceArray(1 until 13)
-        val encryptedData = blob.sliceArray(13 until blob.size)
-        val keyBytes = MessageDigest.getInstance(DECRYPT_KEY_ALGO)
-            .digest("$DECRYPT_SECRET:v$versionByte".toByteArray(Charsets.UTF_8))
-        val cipher = Cipher.getInstance(DECRYPT_CIPHER_ALGO)
-        val gcmSpec = GCMParameterSpec(DECRYPT_TAG_LENGTH, iv)
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, DECRYPT_KEY_TYPE), gcmSpec)
-        return String(cipher.doFinal(encryptedData), Charsets.UTF_8)
-    }
-
-    // =================================================================
-    // HELPERS
-    // =================================================================
-
-    private suspend fun getIframeEndpoint(): String {
-        return runCatching {
-            client.newCall(GET("$SITE_URL/getVersion", headers))
-                .awaitSuccess()
-                .parseAs<VersionResponse>()
-                .episodeIframeHead
-        }.getOrDefault(FALLBACK_PLAYER_DOMAIN)
-    }
-
     // =================================================================
     // ENTRY POINT — DEBUG VERSION
     // =================================================================
-
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
         val title = anime.title.ifBlank { meta.title }
+        if (title.isBlank()) return debugVideo("title is blank")
 
-        // DEBUG: show what we received
-        if (title.isBlank()) return debugVideo("title is blank, anilistId=${meta.anilistId}")
-
-        // Step 1: Search
         val showId = try {
             searchShow(title)
         } catch (e: Exception) {
             return debugVideo("search threw: ${e.message}")
         }
-        if (showId == null) return debugVideo("search returned null for '$title'")
+        if (showId == null) return debugVideo("search null for '$title'")
 
-        // Step 2: Get sources
         val epNum = if (meta.epNum > 0) meta.epNum else 1
+
         val sourceUrls = try {
-            getSourceUrls(showId, epNum, "sub")
+            fetchSourceUrls(showId, epNum)
         } catch (e: Exception) {
-            return debugVideo("getSourceUrls threw: ${e.message}")
+            return debugVideo("fetchSourceUrls: ${e.message}")
         }
-        if (sourceUrls.isEmpty()) return debugVideo("no sourceUrls for showId=$showId ep=$epNum")
+        if (sourceUrls.isEmpty()) return debugVideo("no sourceUrls for $showId ep$epNum")
 
-        // Step 3: Get iframe endpoint
-        val iframeEndpoint = getIframeEndpoint()
-
-        // Step 4: Extract
         val allVideos = mutableListOf<Video>()
         val errors = mutableListOf<String>()
 
         sourceUrls.forEach { source ->
             try {
                 val videoUrl = source.sourceUrl.decryptSource()
-                val isInternal = videoUrl.startsWith("/apivtwo/") && INTERNAL_HOSTER_NAMES.any {
+                val isInternal = videoUrl.startsWith("/apivtwo/") && INTERAL_HOSTER_NAMES.any {
                     Regex("""\b${it.lowercase()}\b""").find(source.sourceName.lowercase()) != null
                 }
                 if (isInternal) {
-                    val videos = extractFromInternal(videoUrl, source.sourceName, iframeEndpoint)
-                    allVideos.addAll(videos)
+                    allVideos.addAll(extractFromInternal(videoUrl, source.sourceName))
                 } else {
-                    errors.add("skip:${source.sourceName}(not internal)")
+                    errors.add("skip:${source.sourceName}")
                 }
             } catch (e: Exception) {
                 errors.add("err:${source.sourceName}:${e.message}")
@@ -433,9 +434,8 @@ class AllAnimeProvider(
         }
 
         if (allVideos.isEmpty()) {
-            return debugVideo("extracted 0 videos. ${errors.take(3).joinToString(" | ")}")
+            return debugVideo("0 videos. ${errors.take(3).joinToString(" | ")}")
         }
-
         return allVideos
     }
 }
