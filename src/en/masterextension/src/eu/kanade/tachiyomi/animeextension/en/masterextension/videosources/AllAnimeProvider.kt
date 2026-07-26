@@ -47,8 +47,10 @@ class AllAnimeProvider(
         private const val DECRYPT_KEY_ALGO = "SHA-256"
         private const val DECRYPT_KEY_TYPE = "AES"
         private const val DECRYPT_CIPHER_ALGO = "AES/GCM/NoPadding"
-        
-        private const val STREAM_HASH = "f4662f4b7510b26795dd53ef824a0bf1740fbbc5d1273fab18222ac831bca8d0"
+
+        // Correct hash from the working repo
+        private const val STREAM_HASH =
+            "f4662f4b7510b26795dd53ef824a0bf1740fbbc5d1273fab18222ac831bca8d0"
 
         private val XOR_KEYS = arrayOf(
             "allanimenews",
@@ -96,15 +98,6 @@ class AllAnimeProvider(
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
-
-    private val postHeaders by lazy {
-        headers.newBuilder()
-            .set("Accept", "*/*")
-            .set("Origin", GRAPHQL_ORIGIN)
-            .set("Referer", "$GRAPHQL_ORIGIN/")
-            .set("Host", API_URL.toHttpUrl().host)
-            .build()
-    }
 
     // =================================================================
     // DTOs
@@ -198,7 +191,24 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // STEP 1: Search by title → get AllAnime internal ID
+    // buildPost — matches working extension EXACTLY
+    // =================================================================
+
+    private fun buildPost(data: kotlinx.serialization.json.JsonObject): okhttp3.Request {
+        val payload = data.toJsonString().toJsonBody()
+        val postHeaders = headers.newBuilder().apply {
+            add("Accept", "*/*")
+            add("Content-Length", payload.contentLength().toString())
+            add("Content-Type", payload.contentType().toString())
+            add("Host", API_URL.toHttpUrl().host)
+            add("Origin", GRAPHQL_ORIGIN)
+            add("Referer", "$GRAPHQL_ORIGIN/")
+        }.build()
+        return POST("$API_URL/api", headers = postHeaders, body = payload)
+    }
+
+    // =================================================================
+    // STEP 1: Search
     // =================================================================
 
     private suspend fun searchShow(title: String): String? {
@@ -206,10 +216,10 @@ class AllAnimeProvider(
             putJsonObject("variables") {
                 putJsonObject("search") {
                     put("query", title)
-                    put("allowAdult", false)
-                    put("allowUnknown", false)
+                    put("allowAdult", true)
+                    put("allowUnknown", true)
                 }
-                put("limit", 10)
+                put("limit", 26)
                 put("page", 1)
                 put("translationType", "sub")
                 put("countryOrigin", "ALL")
@@ -218,10 +228,8 @@ class AllAnimeProvider(
         }
 
         return try {
-            val payload = data.toJsonString().toJsonBody()
-            val responseBody = client.newCall(
-                POST("$API_URL/api", headers = postHeaders, body = payload),
-            ).awaitSuccess().bodyString()
+            val responseBody = client.newCall(buildPost(data))
+                .awaitSuccess().bodyString()
             val result = responseBody.parseAs<SearchResult>()
             result.data.shows.edges.firstOrNull()?.id
         } catch (_: Exception) {
@@ -230,7 +238,7 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // STEP 2: Get episode source URLs (with decryption)
+    // STEP 2: Get source URLs
     // =================================================================
 
     private suspend fun getSourceUrls(
@@ -274,7 +282,7 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // STEP 3: Extract videos from internal hosters
+    // STEP 3: Extract from internal hosters
     // =================================================================
 
     private suspend fun extractFromInternal(
@@ -312,7 +320,7 @@ class AllAnimeProvider(
                         link.link,
                         masterHeaders = masterHeaders,
                         videoHeaders = masterHeaders,
-                        videoNameGen = { quality -> "$name - $quality - ${link.resolutionStr} ($sourceName)" },
+                        videoNameGen = { q -> "$name - $q - ${link.resolutionStr} ($sourceName)" },
                         subtitleList = subtitles,
                     )
                 }
@@ -322,7 +330,7 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // CRYPTO: XOR source URL decryption
+    // CRYPTO
     // =================================================================
 
     private fun String.decryptSource(): String {
@@ -353,10 +361,6 @@ class AllAnimeProvider(
             ((parsedChunks[i] xor mask) and 0xFF).toChar()
         })
     }
-
-    // =================================================================
-    // CRYPTO: AES-GCM tobeparsed decryption
-    // =================================================================
 
     private fun decryptTobeparsed(base64Payload: String): String {
         val blob = Base64.decode(base64Payload, Base64.DEFAULT)
@@ -396,9 +400,7 @@ class AllAnimeProvider(
 
         return try {
             val showId = searchShow(title) ?: return emptyList()
-
-            val translationType = "sub"
-            val sourceUrls = getSourceUrls(showId, meta.epNum, translationType)
+            val sourceUrls = getSourceUrls(showId, meta.epNum, "sub")
             if (sourceUrls.isEmpty()) return emptyList()
 
             val iframeEndpoint = getIframeEndpoint()
@@ -407,7 +409,8 @@ class AllAnimeProvider(
                 .filter { source ->
                     val videoUrl = source.sourceUrl.decryptSource()
                     videoUrl.startsWith("/apivtwo/") && INTERNAL_HOSTER_NAMES.any {
-                        Regex("""\b${it.lowercase()}\b""").find(source.sourceName.lowercase()) != null
+                        Regex("""\b${it.lowercase()}\b""")
+                            .find(source.sourceName.lowercase()) != null
                     }
                 }
                 .flatMap { source ->
