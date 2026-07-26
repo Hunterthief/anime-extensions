@@ -47,8 +47,8 @@ class AllAnimeProvider(
         private const val DECRYPT_KEY_ALGO = "SHA-256"
         private const val DECRYPT_KEY_TYPE = "AES"
         private const val DECRYPT_CIPHER_ALGO = "AES/GCM/NoPadding"
-
-        private const val STREAM_HASH = "64a82e22a0e8e254e152e457e42a4a2e3535336a65646a6365646a6365646a63"
+        
+        private const val STREAM_HASH = "f4662f4b7510b26795dd53ef824a0bf1740fbbc5d1273fab18222ac831bca8d0"
 
         private val XOR_KEYS = arrayOf(
             "allanimenews",
