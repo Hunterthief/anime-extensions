@@ -47,7 +47,7 @@ class GogoProvider(
     private fun siteHeaders(baseUrl: String) = headers.newBuilder()
         .set("Referer", "$baseUrl/")
         .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .removeHeader("Origin")
+        .removeAll("Origin")
         .build()
 
     private suspend fun searchAnime(title: String): Pair<String, String> {
