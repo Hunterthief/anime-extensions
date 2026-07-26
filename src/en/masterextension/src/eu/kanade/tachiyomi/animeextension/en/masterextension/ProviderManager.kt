@@ -6,10 +6,8 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniDapProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnikageProvider
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniWaveProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniNekoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeKizzProvider
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.GogoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AllAnimeProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
@@ -34,9 +32,6 @@ class ProviderManager(
             "anikage"    to AnikageProvider(client, headers),
             "anineko"    to AniNekoProvider(client, headers),
             "animekizz"  to AnimeKizzProvider(client, headers),
-            // Encrypted sources (slower, larger libraries)
-            "aniwave"    to AniWaveProvider(client, headers),
-            "gogo"       to GogoProvider(client, headers),
             "allanime"   to AllAnimeProvider(client, headers, preferences),
         )
     }
