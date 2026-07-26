@@ -29,20 +29,12 @@ class AniDapProvider(
     companion object {
         private const val SITE_URL = "https://anidap.lol"
         private const val API_URL = "https://chad.anidap.lol"
-        private const val CDN_URL = "https://hawk.aniwatchtv.site/media"
 
         private val PROVIDERS = listOf("mimi", "kiwi", "sora")
         private val TYPES = listOf("sub", "dub")
 
-        // Matches slug in React Router stream data (handles escaped quotes)
-        // Looks for: id\" , \" liar-liar-nnm8r \" , \" anilistId
-        // Or:        id"  , "  liar-liar-nnm8r "  , "  anilistId
         private val SLUG_REGEX = Regex("""id\\?",\\?"([a-z0-9]+-[a-z0-9]+-[a-z0-9]{5,})\\?",\\?"anilistId""")
-
-        // Fallback: just find the slug pattern after "id" with any separators
         private val SLUG_REGEX_ALT = Regex("""id[^a-z]{1,10}([a-z]+-[a-z]+-[a-z0-9]{5,})""")
-
-        // Last resort: any slug-like string in the page
         private val SLUG_REGEX_LAST = Regex("""\b([a-z]+-[a-z]+-[a-z0-9]{5,})\b""")
     }
 
@@ -118,24 +110,21 @@ class AniDapProvider(
             return null
         }
 
-        // Try each regex in order of specificity
         SLUG_REGEX.find(html)?.groupValues?.get(1)?.let { return it }
         SLUG_REGEX_ALT.find(html)?.groupValues?.get(1)?.let { return it }
 
-        // Last resort: find any slug pattern, but filter out known non-slugs
         val candidates = SLUG_REGEX_LAST.findAll(html)
             .map { it.groupValues[1] }
             .filter { slug ->
-                // Exclude CSS classes, URLs, and other false positives
                 !slug.contains("bg") &&
-                !slug.contains("http") &&
-                !slug.contains("flex") &&
-                !slug.contains("grid") &&
-                !slug.contains("text") &&
-                !slug.contains("border") &&
-                !slug.contains("rounded") &&
-                !slug.contains("hover") &&
-                slug.length in 10..40
+                    !slug.contains("http") &&
+                    !slug.contains("flex") &&
+                    !slug.contains("grid") &&
+                    !slug.contains("text") &&
+                    !slug.contains("border") &&
+                    !slug.contains("rounded") &&
+                    !slug.contains("hover") &&
+                    slug.length in 10..40
             }
             .distinct()
 
@@ -182,13 +171,6 @@ class AniDapProvider(
 
         if (!rawUrl.startsWith("http")) return emptyList()
 
-        // FIX: Transform vivibebe.site → hawk.aniwatchtv.site CDN
-        // API returns: https://vivibebe.site/public/stream/$id/master.m3u8
-        // Actual CDN:  https://hawk.aniwatchtv.site/media/$id/master.m3u8
-        val m3u8Url = rawUrl
-            .replace("https://vivibebe.site/public/stream/", "$CDN_URL/")
-            .replace("https://vivibebe.site/", "$CDN_URL/")
-
         val typeLabel = if (type == "dub") "Dub" else "Sub"
 
         val vidHeaders = headers.newBuilder()
@@ -201,18 +183,48 @@ class AniDapProvider(
             ?.map { Track(it.url, it.label.ifBlank { it.lang }) }
             .orEmpty()
 
-        return playlistUtils.extractFromHls(
-            m3u8Url,
-            videoNameGen = { quality -> "$name $providerId $typeLabel $quality" },
-            subtitleList = subtitles,
-            referer = "$SITE_URL/",
-            masterHeaders = vidHeaders,
-            videoHeaders = vidHeaders,
-        )
+        // Build candidate URLs:
+        //   1. Original vivibebe.site URL (may redirect or work directly)
+        //   2. Transformed hawk.aniwatchtv.site CDN URL (what the browser uses)
+        val cdnUrl = rawUrl
+            .replace("https://vivibebe.site/public/stream/", "https://hawk.aniwatchtv.site/media/")
+            .replace("https://vivibebe.site/", "https://hawk.aniwatchtv.site/media/")
+
+        val urlsToTry = listOf(rawUrl, cdnUrl).distinct()
+
+        // Strategy A: PlaylistUtils (gives 360p / 720p / 1080p as separate choices)
+        for (m3u8Url in urlsToTry) {
+            try {
+                val videos = playlistUtils.extractFromHls(
+                    m3u8Url,
+                    videoNameGen = { quality -> "$name $providerId $typeLabel $quality" },
+                    subtitleList = subtitles,
+                    referer = "$SITE_URL/",
+                    masterHeaders = vidHeaders,
+                    videoHeaders = vidHeaders,
+                )
+                if (videos.isNotEmpty()) return videos
+            } catch (_: Exception) {
+                continue
+            }
+        }
+
+        // Strategy B: Pass master m3u8 directly — ExoPlayer handles adaptive
+        // streaming internally and resolves all relative URLs itself.
+        // This is the fallback when PlaylistUtils variant resolution fails.
+        return urlsToTry.map { m3u8Url ->
+            Video(
+                url = m3u8Url,
+                quality = "$name $providerId $typeLabel Auto",
+                videoUrl = m3u8Url,
+                headers = vidHeaders,
+                subtitleTracks = subtitles,
+            )
+        }
     }
 
     // =================================================================
-    // ENTRY POINT
+    // ENTRY POINT — collects from ALL providers and types
     // =================================================================
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
@@ -221,16 +233,21 @@ class AniDapProvider(
 
         val slug = resolveSlug(meta.anilistId, meta.epNum) ?: return emptyList()
 
+        val allVideos = mutableListOf<Video>()
+
         for (type in TYPES) {
             for (provider in PROVIDERS) {
-                val response = fetchSources(slug, meta.epNum, type, provider) ?: continue
-                if (response.sources.isEmpty()) continue
+                try {
+                    val response = fetchSources(slug, meta.epNum, type, provider) ?: continue
+                    if (response.sources.isEmpty()) continue
 
-                val videos = extractVideos(response, provider, type)
-                if (videos.isNotEmpty()) return videos
+                    allVideos.addAll(extractVideos(response, provider, type))
+                } catch (_: Exception) {
+                    continue
+                }
             }
         }
 
-        return emptyList()
+        return allVideos.distinctBy { it.videoUrl }
     }
 }
