@@ -29,19 +29,25 @@ class AniDapProvider(
     companion object {
         private const val SITE_URL = "https://anidap.lol"
         private const val API_URL = "https://chad.anidap.lol"
+        private const val CDN_URL = "https://hawk.aniwatchtv.site/media"
 
         private val PROVIDERS = listOf("mimi", "kiwi", "sora")
         private val TYPES = listOf("sub", "dub")
 
-        // Matches: "id","liar-liar-nnm8r","anilistId"
-        private val SLUG_REGEX = Regex(""""id","([a-z0-9]+-[a-z0-9]+-[a-z0-9]{5,})","anilistId"""")
-        // Fallback: any slug-like string near "id"
-        private val SLUG_REGEX_ALT = Regex(""""id","([a-z]+-[a-z]+-[a-z0-9]{5,})"""")
+        // Matches slug in React Router stream data (handles escaped quotes)
+        // Looks for: id\" , \" liar-liar-nnm8r \" , \" anilistId
+        // Or:        id"  , "  liar-liar-nnm8r "  , "  anilistId
+        private val SLUG_REGEX = Regex("""id\\?",\\?"([a-z0-9]+-[a-z0-9]+-[a-z0-9]{5,})\\?",\\?"anilistId""")
+
+        // Fallback: just find the slug pattern after "id" with any separators
+        private val SLUG_REGEX_ALT = Regex("""id[^a-z]{1,10}([a-z]+-[a-z]+-[a-z0-9]{5,})""")
+
+        // Last resort: any slug-like string in the page
+        private val SLUG_REGEX_LAST = Regex("""\b([a-z]+-[a-z]+-[a-z0-9]{5,})\b""")
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
-    // Cookie jar captures the _amx_id session token
     private val cookieJar = DapCookieJar()
     private val cookieClient by lazy {
         client.newBuilder().cookieJar(cookieJar).build()
@@ -76,10 +82,6 @@ class AniDapProvider(
             .build()
     }
 
-    // =================================================================
-    // DTOs
-    // =================================================================
-
     @Serializable
     private data class SourcesResponse(
         val sources: List<SourceEntry> = emptyList(),
@@ -104,7 +106,6 @@ class AniDapProvider(
 
     // =================================================================
     // STEP 1: Fetch watch page → extract slug
-    // Also initializes the _amx_id session cookie
     // =================================================================
 
     private suspend fun resolveSlug(anilistId: Int, epNum: Int): String? {
@@ -117,14 +118,32 @@ class AniDapProvider(
             return null
         }
 
+        // Try each regex in order of specificity
         SLUG_REGEX.find(html)?.groupValues?.get(1)?.let { return it }
         SLUG_REGEX_ALT.find(html)?.groupValues?.get(1)?.let { return it }
 
-        return null
+        // Last resort: find any slug pattern, but filter out known non-slugs
+        val candidates = SLUG_REGEX_LAST.findAll(html)
+            .map { it.groupValues[1] }
+            .filter { slug ->
+                // Exclude CSS classes, URLs, and other false positives
+                !slug.contains("bg") &&
+                !slug.contains("http") &&
+                !slug.contains("flex") &&
+                !slug.contains("grid") &&
+                !slug.contains("text") &&
+                !slug.contains("border") &&
+                !slug.contains("rounded") &&
+                !slug.contains("hover") &&
+                slug.length in 10..40
+            }
+            .distinct()
+
+        return candidates.firstOrNull()
     }
 
     // =================================================================
-    // STEP 2: Call sources API → get m3u8 URL
+    // STEP 2: Call sources API
     // =================================================================
 
     private suspend fun fetchSources(
@@ -150,7 +169,7 @@ class AniDapProvider(
     }
 
     // =================================================================
-    // STEP 3: m3u8 → Videos via PlaylistUtils
+    // STEP 3: m3u8 → Videos
     // =================================================================
 
     private suspend fun extractVideos(
@@ -158,14 +177,20 @@ class AniDapProvider(
         providerId: String,
         type: String
     ): List<Video> {
-        val m3u8Url = response.sources.firstOrNull { it.url.isNotBlank() }?.url
+        val rawUrl = response.sources.firstOrNull { it.url.isNotBlank() }?.url
             ?: return emptyList()
 
-        if (!m3u8Url.startsWith("http")) return emptyList()
+        if (!rawUrl.startsWith("http")) return emptyList()
+
+        // FIX: Transform vivibebe.site → hawk.aniwatchtv.site CDN
+        // API returns: https://vivibebe.site/public/stream/$id/master.m3u8
+        // Actual CDN:  https://hawk.aniwatchtv.site/media/$id/master.m3u8
+        val m3u8Url = rawUrl
+            .replace("https://vivibebe.site/public/stream/", "$CDN_URL/")
+            .replace("https://vivibebe.site/", "$CDN_URL/")
 
         val typeLabel = if (type == "dub") "Dub" else "Sub"
 
-        // Use anidap.lol as referer (matches what the browser sends)
         val vidHeaders = headers.newBuilder()
             .set("Referer", "$SITE_URL/")
             .set("Origin", SITE_URL)
@@ -194,10 +219,8 @@ class AniDapProvider(
         val meta = EpisodeMeta.from(episode)
         if (meta.anilistId == 0) return emptyList()
 
-        // Step 1: Get slug (also sets session cookie)
         val slug = resolveSlug(meta.anilistId, meta.epNum) ?: return emptyList()
 
-        // Step 2+3: Try each type and provider until we get videos
         for (type in TYPES) {
             for (provider in PROVIDERS) {
                 val response = fetchSources(slug, meta.epNum, type, provider) ?: continue
