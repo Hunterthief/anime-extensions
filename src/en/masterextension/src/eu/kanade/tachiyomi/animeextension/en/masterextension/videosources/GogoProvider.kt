@@ -8,8 +8,6 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.awaitSuccess
-import keiyoushi.utils.bodyString
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -54,19 +52,22 @@ class GogoProvider(
         var lastError: Throwable? = null
         for (domain in DOMAINS) {
             try {
-                // FIX: Use OkHttp's URL builder to properly encode spaces as %20
                 val url = "$domain/search.html".toHttpUrl().newBuilder()
                     .addQueryParameter("keyword", title)
                     .build().toString()
 
-                val html = client.newCall(GET(url, siteHeaders(domain)))
-                    .awaitSuccess().bodyString()
+                // FIX: Capture HTTP code and body snippet for debugging
+                val response = client.newCall(GET(url, siteHeaders(domain))).execute()
+                val html = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    lastError = Exception("HTTP ${response.code} - ${html.take(100)}")
+                    continue
+                }
 
                 val doc = Jsoup.parse(html, domain)
 
-                // FIX: Match reference selectors exactly
-                val firstResult = doc.selectFirst("ul.items li:has(div.img) a[href*=/category/]")
-                    ?: doc.selectFirst("ul.items li a[href*=/category/]")
+                val firstResult = doc.selectFirst("ul.items li p.name a")
+                    ?: doc.selectFirst("div.last_recent ul li p.name a")
                     ?: doc.selectFirst("a[href*=/category/]")
 
                 if (firstResult != null) {
@@ -80,7 +81,7 @@ class GogoProvider(
                         return domain to fullUrl
                     }
                 }
-                lastError = Exception("No results in HTML")
+                lastError = Exception("No results (body: ${html.take(100)})")
             } catch (e: Exception) {
                 lastError = e
             }
@@ -95,8 +96,9 @@ class GogoProvider(
     ): List<String> {
         val epUrl = categoryUrl.replace("/category/", "/") + "-episode-$epNum"
 
-        val html = client.newCall(GET(epUrl, siteHeaders(baseUrl)))
-            .awaitSuccess().bodyString()
+        val response = client.newCall(GET(epUrl, siteHeaders(baseUrl))).execute()
+        val html = response.body?.string().orEmpty()
+        if (!response.isSuccessful) throw Exception("HTTP ${response.code} - ${html.take(100)}")
 
         val doc = Jsoup.parse(html, baseUrl)
         val serverUrls = mutableListOf<String>()
