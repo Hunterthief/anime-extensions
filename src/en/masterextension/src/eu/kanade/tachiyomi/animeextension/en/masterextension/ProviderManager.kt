@@ -37,7 +37,7 @@ class ProviderManager(
             "anineko"    to AniNekoProvider(client, headers),
             "animekizz"  to AnimeKizzProvider(client, headers),
             // Encrypted sources (slower, larger libraries)
-            //"aniwave"    to AniWaveProvider(client, headers),
+            "aniwave"    to AniWaveProvider(client, headers),
             //"gogo"       to GogoProvider(client, headers),
             "allanime"   to AllAnimeProvider(client, headers),
             //"rapidcloud" to RapidCloudProvider(client, headers, preferences),
