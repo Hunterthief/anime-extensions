@@ -1,9 +1,9 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension
 
-import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.MultiSelectListPreference
 import androidx.preference.PreferenceScreen
+import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -11,7 +11,6 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
-import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.graphQLPost
 import keiyoushi.utils.parseGraphQLAs
@@ -19,12 +18,14 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.TextNode
 import java.net.URLEncoder
 import java.util.Calendar
+import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
 class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
@@ -35,7 +36,37 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override val supportsLatest = true
 
     private val preferences by getPreferencesLazy()
+
+    // =================================================================
+    // CLIENT — CloudflareInterceptor wired as network interceptor
+    // =================================================================
+
+    override val client: OkHttpClient by lazy {
+        network.client.newBuilder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .addNetworkInterceptor(
+                CloudflareInterceptor(
+                    client = network.client,
+                    userAgent = USER_AGENT,
+                ),
+            )
+            .build()
+    }
+
+    override fun headersBuilder() = super.headersBuilder()
+        .set("User-Agent", USER_AGENT)
+
     private val providerManager by lazy { ProviderManager(client, headers, preferences) }
+
+    companion object {
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    }
+
+    // =================================================================
+    // SEASON HELPER
+    // =================================================================
 
     private fun getCurrentSeason(): String {
         val month = Calendar.getInstance().get(Calendar.MONTH) + 1
@@ -47,6 +78,10 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             else -> "WINTER"
         }
     }
+
+    // =================================================================
+    // POPULAR
+    // =================================================================
 
     override fun popularAnimeRequest(page: Int): Request {
         val year = Calendar.getInstance().get(Calendar.YEAR)
@@ -73,6 +108,10 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         return AnimesPage(animes, animes.isNotEmpty())
     }
 
+    // =================================================================
+    // LATEST
+    // =================================================================
+
     override fun latestUpdatesRequest(page: Int): Request {
         val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC) { id title { romaji english } coverImage { large } } } }"
         val variables = buildJsonObject { put("page", page) }
@@ -80,6 +119,10 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
+
+    // =================================================================
+    // SEARCH
+    // =================================================================
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         val genreFilter = filters.find { it is MasterFilters.GenreFilter } as? MasterFilters.GenreFilter
@@ -110,6 +153,10 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
+    // =================================================================
+    // DETAILS
+    // =================================================================
+
     override fun animeDetailsRequest(anime: SAnime): Request {
         val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes duration status season seasonYear format genres averageScore studios { nodes { name isAnimationStudio } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
         val variables = buildJsonObject { put("id", anime.url.toInt()) }
@@ -133,7 +180,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 "No upcoming episodes scheduled."
             }
 
-            // Fetch rich details from MyAnimeList
             val malDetails = media?.idMal?.let { providerManager.fetchMalAnimeDetails(it) }
 
             val synopsis = malDetails?.synopsis?.takeIf { it.isNotBlank() }
@@ -171,7 +217,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 "**Status:** $statusValue",
                 infoLine,
                 genreValue?.takeIf { it.isNotBlank() }?.let { "**Genres:** $it" },
-                ratingLine
+                ratingLine,
             )
 
             status = when (media?.status) {
@@ -187,6 +233,10 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             artist = producers
         }
     }
+
+    // =================================================================
+    // EPISODES
+    // =================================================================
 
     override fun episodeListRequest(anime: SAnime): Request = animeDetailsRequest(anime)
 
@@ -211,23 +261,18 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         val episodes = mutableListOf<SEpisode>()
 
-        // Fetch MAL episode titles/dates (AllAnime showId is NO LONGER fetched here —
-        // each provider resolves its own ID when getVideoList is called)
         var malEpisodes: List<MalEpisode> = emptyList()
-
         try {
             if (malId != null) {
                 val (mList, _, _) = providerManager.fetchMalEpisodes(malId)
                 malEpisodes = mList
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Ignore
         }
 
         val malEpMap = malEpisodes.associateBy { it.number }
 
-        // URL-encode the title so it survives the slash-delimited URL format.
-        // Episode URL format: $anilistId/$malId/$epNum/$urlEncodedTitle
         val encodedTitle = try {
             URLEncoder.encode(titleToEncode, "UTF-8")
         } catch (_: Exception) {
@@ -243,7 +288,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
                 name = "Ep. $i: $titleStr"
                 episode_number = i.toFloat()
                 date_upload = malEp?.date ?: 0L
-                scanlator = "" // Explicitly empty so no text shows next to the date
+                scanlator = ""
             })
         }
 
@@ -255,14 +300,14 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     // =================================================================
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-    val meta = EpisodeMeta.from(episode)
+        val meta = EpisodeMeta.from(episode)
 
-    val anime = SAnime.create().apply {
-        url = meta.anilistId.toString()
-        title = meta.title
-    }
+        val anime = SAnime.create().apply {
+            url = meta.anilistId.toString()
+            title = meta.title
+        }
 
-    return providerManager.fetchAllVideos(anime, episode)
+        return providerManager.fetchAllVideos(anime, episode)
     }
 
     override fun videoListParse(response: Response): List<Video> {
@@ -274,32 +319,33 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     // =================================================================
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        val providerKeys = providerManager.providerDisplayNames.keys.toTypedArray()
+        val providerNames = providerManager.providerDisplayNames.values.toTypedArray()
 
-    val providerKeys = providerManager.providerDisplayNames.keys.toTypedArray()
-    val providerNames = providerManager.providerDisplayNames.values.toTypedArray()
+        MultiSelectListPreference(screen.context).apply {
+            key = "enabled_providers"
+            title = "Streaming Sources"
+            entries = providerNames
+            entryValues = providerKeys
+            summary = "Select which sources to fetch videos from.\nSelected: %s"
+            setDefaultValue(providerManager.defaultProviderKeys)
+        }.also { screen.addPreference(it) }
 
-    MultiSelectListPreference(screen.context).apply {
-        key = "enabled_providers"
-        title = "Streaming Sources"
-        entries = providerNames
-        entryValues = providerKeys
-        summary = "Select which sources to fetch videos from.\nSelected: %s"
-        setDefaultValue(providerManager.defaultProviderKeys)
-    }.also { screen.addPreference(it) }
-
-    ListPreference(screen.context).apply {
-        key = "preferred_sub_type"
-        title = "Preferred Subtitle Type"
-        entries = arrayOf("Sub", "Dub")
-        entryValues = arrayOf("sub", "dub")
-        summary = "Used for sorting video results.\n%s"
-        setDefaultValue("sub")
-    }.also { screen.addPreference(it) }
+        ListPreference(screen.context).apply {
+            key = "preferred_sub_type"
+            title = "Preferred Subtitle Type"
+            entries = arrayOf("Sub", "Dub")
+            entryValues = arrayOf("sub", "dub")
+            summary = "Used for sorting video results.\n%s"
+            setDefaultValue("sub")
+        }.also { screen.addPreference(it) }
     }
-    
+
     override fun getFilterList(): AnimeFilterList = MasterFilters.filterList
 
-    // --- DESCRIPTION HELPER FUNCTIONS ---
+    // =================================================================
+    // DESCRIPTION HELPERS
+    // =================================================================
 
     private fun String.capitalizeFirst(): String {
         if (this.isEmpty()) return this
@@ -361,7 +407,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
     private fun episodesText(value: Any?): String? {
         val text = value?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: return null
-
         return if (text.all { it.isDigit() }) {
             if (text == "1") "1 episode" else "$text episodes"
         } else {
@@ -371,7 +416,6 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
     private fun durationText(value: Any?): String? {
         val text = value?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: return null
-
         return if (text.all { it.isDigit() }) {
             "$text min"
         } else {
@@ -382,13 +426,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     private fun starRatingLine(score: String?): String {
         val raw = score?.trim().orEmpty()
 
-        if (raw.isBlank()) {
-            return "☆☆☆☆☆ N/A"
-        }
-
-        if (raw.contains("★") || raw.contains("☆")) {
-            return raw
-        }
+        if (raw.isBlank()) return "☆☆☆☆☆ N/A"
+        if (raw.contains("★") || raw.contains("☆")) return raw
 
         val numberMatch = Regex("\\d+(?:\\.\\d+)?").find(raw) ?: return "☆☆☆☆☆ $raw"
         val numberString = numberMatch.value
@@ -411,11 +450,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
         val starBar = "★".repeat(fullStars) + "☆".repeat(emptyStars)
 
-        val displayScore = if (raw.contains("%")) {
-            "$numberString%"
-        } else {
-            numberString
-        }
+        val displayScore = if (raw.contains("%")) "$numberString%" else numberString
 
         return "$starBar $displayScore"
     }
