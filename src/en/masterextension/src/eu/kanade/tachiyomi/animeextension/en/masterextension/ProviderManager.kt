@@ -39,7 +39,7 @@ class ProviderManager(
             // Encrypted sources (slower, larger libraries)
             "aniwave"    to AniWaveProvider(client, headers),
             //"gogo"       to GogoProvider(client, headers),
-            "allanime"   to AllAnimeProvider(client, headers),
+            "allanime"   to AllAnimeProvider(client, headers, preferences),
             //"rapidcloud" to RapidCloudProvider(client, headers, preferences),
         )
     }
