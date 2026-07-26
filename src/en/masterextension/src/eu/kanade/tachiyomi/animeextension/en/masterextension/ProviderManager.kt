@@ -12,7 +12,6 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeK
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.MegaCloudProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.GogoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AllAnimeProvider
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.RapidCloudProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
