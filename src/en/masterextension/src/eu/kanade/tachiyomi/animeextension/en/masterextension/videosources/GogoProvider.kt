@@ -14,6 +14,7 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
+import java.net.URLEncoder
 
 class GogoProvider(
     private val client: OkHttpClient,
@@ -25,8 +26,8 @@ class GogoProvider(
     companion object {
         private val DOMAINS = listOf(
             "https://anitaku.to",
+            "https://gogoanime3.co",
             "https://anitaku.bz",
-            "https://gogoanimehd.to",
         )
     }
 
@@ -43,20 +44,20 @@ class GogoProvider(
         )
     }
 
-    // FIX: Override AniList Origin/Accept headers so the site doesn't block us
+    // FIX: Add User-Agent and remove AniList Origin/Accept headers
     private fun siteHeaders(baseUrl: String) = headers.newBuilder()
         .set("Referer", "$baseUrl/")
         .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
         .removeAll("Origin")
         .build()
 
     private suspend fun searchAnime(title: String): Pair<String, String> {
         var lastError: Throwable? = null
+        val encodedTitle = URLEncoder.encode(title, "utf-8")
         for (domain in DOMAINS) {
             try {
-                val url = "$domain/search.html".toHttpUrl().newBuilder()
-                    .addQueryParameter("keyword", title)
-                    .build().toString()
+                val url = "$domain/search.html?keyword=$encodedTitle"
 
                 val html = client.newCall(GET(url, siteHeaders(domain)))
                     .awaitSuccess().bodyString()
