@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
-import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
 import eu.kanade.tachiyomi.animesource.model.SAnime
@@ -26,8 +25,6 @@ class AniNekoProvider(
         private const val BASE_URL = "https://anineko.to"
     }
 
-    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
-
     private val nekoHeaders by lazy {
         headers.newBuilder()
             .set("Referer", "$BASE_URL/")
@@ -40,7 +37,6 @@ class AniNekoProvider(
     // =================================================================
 
     private suspend fun searchSlug(title: String): String? {
-        // Try constructing slug directly (fastest path)
         val directSlug = title.lowercase()
             .replace(Regex("[^a-z0-9\\s-]"), "")
             .replace(Regex("\\s+"), "-")
@@ -48,7 +44,6 @@ class AniNekoProvider(
 
         if (verifySlug(directSlug)) return directSlug
 
-        // Fallback: search the site
         val titlesToTry = listOf(
             title,
             title.replace(Regex("[,;:!?]"), "").trim(),
@@ -117,7 +112,6 @@ class AniNekoProvider(
                 val serverName = btn.text().trim().substringBefore("\n").trim()
 
                 if (dataVideo.isNotBlank()) {
-                    // Extract subtitle URL from query params
                     val subtitleUrl = when {
                         dataVideo.contains("sub=") ->
                             dataVideo.substringAfter("sub=").substringBefore("&").ifBlank { null }
@@ -137,7 +131,7 @@ class AniNekoProvider(
     }
 
     // =================================================================
-    // STEP 3: Get m3u8 URL (direct construction or player page fetch)
+    // STEP 3: Get m3u8 URL
     // =================================================================
 
     private suspend fun getM3u8(source: ServerSource): Pair<String, Headers>? {
@@ -145,21 +139,17 @@ class AniNekoProvider(
         val cleanUrl = dataVideo.substringBefore("?")
 
         return when {
-            // ─── vivibebe.site (HD-1): use hawk.aniwatchtv.site CDN ───
-            // Same stream as AniDap kiwi. vivibebe.site doesn't play in ExoPlayer,
-            // but hawk.aniwatchtv.site does (access-control-allow-origin: *).
+            // ─── vivibebe.site (HD-1): direct m3u8 on same domain ───
             cleanUrl.contains("vivibebe.site") -> {
                 val id = cleanUrl.substringAfter("vivibebe.site/").trim('/')
-                val m3u8 = "https://hawk.aniwatchtv.site/media/$id/master.m3u8"
+                val m3u8 = "https://vivibebe.site/public/stream/$id/master.m3u8"
                 val vidHeaders = headers.newBuilder()
-                    .set("Referer", "https://anidap.lol/")
-                    .set("Origin", "https://anidap.lol")
+                    .set("Referer", cleanUrl)
                     .build()
                 Pair(m3u8, vidHeaders)
             }
 
-            // ─── bibiemb.xyz (HD-2): direct construction via workers.dev CDN ───
-            // access-control-allow-origin: * and absolute variant URLs in m3u8.
+            // ─── bibiemb.xyz (HD-2): workers.dev CDN ───
             cleanUrl.contains("bibiemb.xyz") -> {
                 val id = cleanUrl.substringAfter("bibiemb.xyz/").trim('/')
                 val m3u8 = "https://morning-credit-3bcc.vibevibe.workers.dev/$id/master.m3u8"
@@ -170,8 +160,7 @@ class AniNekoProvider(
                 Pair(m3u8, vidHeaders)
             }
 
-            // ─── otakuhg.site (StreamHG): fetch player page → regex m3u8 ───
-            // CDN domain is not derivable from data-video URL.
+            // ─── otakuhg.site (StreamHG): fetch player page → regex ───
             cleanUrl.contains("otakuhg.site") -> {
                 val playerBody = try {
                     client.newCall(GET(cleanUrl, nekoHeaders)).awaitSuccess().bodyString()
@@ -179,7 +168,7 @@ class AniNekoProvider(
 
                 val m3u8 = Regex("""https?://[^\s"'<>\\]+\.urlset/master\.txt""").find(playerBody)?.value
                     ?: Regex("""https?://[^\s"'<>\\]+master\.txt""").find(playerBody)?.value
-                    ?: Regex("""["'](https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)["']""").find(playerBody)?.groupValues?.get(1)
+                    ?: Regex("""["'](https?://[^\s"'<>\\]+\.(?:m3u8|txt)[^\s"'<>\\]*)["']""").find(playerBody)?.groupValues?.get(1)
                     ?: return null
 
                 val vidHeaders = headers.newBuilder()
@@ -189,8 +178,7 @@ class AniNekoProvider(
                 Pair(m3u8, vidHeaders)
             }
 
-            // ─── otakuvid.online (Earnvids): fetch player page → regex m3u8 ───
-            // URL has timestamp/tokens, not derivable from data-video.
+            // ─── otakuvid.online (Earnvids): fetch player page → regex ───
             cleanUrl.contains("otakuvid.online") -> {
                 val playerBody = try {
                     client.newCall(GET(cleanUrl, nekoHeaders)).awaitSuccess().bodyString()
@@ -198,7 +186,7 @@ class AniNekoProvider(
 
                 val m3u8 = Regex("""https?://[^\s"'<>\\]+/master\.m3u8""").find(playerBody)?.value
                     ?: Regex("""https?://[^\s"'<>\\]+master\.txt""").find(playerBody)?.value
-                    ?: Regex("""["'](https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)["']""").find(playerBody)?.groupValues?.get(1)
+                    ?: Regex("""["'](https?://[^\s"'<>\\]+\.(?:m3u8|txt)[^\s"'<>\\]*)["']""").find(playerBody)?.groupValues?.get(1)
                     ?: return null
 
                 val vidHeaders = headers.newBuilder()
@@ -213,14 +201,16 @@ class AniNekoProvider(
     }
 
     // =================================================================
-    // STEP 4: m3u8 → Videos via PlaylistUtils
+    // STEP 4: Create Video directly with master m3u8
+    // ExoPlayer handles the full HLS chain (master → variants → segments)
+    // with the same headers on every request.
     // =================================================================
 
-    private suspend fun extractVideos(
+    private fun createVideo(
         m3u8Url: String,
         vidHeaders: Headers,
         source: ServerSource
-    ): List<Video> {
+    ): Video {
         val typeLabel = when (source.type) {
             "dub" -> "Dub"
             "sub" -> "Soft Sub"
@@ -231,13 +221,12 @@ class AniNekoProvider(
             listOf(Track(it, "English"))
         }.orEmpty()
 
-        return playlistUtils.extractFromHls(
-            m3u8Url,
-            videoNameGen = { quality -> "$name ${source.serverName} $typeLabel $quality" },
-            subtitleList = subtitles,
-            referer = vidHeaders["Referer"] ?: "$BASE_URL/",
-            masterHeaders = vidHeaders,
-            videoHeaders = vidHeaders,
+        return Video(
+            url = m3u8Url,
+            quality = "$name ${source.serverName} $typeLabel Auto",
+            videoUrl = m3u8Url,
+            headers = vidHeaders,
+            subtitleTracks = subtitles,
         )
     }
 
@@ -250,21 +239,17 @@ class AniNekoProvider(
         val title = anime.title.ifBlank { meta.title }
         if (title.isBlank()) return emptyList()
 
-        // Step 1: Get slug
         val slug = searchSlug(title) ?: return emptyList()
 
-        // Step 2: Get server sources from watch page
         val sources = getServerSources(slug, meta.epNum)
         if (sources.isEmpty()) return emptyList()
 
-        // Step 3+4: Get m3u8 and extract videos from each server
         val allVideos = mutableListOf<Video>()
 
         for (source in sources) {
             try {
                 val (m3u8Url, vidHeaders) = getM3u8(source) ?: continue
-                val videos = extractVideos(m3u8Url, vidHeaders, source)
-                allVideos.addAll(videos)
+                allVideos.add(createVideo(m3u8Url, vidHeaders, source))
             } catch (_: Exception) {
                 continue
             }
