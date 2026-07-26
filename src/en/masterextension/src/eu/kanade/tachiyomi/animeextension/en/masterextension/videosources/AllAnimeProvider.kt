@@ -49,8 +49,7 @@ class AllAnimeProvider(
         private const val DECRYPT_CIPHER_ALGO = "AES/GCM/NoPadding"
 
         // Correct hash from the working repo
-        private const val STREAM_HASH =
-            "f4662f4b7510b26795dd53ef824a0bf1740fbbc5d1273fab18222ac831bca8d0"
+        private const val STREAM_HASH = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec"
 
         private val XOR_KEYS = arrayOf(
             "allanimenews",
