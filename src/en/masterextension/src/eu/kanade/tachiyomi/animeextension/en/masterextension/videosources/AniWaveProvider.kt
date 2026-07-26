@@ -103,7 +103,6 @@ class AniWaveProvider(
             throw UnsupportedOperationException()
     }
 
-    // FIX: Add User-Agent and remove AniList Origin/Accept headers
     private fun siteHeaders(baseUrl: String) = headers.newBuilder()
         .set("Referer", "$baseUrl/")
         .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -155,13 +154,17 @@ class AniWaveProvider(
         title: String,
     ): Triple<String, String, String> {
         var lastError: Throwable? = null
-        val encodedTitle = URLEncoder.encode(title, "utf-8")
-        
         for (domain in DOMAINS) {
             try {
                 val vrf = vrfEncrypt(title)
-                // FIX: Manually build URL to prevent OkHttp from double-encoding the VRF token
-                val url = "$domain/filter?keyword=$encodedTitle&page=1&vrf=$vrf"
+                
+                // FIX: Use OkHttp's URL builder so the already-encoded VRF token gets double-encoded exactly like the reference extension
+                val url = domain.toHttpUrl().newBuilder().apply {
+                    addPathSegment("filter")
+                    addQueryParameter("keyword", title)
+                    addQueryParameter("page", "1")
+                    addQueryParameter("vrf", vrf)
+                }.build().toString()
 
                 val html = client.newCall(GET(url, siteHeaders(domain)))
                     .awaitSuccess().bodyString()
@@ -210,7 +213,13 @@ class AniWaveProvider(
         epNum: Int,
     ): String? {
         val vrf = vrfEncrypt(animeId)
-        val url = "$baseUrl/ajax/episode/list/$animeId?vrf=$vrf"
+        val url = baseUrl.toHttpUrl().newBuilder().apply {
+            addPathSegment("ajax")
+            addPathSegment("episode")
+            addPathSegment("list")
+            addPathSegment(animeId)
+            addQueryParameter("vrf", vrf)
+        }.build().toString()
 
         val body = client.newCall(GET(url, ajaxHeaders(baseUrl, animePath)))
             .awaitSuccess().bodyString()
@@ -238,7 +247,12 @@ class AniWaveProvider(
         serverIds: String,
         epUrl: String,
     ): List<ServerData> {
-        val url = "$baseUrl/ajax/server/list?servers=$serverIds"
+        val url = baseUrl.toHttpUrl().newBuilder().apply {
+            addPathSegment("ajax")
+            addPathSegment("server")
+            addPathSegment("list")
+            addQueryParameter("servers", serverIds)
+        }.build().toString()
 
         val body = client.newCall(GET(url, ajaxHeaders(baseUrl, epUrl)))
             .awaitSuccess().bodyString()
@@ -266,7 +280,12 @@ class AniWaveProvider(
         serverId: String,
         epUrl: String,
     ): String {
-        val url = "$baseUrl/ajax/server?get=$serverId"
+        val url = baseUrl.toHttpUrl().newBuilder().apply {
+            addPathSegment("ajax")
+            addPathSegment("server")
+            addQueryParameter("get", serverId)
+        }.build().toString()
+
         val body = client.newCall(GET(url, ajaxHeaders(baseUrl, epUrl)))
             .awaitSuccess().bodyString()
         return body.parseAs<ServerResponseDto>().result.url
