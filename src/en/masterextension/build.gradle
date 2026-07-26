@@ -9,6 +9,7 @@ apply plugin: "kei.plugins.extension.legacy"
 dependencies {
     implementation(project(':lib:playlistutils'))
     implementation(project(':lib:unpacker'))
+    implementation(project(':lib:cloudflareinterceptor'))
     implementation(project(':lib:megacloudextractor'))
     implementation(project(':lib:cryptoaes'))
     implementation(project(":lib:rapidcloudextractor"))
