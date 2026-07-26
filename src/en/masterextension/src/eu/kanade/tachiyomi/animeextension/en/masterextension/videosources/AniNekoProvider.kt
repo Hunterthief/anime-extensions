@@ -145,17 +145,21 @@ class AniNekoProvider(
         val cleanUrl = dataVideo.substringBefore("?")
 
         return when {
-            // ─── vivibebe.site: direct construction ───
+            // ─── vivibebe.site (HD-1): use hawk.aniwatchtv.site CDN ───
+            // Same stream as AniDap kiwi. vivibebe.site doesn't play in ExoPlayer,
+            // but hawk.aniwatchtv.site does (access-control-allow-origin: *).
             cleanUrl.contains("vivibebe.site") -> {
                 val id = cleanUrl.substringAfter("vivibebe.site/").trim('/')
-                val m3u8 = "https://vivibebe.site/public/stream/$id/master.m3u8"
+                val m3u8 = "https://hawk.aniwatchtv.site/media/$id/master.m3u8"
                 val vidHeaders = headers.newBuilder()
-                    .set("Referer", dataVideo)
+                    .set("Referer", "https://anidap.lol/")
+                    .set("Origin", "https://anidap.lol")
                     .build()
                 Pair(m3u8, vidHeaders)
             }
 
-            // ─── bibiemb.xyz: direct construction via workers.dev CDN ───
+            // ─── bibiemb.xyz (HD-2): direct construction via workers.dev CDN ───
+            // access-control-allow-origin: * and absolute variant URLs in m3u8.
             cleanUrl.contains("bibiemb.xyz") -> {
                 val id = cleanUrl.substringAfter("bibiemb.xyz/").trim('/')
                 val m3u8 = "https://morning-credit-3bcc.vibevibe.workers.dev/$id/master.m3u8"
@@ -166,14 +170,15 @@ class AniNekoProvider(
                 Pair(m3u8, vidHeaders)
             }
 
-            // ─── otakuhg.site: fetch player page → regex m3u8 ───
+            // ─── otakuhg.site (StreamHG): fetch player page → regex m3u8 ───
+            // CDN domain is not derivable from data-video URL.
             cleanUrl.contains("otakuhg.site") -> {
                 val playerBody = try {
                     client.newCall(GET(cleanUrl, nekoHeaders)).awaitSuccess().bodyString()
                 } catch (_: Exception) { return null }
 
-                val m3u8 = Regex("""https?://[^\s"'<>\\]+master\.txt""").find(playerBody)?.value
-                    ?: Regex("""https?://[^\s"'<>\\]+\.urlset/[^\s"'<>\\]+""").find(playerBody)?.value
+                val m3u8 = Regex("""https?://[^\s"'<>\\]+\.urlset/master\.txt""").find(playerBody)?.value
+                    ?: Regex("""https?://[^\s"'<>\\]+master\.txt""").find(playerBody)?.value
                     ?: Regex("""["'](https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)["']""").find(playerBody)?.groupValues?.get(1)
                     ?: return null
 
@@ -184,7 +189,8 @@ class AniNekoProvider(
                 Pair(m3u8, vidHeaders)
             }
 
-            // ─── otakuvid.online: fetch player page → regex m3u8 ───
+            // ─── otakuvid.online (Earnvids): fetch player page → regex m3u8 ───
+            // URL has timestamp/tokens, not derivable from data-video.
             cleanUrl.contains("otakuvid.online") -> {
                 val playerBody = try {
                     client.newCall(GET(cleanUrl, nekoHeaders)).awaitSuccess().bodyString()
