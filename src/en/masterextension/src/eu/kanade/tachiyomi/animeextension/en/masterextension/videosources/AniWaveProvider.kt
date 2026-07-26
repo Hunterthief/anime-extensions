@@ -9,8 +9,6 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.awaitSuccess
-import keiyoushi.utils.bodyString
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
@@ -157,8 +155,6 @@ class AniWaveProvider(
         for (domain in DOMAINS) {
             try {
                 val vrf = vrfEncrypt(title)
-                
-                // FIX: Use OkHttp's URL builder so the already-encoded VRF token gets double-encoded exactly like the reference extension
                 val url = domain.toHttpUrl().newBuilder().apply {
                     addPathSegment("filter")
                     addQueryParameter("keyword", title)
@@ -166,8 +162,13 @@ class AniWaveProvider(
                     addQueryParameter("vrf", vrf)
                 }.build().toString()
 
-                val html = client.newCall(GET(url, siteHeaders(domain)))
-                    .awaitSuccess().bodyString()
+                // FIX: Capture HTTP code and body snippet for debugging
+                val response = client.newCall(GET(url, siteHeaders(domain))).execute()
+                val html = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    lastError = Exception("HTTP ${response.code} - ${html.take(100)}")
+                    continue
+                }
 
                 val doc = Jsoup.parse(html, domain)
                 
@@ -184,7 +185,7 @@ class AniWaveProvider(
                         if (!path.startsWith("/")) path = "/$path"
                         
                         val animeHtml = client.newCall(GET("$domain$path", siteHeaders(domain)))
-                            .awaitSuccess().bodyString()
+                            .execute().body?.string().orEmpty()
                         val animeDoc = Jsoup.parse(animeHtml, domain)
                         val dataId = animeDoc.selectFirst("[data-id]")?.attr("data-id")
                             ?: animeDoc.selectFirst("[data-tip]")?.attr("data-tip")
@@ -197,7 +198,7 @@ class AniWaveProvider(
                         lastError = Exception("Empty href")
                     }
                 } else {
-                    lastError = Exception("No results in HTML")
+                    lastError = Exception("No results (body: ${html.take(100)})")
                 }
             } catch (e: Exception) {
                 lastError = e
@@ -222,7 +223,7 @@ class AniWaveProvider(
         }.build().toString()
 
         val body = client.newCall(GET(url, ajaxHeaders(baseUrl, animePath)))
-            .awaitSuccess().bodyString()
+            .execute().body?.string().orEmpty()
 
         val result = body.parseAs<ResultResponse>()
         val doc = Jsoup.parseBodyFragment(result.result)
@@ -255,7 +256,7 @@ class AniWaveProvider(
         }.build().toString()
 
         val body = client.newCall(GET(url, ajaxHeaders(baseUrl, epUrl)))
-            .awaitSuccess().bodyString()
+            .execute().body?.string().orEmpty()
 
         val result = body.parseAs<ResultResponse>()
         val doc = Jsoup.parseBodyFragment(result.result)
@@ -287,7 +288,7 @@ class AniWaveProvider(
         }.build().toString()
 
         val body = client.newCall(GET(url, ajaxHeaders(baseUrl, epUrl)))
-            .awaitSuccess().bodyString()
+            .execute().body?.string().orEmpty()
         return body.parseAs<ServerResponseDto>().result.url
     }
 
@@ -313,7 +314,7 @@ class AniWaveProvider(
             .build()
 
         val pageBody = client.newCall(GET(embedUrl, pageHeaders))
-            .awaitSuccess().bodyString()
+            .execute().body?.string().orEmpty()
 
         val dataId = Regex("""data-id="([^"]+)"""").find(pageBody)?.groupValues?.get(1)
         if (dataId != null) {
@@ -367,10 +368,10 @@ class AniWaveProvider(
 
         val sourceData = try {
             client.newCall(GET("https://$host/stream/getSources?id=$dataId&id=$dataId", apiHeaders))
-                .awaitSuccess().parseAs<SourceResponseDto>()
+                .execute().parseAs<SourceResponseDto>()
         } catch (_: Exception) {
             client.newCall(GET("https://$host/stream/getSourcesNew?id=$dataId&id=$dataId", apiHeaders))
-                .awaitSuccess().parseAs<SourceResponseDto>()
+                .execute().parseAs<SourceResponseDto>()
         }
 
         val m3u8 = sourceData.sources
