@@ -4,10 +4,14 @@ import android.content.SharedPreferences
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeKizzProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniDapProvider
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniNekoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnikageProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniNekoProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeKizzProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.MegaCloudProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.GogoProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AllAnimeProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.RapidCloudProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -19,19 +23,23 @@ import java.util.Locale
 class ProviderManager(
     private val client: OkHttpClient,
     private val headers: Headers,
-    private val preferences: SharedPreferences
+    private val preferences: SharedPreferences,
 ) {
     // =================================================================
-    // PROVIDER REGISTRY
-    // To add a new source: add ONE line here.
+    // PROVIDER REGISTRY — add one line per new source
     // =================================================================
     private val allProviders: Map<String, VideoProvider> by lazy {
         linkedMapOf(
+            // Clean JSON sources (fast, reliable)
             "anidap"     to AniDapProvider(client, headers),
             "anikage"    to AnikageProvider(client, headers),
             "anineko"    to AniNekoProvider(client, headers),
             "animekizz"  to AnimeKizzProvider(client, headers),
-            // "example" to ExampleProvider(client, headers),  ← future sources
+            // Encrypted sources (slower, larger libraries)
+            "megacloud"  to MegaCloudProvider(client, headers),
+            "gogo"       to GogoProvider(client, headers),
+            "allanime"   to AllAnimeProvider(client, headers),
+            "rapidcloud" to RapidCloudProvider(client, headers, preferences),
         )
     }
 
@@ -49,9 +57,6 @@ class ProviderManager(
         return allProviders.filterKeys { it in enabled }.values.toList()
     }
 
-    // =================================================================
-    // VIDEO FETCH — runs all enabled providers in parallel
-    // =================================================================
     suspend fun fetchAllVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val providers = getEnabledProviders()
         if (providers.isEmpty()) return emptyList()
@@ -78,7 +83,7 @@ class ProviderManager(
     }
 
     // =================================================================
-    // MAL SCRAPERS (metadata only — not video related)
+    // MAL SCRAPERS (unchanged)
     // =================================================================
 
     fun fetchMalAnimeDetails(malId: Int): MalAnimeDetails? {
