@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
 import android.util.Base64
-import android.util.Log
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
@@ -14,19 +13,28 @@ import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parseAs
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 
-/**
- * AniWave provider — based on AnikotoTheme + AnikotoExtractor.
- * Flow: VRF-encrypted search → anime page → episode AJAX → server AJAX →
- *       embed URL → data-id → getSources API → m3u8
- */
 class AniWaveProvider(
     private val client: OkHttpClient,
     private val headers: Headers,
@@ -35,20 +43,20 @@ class AniWaveProvider(
     override val name = "AniWave"
 
     companion object {
-        private const val TAG = "AniWaveProv"
         private const val BASE_URL = "https://animewave.to"
-
-        // VRF encryption keys (from AnikotoUtils)
-        private val EXCHANGE_KEY_1 = listOf("AP6GeR8H0lwUz1", "UAz8Gwl10P6ReH")
-        private const val KEY_1 = "ItFKjuWokn4ZpB"
-        private const val KEY_2 = "fOyt97QWFB3"
-        private val EXCHANGE_KEY_2 = listOf("1majSlPQd2M5", "da1l2jSmP5QM")
-        private val EXCHANGE_KEY_3 = listOf("CPYvHj09Au3", "0jHA9CPYu3v")
-        private const val KEY_3 = "736y1uTJpBLUX"
 
         private val DATA_ID_REGEX = Regex("""data-id="([^"]+)"""")
         private val M3U8_REGEX = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""")
+        private val IFRAME_SRC_REGEX = Regex("""<iframe[^>]+src="([^"]+)"""")
         private val EP_URL_SUFFIX_REGEX = Regex("""/ep-\d+$""")
+
+        // VRF encryption keys (from AnikotoUtils)
+        private val EXCHANGE_KEY_1 = listOf("AP6GeR8H0lwUz1", "UAz8Gwl10P6ReH")
+        private const val RC4_KEY_1 = "ItFKjuWokn4ZpB"
+        private const val RC4_KEY_2 = "fOyt97QWFB3"
+        private val EXCHANGE_KEY_2 = listOf("1majSlPQd2M5", "da1l2jSmP5QM")
+        private val EXCHANGE_KEY_3 = listOf("CPYvHj09Au3", "0jHA9CPYu3v")
+        private const val RC4_KEY_3 = "736y1uTJpBLUX"
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
@@ -74,12 +82,12 @@ class AniWaveProvider(
     private fun vrfEncrypt(input: String): String {
         var vrf = input
         vrf = exchange(vrf, EXCHANGE_KEY_1[0], EXCHANGE_KEY_1[1])
-        vrf = rc4Encrypt(KEY_1, vrf)
-        vrf = rc4Encrypt(KEY_2, vrf)
+        vrf = rc4Encrypt(RC4_KEY_1, vrf)
+        vrf = rc4Encrypt(RC4_KEY_2, vrf)
         vrf = exchange(vrf, EXCHANGE_KEY_2[0], EXCHANGE_KEY_2[1])
         vrf = exchange(vrf, EXCHANGE_KEY_3[0], EXCHANGE_KEY_3[1])
         vrf = vrf.reversed()
-        vrf = rc4Encrypt(KEY_3, vrf)
+        vrf = rc4Encrypt(RC4_KEY_3, vrf)
         vrf = Base64.encode(vrf.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP)
             .toString(Charsets.UTF_8)
         return java.net.URLEncoder.encode(vrf, "utf-8")
@@ -107,15 +115,16 @@ class AniWaveProvider(
 
     private suspend fun searchAnime(title: String): String? {
         val vrf = vrfEncrypt(title)
-        val url = "$BASE_URL/filter?keyword=${java.net.URLEncoder.encode(title, "utf-8")}&vrf=$vrf"
+        val encodedTitle = java.net.URLEncoder.encode(title, "utf-8")
+        val url = "$BASE_URL/filter?keyword=$encodedTitle&vrf=$vrf"
         return try {
             val doc = client.newCall(GET(url, docHeaders)).awaitSuccess().asJsoup()
             val firstResult = doc.selectFirst("div.ani.items > div.item a.name")
                 ?: doc.selectFirst("div.item a[href*=/watch/]")
+                ?: doc.selectFirst("a[href*=/watch/]")
             val href = firstResult?.attr("href") ?: return null
             EP_URL_SUFFIX_REGEX.replace(href.substringBefore("?"), "")
-        } catch (e: Exception) {
-            Log.e(TAG, "searchAnime failed: ${e.message}")
+        } catch (_: Exception) {
             null
         }
     }
@@ -130,8 +139,7 @@ class AniWaveProvider(
                 .awaitSuccess().asJsoup()
             doc.selectFirst("[data-id]")?.attr("data-id")
                 ?: doc.selectFirst("[data-tip]")?.attr("data-tip")
-        } catch (e: Exception) {
-            Log.e(TAG, "getAnimeId failed: ${e.message}")
+        } catch (_: Exception) {
             null
         }
     }
@@ -149,7 +157,6 @@ class AniWaveProvider(
             val result = responseBody.parseAs<ResultResponse>()
             val doc = Jsoup.parseBodyFragment(result.result)
 
-            // Find the episode matching our number
             val epElement = doc.select("div.episodes ul > li > a").firstOrNull {
                 it.attr("data-num") == epNum.toString()
             } ?: doc.select("div.episodes ul > li > a").firstOrNull {
@@ -157,18 +164,18 @@ class AniWaveProvider(
             }
 
             epElement?.attr("data-ids")?.takeIf { it.isNotEmpty() }
-        } catch (e: Exception) {
-            Log.e(TAG, "getEpisodeIds failed: ${e.message}")
+        } catch (_: Exception) {
             null
         }
     }
 
     // =================================================================
-    // STEP 4: Get server list → server IDs
+    // STEP 4: Get server list → server IDs and names
     // =================================================================
 
-    private suspend fun getServerList(episodeIds: String, animePath: String, epNum: Int): List<Pair<String, String>> {
-        val epUrl = "$animePath/ep-$epNum"
+    private data class ServerInfo(val id: String, val name: String, val type: String)
+
+    private suspend fun getServerList(episodeIds: String, epUrl: String): List<ServerInfo> {
         val url = "$BASE_URL/ajax/server/list?servers=$episodeIds"
         return try {
             val responseBody = client.newCall(GET(url, xhrHeaders("$BASE_URL$epUrl")))
@@ -176,16 +183,21 @@ class AniWaveProvider(
             val result = responseBody.parseAs<ResultResponse>()
             val doc = Jsoup.parseBodyFragment(result.result)
 
-            doc.select("div.servers > div.type li").mapNotNull { li ->
-                if (li.hasClass("download-icon")) return@mapNotNull null
-                val serverId = li.attr("data-link-id")
-                val serverName = li.text().trim()
-                if (serverId.isNotEmpty() && serverName.isNotEmpty()) {
-                    serverId to serverName
-                } else null
+            doc.select("div.servers > div.type").flatMap { typeElem ->
+                val label = typeElem.selectFirst("label")?.text()?.trim()
+                    ?: typeElem.attr("data-type")
+                    ?: "Sub"
+
+                typeElem.select("li").mapNotNull { li ->
+                    if (li.hasClass("download-icon")) return@mapNotNull null
+                    val serverId = li.attr("data-link-id")
+                    val serverName = li.text().trim()
+                    if (serverId.isNotEmpty() && serverName.isNotEmpty()) {
+                        ServerInfo(serverId, serverName, label)
+                    } else null
+                }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "getServerList failed: ${e.message}")
+        } catch (_: Exception) {
             emptyList()
         }
     }
@@ -200,8 +212,7 @@ class AniWaveProvider(
                 GET("$BASE_URL/ajax/server?get=$serverId", xhrHeaders("$BASE_URL$epUrl")),
             ).awaitSuccess().bodyString()
             responseBody.parseAs<ServerResponseDto>().result.url
-        } catch (e: Exception) {
-            Log.e(TAG, "getEmbedUrl failed: ${e.message}")
+        } catch (_: Exception) {
             null
         }
     }
@@ -210,7 +221,7 @@ class AniWaveProvider(
     // STEP 6: Extract m3u8 from embed page
     // =================================================================
 
-    private suspend fun extractFromEmbed(embedUrl: String, serverName: String): List<Video> {
+    private suspend fun extractFromEmbed(embedUrl: String, server: ServerInfo): List<Video> {
         val host = try { embedUrl.toHttpUrl().host } catch (_: Exception) { return emptyList() }
 
         val pageHeaders = headers.newBuilder()
@@ -219,24 +230,30 @@ class AniWaveProvider(
 
         val pageBody = try {
             client.newCall(GET(embedUrl, pageHeaders)).awaitSuccess().bodyString()
-        } catch (e: Exception) {
-            Log.e(TAG, "embed page fetch failed: ${e.message}")
+        } catch (_: Exception) {
             return emptyList()
         }
 
-        // Strategy 1: data-id → getSources API
+        // Strategy 1: data-id → getSources API (AnikotoExtractor approach)
         val dataId = DATA_ID_REGEX.find(pageBody)?.groupValues?.get(1)
         if (dataId != null) {
-            return fetchSourcesFromApi(dataId, host, embedUrl, serverName)
+            return fetchSourcesFromApi(dataId, host, embedUrl, server)
         }
 
-        // Strategy 2: direct m3u8 in page
+        // Strategy 2: iframe redirect
+        val iframeSrc = IFRAME_SRC_REGEX.find(pageBody)?.groupValues?.get(1)
+        if (iframeSrc != null) {
+            val resolvedSrc = if (iframeSrc.startsWith("http")) iframeSrc
+            else embedUrl.toHttpUrl().resolve(iframeSrc)?.toString() ?: iframeSrc
+            return extractFromEmbed(resolvedSrc, server)
+        }
+
+        // Strategy 3: direct m3u8 in page
         val m3u8Url = M3U8_REGEX.find(pageBody)?.value
         if (m3u8Url != null) {
-            return extractHls(m3u8Url, serverName, "https://$host/")
+            return extractHls(m3u8Url, server, "https://$host/")
         }
 
-        Log.e(TAG, "No extraction strategy matched for $serverName at $embedUrl")
         return emptyList()
     }
 
@@ -244,7 +261,7 @@ class AniWaveProvider(
         dataId: String,
         host: String,
         embedUrl: String,
-        serverName: String,
+        server: ServerInfo,
     ): List<Video> {
         val apiHeaders = headers.newBuilder()
             .set("Accept", "*/*")
@@ -254,48 +271,36 @@ class AniWaveProvider(
             .build()
 
         // Try primary endpoint
-        val m3u8 = try {
+        val data = try {
             val body = client.newCall(
                 GET("https://$host/stream/getSources?id=$dataId&id=$dataId", apiHeaders),
             ).awaitSuccess().bodyString()
-            val data = body.parseAs<SourceResponseDto>()
-            data.sources.takeIf { it.startsWith("http") }
+            body.parseAs<SourceResponseDto>()
         } catch (_: Exception) {
-            null
+            // Try fallback endpoint
+            try {
+                val body = client.newCall(
+                    GET("https://$host/stream/getSourcesNew?id=$dataId&id=$dataId", apiHeaders),
+                ).awaitSuccess().bodyString()
+                body.parseAs<SourceResponseDto>()
+            } catch (_: Exception) {
+                return emptyList()
+            }
         }
 
-        // Try fallback endpoint
-        ?: try {
-            val body = client.newCall(
-                GET("https://$host/stream/getSourcesNew?id=$dataId&id=$dataId", apiHeaders),
-            ).awaitSuccess().bodyString()
-            val data = body.parseAs<SourceResponseDto>()
-            data.sources.takeIf { it.startsWith("http") }
-        } catch (_: Exception) {
-            null
-        }
+        val m3u8 = data.sources.takeIf { it.startsWith("http") } ?: return emptyList()
 
-        ?: return emptyList()
+        val subtitles = data.tracks
+            ?.filter { it.kind == "captions" }
+            ?.map { Track(it.file, it.label) }
+            .orEmpty()
 
-        // Get subtitles
-        val subtitles = try {
-            val body = client.newCall(
-                GET("https://$host/stream/getSources?id=$dataId&id=$dataId", apiHeaders),
-            ).awaitSuccess().bodyString()
-            body.parseAs<SourceResponseDto>().tracks
-                ?.filter { it.kind == "captions" }
-                ?.map { Track(it.file, it.label) }
-                .orEmpty()
-        } catch (_: Exception) {
-            emptyList()
-        }
-
-        return extractHls(m3u8, serverName, "https://$host/", subtitles)
+        return extractHls(m3u8, server, "https://$host/", subtitles)
     }
 
     private fun extractHls(
         m3u8Url: String,
-        serverName: String,
+        server: ServerInfo,
         referer: String,
         subtitles: List<Track> = emptyList(),
     ): List<Video> {
@@ -304,9 +309,11 @@ class AniWaveProvider(
             .set("Origin", referer.removeSuffix("/"))
             .build()
 
+        val typeSuffix = server.type.takeIf { it.isNotEmpty() }?.let { " - $it" } ?: ""
+
         return playlistUtils.extractFromHls(
             m3u8Url,
-            videoNameGen = { quality -> "$serverName - $quality" },
+            videoNameGen = { quality -> "${server.name}$typeSuffix - $quality" },
             subtitleList = subtitles,
             referer = referer,
             masterHeaders = vidHeaders,
@@ -336,21 +343,17 @@ class AniWaveProvider(
 
             // Step 4: Server list
             val epUrl = "$animePath/ep-${meta.epNum}"
-            val servers = getServerList(episodeIds, animePath, meta.epNum)
+            val servers = getServerList(episodeIds, epUrl)
             if (servers.isEmpty()) return emptyList()
 
             // Step 5+6: For each server → embed URL → extract
-            servers.flatMap { (serverId, serverName) ->
+            servers.flatMap { server ->
                 runCatching {
-                    val embedUrl = getEmbedUrl(serverId, epUrl) ?: return@flatMap emptyList()
-                    extractFromEmbed(embedUrl, serverName)
-                }.getOrElse { e ->
-                    Log.e(TAG, "Server $serverName failed: ${e.message}")
-                    emptyList()
-                }
+                    val embedUrl = getEmbedUrl(server.id, epUrl) ?: return@flatMap emptyList()
+                    extractFromEmbed(embedUrl, server)
+                }.getOrElse { emptyList() }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "fetchVideos failed: ${e.message}")
+        } catch (_: Exception) {
             emptyList()
         }
     }
@@ -370,47 +373,36 @@ class AniWaveProvider(
 
     @Serializable
     private data class SourceResponseDto(
-        val sources: SourcesField,
+        @Serializable(with = SourcesSerializer::class) val sources: String,
         val tracks: List<TrackDto>? = null,
     ) {
         @Serializable
         data class TrackDto(val file: String, val kind: String, val label: String = "")
     }
 
-    // Custom serializer for sources (can be string or array of objects)
-    @Serializable(with = SourcesSerializer::class)
-    private data class SourcesField(val value: String)
+    private object SourcesSerializer : KSerializer<String> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("Sources", PrimitiveKind.STRING)
 
-    private object SourcesSerializer : kotlinx.serialization.KSerializer<SourcesField> {
-        override val descriptor = kotlinx.serialization.descriptors.PrimitiveSerialDescriptor(
-            "SourcesField",
-            kotlinx.serialization.descriptors.PrimitiveKind.STRING,
-        )
-
-        override fun deserialize(decoder: kotlinx.serialization.encoding.Decoder): SourcesField {
-            val jsonDecoder = decoder as kotlinx.serialization.json.JsonDecoder
+        override fun deserialize(decoder: Decoder): String {
+            val jsonDecoder = decoder as JsonDecoder
             val element = jsonDecoder.decodeJsonElement()
-            val value = when (element) {
-                is kotlinx.serialization.json.JsonPrimitive -> element.content
-                is kotlinx.serialization.json.JsonArray -> {
-                    element.firstOrNull()?.let {
-                        when (it) {
-                            is kotlinx.serialization.json.JsonObject ->
-                                it["file"]?.let { f -> (f as? kotlinx.serialization.json.JsonPrimitive)?.content }
-                            is kotlinx.serialization.json.JsonPrimitive -> it.content
-                            else -> null
-                        }
+            return when (element) {
+                is JsonObject -> element["file"]?.jsonPrimitive?.content ?: ""
+                is JsonArray -> element.firstOrNull()?.let {
+                    when (it) {
+                        is JsonObject -> it["file"]?.jsonPrimitive?.content
+                        is JsonPrimitive -> it.content
+                        else -> null
                     }
-                }
-                is kotlinx.serialization.json.JsonObject ->
-                    element["file"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
-                else -> null
-            } ?: ""
-            return SourcesField(value)
+                } ?: ""
+                is JsonPrimitive -> element.content
+                else -> ""
+            }
         }
 
-        override fun serialize(encoder: kotlinx.serialization.encoding.Encoder, value: SourcesField) {
-            encoder.encodeString(value.value)
+        override fun serialize(encoder: Encoder, value: String) {
+            encoder.encodeString(value)
         }
     }
 }
