@@ -43,12 +43,15 @@ class GogoProvider(
         )
     }
 
+    // FIX: Override AniList Origin/Accept headers so the site doesn't block us
     private fun siteHeaders(baseUrl: String) = headers.newBuilder()
         .set("Referer", "$baseUrl/")
         .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .removeHeader("Origin")
         .build()
 
-    private suspend fun searchAnime(title: String): Pair<String, String>? {
+    private suspend fun searchAnime(title: String): Pair<String, String> {
+        var lastError: Throwable? = null
         for (domain in DOMAINS) {
             try {
                 val url = "$domain/search.html".toHttpUrl().newBuilder()
@@ -58,7 +61,6 @@ class GogoProvider(
                 val html = client.newCall(GET(url, siteHeaders(domain)))
                     .awaitSuccess().bodyString()
 
-                // FIX: pass domain to Jsoup so abs:href works properly
                 val doc = Jsoup.parse(html, domain)
 
                 val firstResult = doc.selectFirst("ul.items li p.name a")
@@ -66,10 +68,8 @@ class GogoProvider(
                     ?: doc.selectFirst("a[href*=/category/]")
 
                 if (firstResult != null) {
-                    // Try absolute URL first, fallback to relative
                     val href = firstResult.attr("abs:href").ifBlank { firstResult.attr("href") }
                     if (href.isNotBlank()) {
-                        // Ensure it's a full URL
                         val fullUrl = when {
                             href.startsWith("http") -> href
                             href.startsWith("/") -> "$domain$href"
@@ -78,11 +78,12 @@ class GogoProvider(
                         return domain to fullUrl
                     }
                 }
-            } catch (_: Exception) {
-                continue
+                lastError = Exception("No results in HTML")
+            } catch (e: Exception) {
+                lastError = e
             }
         }
-        return null
+        throw lastError ?: Exception("Search returned null")
     }
 
     private suspend fun getServerUrls(
@@ -138,7 +139,7 @@ class GogoProvider(
             searchAnime(title)
         } catch (e: Exception) {
             return debugVideo("search threw: ${e.message}")
-        } ?: return debugVideo("search null for '$title' (tried ${DOMAINS.size} domains)")
+        }
 
         val serverUrls = try {
             getServerUrls(baseUrl, categoryUrl, epNum)
