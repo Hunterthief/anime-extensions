@@ -30,7 +30,7 @@ class AniDapProvider(
         private const val SITE_URL = "https://anidap.lol"
         private const val API_URL = "https://chad.anidap.lol"
 
-        private val PROVIDERS = listOf("mimi", "kiwi", "sora")
+        private val PROVIDERS = listOf("kiwi")
         private val TYPES = listOf("sub", "dub")
 
         private val SLUG_REGEX = Regex("""id\\?",\\?"([a-z0-9]+-[a-z0-9]+-[a-z0-9]{5,})\\?",\\?"anilistId""")
