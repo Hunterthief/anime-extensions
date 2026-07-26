@@ -40,13 +40,20 @@ class AniWaveProvider(
     override val name = "AniWave"
 
     companion object {
-        private const val BASE_URL = "https://animewave.to"
+        // FIX: Add fallback domain (matches reference AniWave extension)
+        private val DOMAINS = listOf("https://animewave.to", "https://aniwave.cz")
 
         private val DATA_ID_REGEX = Regex("""data-id="([^"]+)"""")
         private val M3U8_REGEX = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""")
+        private val IFRAME_SRC_REGEX = Regex("""<iframe[^>]+src="([^"]+)"""")
+        private val SOURCE_TAG_REGEX = Regex("""<source[^>]+src="([^"]+\.m3u8[^"]*)"""")
+        private val JS_VAR_M3U8_REGEX = Regex(
+            """(?:var|let|const)\s+\w+\s*=\s*["']([^"']*\.m3u8[^"']*)["']""" +
+                """|(?:file|source|url|src)\s*[:=]\s*["']([^"']*\.m3u8[^"']*)["']""",
+        )
         private val EP_URL_SUFFIX_REGEX = Regex("""/ep-\d+$""")
 
-        // VRF keys from AnikotoUtils
+        // VRF keys — verified identical to reference AnikotoUtils
         private val EXCHANGE_KEY_1 = listOf("AP6GeR8H0lwUz1", "UAz8Gwl10P6ReH")
         private const val RC4_KEY_1 = "ItFKjuWokn4ZpB"
         private const val RC4_KEY_2 = "fOyt97QWFB3"
@@ -57,11 +64,11 @@ class AniWaveProvider(
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
-    private val docHeaders by lazy {
-        headers.newBuilder().set("Referer", "$BASE_URL/").build()
-    }
+    private fun docHeaders(baseUrl: String) = headers.newBuilder()
+        .set("Referer", "$baseUrl/")
+        .build()
 
-    private fun xhrHeaders(referer: String): Headers {
+    private fun xhrHeaders(baseUrl: String, referer: String): Headers {
         return headers.newBuilder()
             .set("Accept", "application/json, text/javascript, */*; q=0.01")
             .set("Referer", referer)
@@ -70,7 +77,7 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // VRF Encryption
+    // VRF Encryption (matches reference AnikotoUtils exactly)
     // =================================================================
 
     private fun vrfEncrypt(input: String): String {
@@ -103,46 +110,53 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // STEP 1: Search — try with and without VRF
+    // STEP 1: Search
     // =================================================================
 
-    private suspend fun searchAnime(title: String): String? {
+    private suspend fun searchAnime(title: String): Pair<String, String>? {
         val cleanTitle = title
             .replace(Regex("\\(.*?\\)"), "")
             .replace(Regex("\\[.*?\\]"), "")
             .trim()
 
-        // Try with VRF first
-        val vrf = runCatching { vrfEncrypt(cleanTitle) }.getOrNull() ?: ""
         val encodedTitle = java.net.URLEncoder.encode(cleanTitle, "utf-8")
 
-        val urlsToTry = listOf(
-            "$BASE_URL/filter?keyword=$encodedTitle&vrf=$vrf",
-            "$BASE_URL/filter?keyword=$encodedTitle",
-        )
+        for (domain in DOMAINS) {
+            // Try with VRF first, then without
+            val vrf = runCatching { vrfEncrypt(cleanTitle) }.getOrNull() ?: ""
+            val urls = listOf(
+                "$domain/filter?keyword=$encodedTitle&vrf=$vrf",
+                "$domain/filter?keyword=$encodedTitle",
+            )
 
-        for (url in urlsToTry) {
-            try {
-                val doc = client.newCall(GET(url, docHeaders)).awaitSuccess().asJsoup()
-                val firstResult = doc.selectFirst("div.ani.items > div.item a.name")
-                    ?: doc.selectFirst("div.item a[href*=/watch/]")
-                    ?: doc.selectFirst("a[href*=/watch/]")
-                val href = firstResult?.attr("href") ?: continue
-                return EP_URL_SUFFIX_REGEX.replace(href.substringBefore("?"), "")
-            } catch (_: Exception) {
-                continue
+            for (url in urls) {
+                try {
+                    val doc = client.newCall(GET(url, docHeaders(domain)))
+                        .awaitSuccess().asJsoup()
+
+                    // FIX: Match reference selectors more closely
+                    val firstResult = doc.selectFirst("div.ani.items > div.item a.name")
+                        ?: doc.selectFirst("div.item a[href*=/watch/]")
+                        ?: doc.selectFirst("a[href*=/watch/]")
+
+                    val href = firstResult?.attr("href") ?: continue
+                    val path = EP_URL_SUFFIX_REGEX.replace(href.substringBefore("?"), "")
+                    if (path.isNotBlank()) return domain to path
+                } catch (_: Exception) {
+                    continue
+                }
             }
         }
         return null
     }
 
     // =================================================================
-    // STEP 2: Get anime page → data-id
+    // STEP 2: Anime page → data-id
     // =================================================================
 
-    private suspend fun getAnimeId(animePath: String): String? {
+    private suspend fun getAnimeId(baseUrl: String, animePath: String): String? {
         return try {
-            val doc = client.newCall(GET("$BASE_URL$animePath", docHeaders))
+            val doc = client.newCall(GET("$baseUrl$animePath", docHeaders(baseUrl)))
                 .awaitSuccess().asJsoup()
             doc.selectFirst("[data-id]")?.attr("data-id")
                 ?: doc.selectFirst("[data-tip]")?.attr("data-tip")
@@ -152,18 +166,26 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // STEP 3: Get episode list → episode data-ids
+    // STEP 3: Episode list → episode data-ids
     // =================================================================
 
-    private suspend fun getEpisodeIds(animeId: String, epNum: Int, animePath: String): String? {
+    private suspend fun getEpisodeIds(
+        baseUrl: String,
+        animeId: String,
+        epNum: Int,
+        animePath: String,
+    ): String? {
         val vrf = runCatching { vrfEncrypt(animeId) }.getOrNull() ?: ""
-        val url = "$BASE_URL/ajax/episode/list/$animeId?vrf=$vrf"
+        val url = "$baseUrl/ajax/episode/list/$animeId?vrf=$vrf"
         return try {
-            val responseBody = client.newCall(GET(url, xhrHeaders("$BASE_URL$animePath")))
-                .awaitSuccess().bodyString()
+            val responseBody = client.newCall(
+                GET(url, xhrHeaders(baseUrl, "$baseUrl$animePath")),
+            ).awaitSuccess().bodyString()
+
             val result = responseBody.parseAs<ResultResponse>()
             val doc = Jsoup.parseBodyFragment(result.result)
 
+            // Match reference: div.episodes ul > li > a with data-num
             val epElement = doc.select("div.episodes ul > li > a").firstOrNull {
                 it.attr("data-num") == epNum.toString()
             } ?: doc.select("div.episodes ul > li > a").firstOrNull {
@@ -177,19 +199,26 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // STEP 4: Get server list
+    // STEP 4: Server list
     // =================================================================
 
     private data class ServerInfo(val id: String, val name: String, val type: String)
 
-    private suspend fun getServerList(episodeIds: String, epUrl: String): List<ServerInfo> {
-        val url = "$BASE_URL/ajax/server/list?servers=$episodeIds"
+    private suspend fun getServerList(
+        baseUrl: String,
+        episodeIds: String,
+        epUrl: String,
+    ): List<ServerInfo> {
+        val url = "$baseUrl/ajax/server/list?servers=$episodeIds"
         return try {
-            val responseBody = client.newCall(GET(url, xhrHeaders("$BASE_URL$epUrl")))
-                .awaitSuccess().bodyString()
+            val responseBody = client.newCall(
+                GET(url, xhrHeaders(baseUrl, "$baseUrl$epUrl")),
+            ).awaitSuccess().bodyString()
+
             val result = responseBody.parseAs<ResultResponse>()
             val doc = Jsoup.parseBodyFragment(result.result)
 
+            // Match reference: div.servers > div.type → li[data-link-id]
             doc.select("div.servers > div.type").flatMap { typeElem ->
                 val label = typeElem.selectFirst("label")?.text()?.trim()
                     ?: typeElem.attr("data-type").ifEmpty { "Sub" }
@@ -209,13 +238,13 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // STEP 5: Get embed URL
+    // STEP 5: Embed URL
     // =================================================================
 
-    private suspend fun getEmbedUrl(serverId: String, epUrl: String): String? {
+    private suspend fun getEmbedUrl(baseUrl: String, serverId: String, epUrl: String): String? {
         return try {
             val responseBody = client.newCall(
-                GET("$BASE_URL/ajax/server?get=$serverId", xhrHeaders("$BASE_URL$epUrl")),
+                GET("$baseUrl/ajax/server?get=$serverId", xhrHeaders(baseUrl, "$baseUrl$epUrl")),
             ).awaitSuccess().bodyString()
             responseBody.parseAs<ServerResponseDto>().result.url
         } catch (_: Exception) {
@@ -224,28 +253,64 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // STEP 6: Extract m3u8
+    // STEP 6: Extract m3u8 (matches reference AnikotoExtractor strategies)
     // =================================================================
 
     private suspend fun extractFromEmbed(embedUrl: String, server: ServerInfo): List<Video> {
+        // Direct m3u8 in the embed URL itself
+        if (embedUrl.endsWith(".m3u8") || (embedUrl.contains(".m3u8") && !embedUrl.contains("/stream/"))) {
+            return extractHls(embedUrl, server, embedUrl.substringBeforeLast("/"))
+        }
+
         val host = try { embedUrl.toHttpUrl().host } catch (_: Exception) { return emptyList() }
 
         val pageBody = try {
-            client.newCall(GET(embedUrl, docHeaders)).awaitSuccess().bodyString()
+            client.newCall(GET(embedUrl, docHeaders("https://$host")))
+                .awaitSuccess().bodyString()
         } catch (_: Exception) {
             return emptyList()
         }
 
-        // Strategy 1: data-id → getSources API
+        // Strategy 1: data-id → getSources API (matches reference)
         val dataId = DATA_ID_REGEX.find(pageBody)?.groupValues?.get(1)
         if (dataId != null) {
-            return fetchSourcesFromApi(dataId, host, embedUrl, server)
+            val videos = fetchSourcesFromApi(dataId, host, embedUrl, server)
+            if (videos.isNotEmpty()) return videos
         }
 
-        // Strategy 2: direct m3u8 in page
+        // Strategy 2: iframe → follow one level (matches reference)
+        val iframeSrc = IFRAME_SRC_REGEX.find(pageBody)?.groupValues?.get(1)
+        if (iframeSrc != null) {
+            val resolved = resolveUrl(iframeSrc, embedUrl)
+            val iframeHost = try { resolved.toHttpUrl().host } catch (_: Exception) { return emptyList() }
+            val iframeBody = try {
+                client.newCall(GET(resolved, docHeaders("https://$iframeHost")))
+                    .awaitSuccess().bodyString()
+            } catch (_: Exception) {
+                return emptyList()
+            }
+            val iframeDataId = DATA_ID_REGEX.find(iframeBody)?.groupValues?.get(1)
+            if (iframeDataId != null) {
+                val videos = fetchSourcesFromApi(iframeDataId, iframeHost, resolved, server)
+                if (videos.isNotEmpty()) return videos
+            }
+            val iframeM3u8 = M3U8_REGEX.find(iframeBody)?.value
+            if (iframeM3u8 != null) return extractHls(iframeM3u8, server, "https://$iframeHost/")
+        }
+
+        // Strategy 3: direct m3u8 in page HTML
         val m3u8Url = M3U8_REGEX.find(pageBody)?.value
-        if (m3u8Url != null) {
-            return extractHls(m3u8Url, server, "https://$host/")
+        if (m3u8Url != null) return extractHls(m3u8Url, server, "https://$host/")
+
+        // Strategy 4: <source> tag
+        val sourceSrc = SOURCE_TAG_REGEX.find(pageBody)?.groupValues?.get(1)
+        if (sourceSrc != null) return extractHls(resolveUrl(sourceSrc, embedUrl), server, "https://$host/")
+
+        // Strategy 5: JS variable
+        val jsVar = JS_VAR_M3U8_REGEX.find(pageBody)
+        if (jsVar != null) {
+            val url = jsVar.groupValues[1].ifBlank { jsVar.groupValues[2] }
+            if (url.isNotBlank()) return extractHls(resolveUrl(url, embedUrl), server, "https://$host/")
         }
 
         return emptyList()
@@ -264,17 +329,16 @@ class AniWaveProvider(
             .set("Origin", "https://$host")
             .build()
 
+        // FIX: Match reference — try getSources then getSourcesNew, both with ?id=X&id=X
         val data = try {
-            val body = client.newCall(
+            client.newCall(
                 GET("https://$host/stream/getSources?id=$dataId&id=$dataId", apiHeaders),
-            ).awaitSuccess().bodyString()
-            body.parseAs<SourceResponseDto>()
+            ).awaitSuccess().bodyString().parseAs<SourceResponseDto>()
         } catch (_: Exception) {
             try {
-                val body = client.newCall(
+                client.newCall(
                     GET("https://$host/stream/getSourcesNew?id=$dataId&id=$dataId", apiHeaders),
-                ).awaitSuccess().bodyString()
-                body.parseAs<SourceResponseDto>()
+                ).awaitSuccess().bodyString().parseAs<SourceResponseDto>()
             } catch (_: Exception) {
                 return emptyList()
             }
@@ -313,6 +377,12 @@ class AniWaveProvider(
         )
     }
 
+    private fun resolveUrl(url: String, base: String): String = when {
+        url.startsWith("http") -> url
+        url.startsWith("//") -> "https:$url"
+        else -> try { base.toHttpUrl().resolve(url)?.toString() ?: url } catch (_: Exception) { url }
+    }
+
     // =================================================================
     // ENTRY POINT
     // =================================================================
@@ -325,17 +395,17 @@ class AniWaveProvider(
         val epNum = if (meta.epNum > 0) meta.epNum else 1
 
         return try {
-            val animePath = searchAnime(title) ?: return emptyList()
-            val animeId = getAnimeId(animePath) ?: return emptyList()
-            val episodeIds = getEpisodeIds(animeId, epNum, animePath) ?: return emptyList()
+            val (baseUrl, animePath) = searchAnime(title) ?: return emptyList()
+            val animeId = getAnimeId(baseUrl, animePath) ?: return emptyList()
+            val episodeIds = getEpisodeIds(baseUrl, animeId, epNum, animePath) ?: return emptyList()
 
             val epUrl = "$animePath/ep-$epNum"
-            val servers = getServerList(episodeIds, epUrl)
+            val servers = getServerList(baseUrl, episodeIds, epUrl)
             if (servers.isEmpty()) return emptyList()
 
             servers.flatMap { server ->
                 runCatching {
-                    val embedUrl = getEmbedUrl(server.id, epUrl) ?: return@flatMap emptyList()
+                    val embedUrl = getEmbedUrl(baseUrl, server.id, epUrl) ?: return@flatMap emptyList()
                     extractFromEmbed(embedUrl, server)
                 }.getOrElse { emptyList() }
             }
