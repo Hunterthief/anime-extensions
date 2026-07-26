@@ -6,7 +6,6 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeKizzProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniDapProvider
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimePaheProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -27,7 +26,6 @@ class ProviderManager(
     private val allProviders: Map<String, VideoProvider> by lazy {
         linkedMapOf(
             "anidap"     to AniDapProvider(client, headers),
-            "animepahe"  to AnimePaheProvider(client, headers),
             "animekizz"  to AnimeKizzProvider(client, headers),
             // "example" to ExampleProvider(client, headers),  ← future sources
         )
