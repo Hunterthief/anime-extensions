@@ -27,7 +27,6 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
-import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 
@@ -126,6 +125,7 @@ class AniWaveProvider(
         .removeAll("Origin")
         .build()
 
+    // FIX: Removed URLEncoder to prevent double-encoding when passed to addQueryParameter
     private fun vrfEncrypt(input: String): String {
         var vrf = input
         vrf = exchange(vrf, EXCHANGE_KEY_1)
@@ -137,7 +137,7 @@ class AniWaveProvider(
         vrf = rc4Encrypt(KEY_3, vrf)
         vrf = Base64.encode(vrf.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP)
             .toString(Charsets.UTF_8)
-        return URLEncoder.encode(vrf, "utf-8")
+        return vrf
     }
 
     private fun rc4Encrypt(key: String, input: String): String {
