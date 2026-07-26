@@ -56,7 +56,6 @@ class GogoProvider(
                     .addQueryParameter("keyword", title)
                     .build().toString()
 
-                // FIX: Capture HTTP code and body snippet for debugging
                 val response = client.newCall(GET(url, siteHeaders(domain))).execute()
                 val html = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
@@ -66,8 +65,9 @@ class GogoProvider(
 
                 val doc = Jsoup.parse(html, domain)
 
-                val firstResult = doc.selectFirst("ul.items li p.name a")
-                    ?: doc.selectFirst("div.last_recent ul li p.name a")
+                // FIX: Broadened selector to just look for the first category link inside the list
+                val firstResult = doc.selectFirst("ul.items li a[href*=/category/]")
+                    ?: doc.selectFirst("div.last_recent ul li a[href*=/category/]")
                     ?: doc.selectFirst("a[href*=/category/]")
 
                 if (firstResult != null) {
