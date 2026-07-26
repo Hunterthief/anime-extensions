@@ -63,11 +63,6 @@ class AllAnimeProvider(
             key.fold(0) { mask, ch -> mask xor ch.code }
         }.toIntArray()
 
-        private val INTERNAL_HOSTER_NAMES = arrayOf(
-            "Default", "Ac", "Ak", "Kir", "Rab", "Luf-mp4",
-            "Si-Hls", "S-mp4", "Ac-Hls", "Uv-mp4", "Pn-Hls",
-        )
-
         private val SEARCH_QUERY = """
             query(
                 ${'$'}search: SearchInput
@@ -106,21 +101,14 @@ class AllAnimeProvider(
     // =================================================================
 
     @Serializable
-    private data class SearchResult(
-        val data: SearchResultData,
-    ) {
+    private data class SearchResult(val data: SearchResultData) {
         @Serializable
-        data class SearchResultData(
-            val shows: SearchResultShows,
-        ) {
+        data class SearchResultData(val shows: SearchResultShows) {
             @Serializable
-            data class SearchResultShows(
-                val edges: List<SearchResultEdge>,
-            ) {
+            data class SearchResultShows(val edges: List<SearchResultEdge>) {
                 @Serializable
                 data class SearchResultEdge(
-                    @SerialName("_id")
-                    val id: String,
+                    @SerialName("_id") val id: String,
                     val name: String,
                     val englishName: String? = null,
                 )
@@ -129,17 +117,11 @@ class AllAnimeProvider(
     }
 
     @Serializable
-    private data class EpisodeResult(
-        val data: DataEpisode,
-    ) {
+    private data class EpisodeResult(val data: DataEpisode) {
         @Serializable
-        data class DataEpisode(
-            val episode: Episode? = null,
-        ) {
+        data class DataEpisode(val episode: Episode? = null) {
             @Serializable
-            data class Episode(
-                val sourceUrls: List<SourceUrl>,
-            ) {
+            data class Episode(val sourceUrls: List<SourceUrl>) {
                 @Serializable
                 data class SourceUrl(
                     val sourceUrl: String,
@@ -152,13 +134,9 @@ class AllAnimeProvider(
     }
 
     @Serializable
-    private data class EncryptedEpisodeResult(
-        val data: EncryptedData,
-    ) {
+    private data class EncryptedEpisodeResult(val data: EncryptedData) {
         @Serializable
-        data class EncryptedData(
-            val tobeparsed: String? = null,
-        )
+        data class EncryptedData(val tobeparsed: String? = null)
     }
 
     @Serializable
@@ -167,14 +145,10 @@ class AllAnimeProvider(
     )
 
     @Serializable
-    private data class VersionResponse(
-        val episodeIframeHead: String,
-    )
+    private data class VersionResponse(val episodeIframeHead: String)
 
     @Serializable
-    private data class VideoLink(
-        val links: List<Link>,
-    ) {
+    private data class VideoLink(val links: List<Link>) {
         @Serializable
         data class Link(
             val link: String,
@@ -184,16 +158,12 @@ class AllAnimeProvider(
             val subtitles: List<Subtitles>? = null,
         ) {
             @Serializable
-            data class Subtitles(
-                val lang: String,
-                val src: String,
-                val label: String? = null,
-            )
+            data class Subtitles(val lang: String, val src: String, val label: String? = null)
         }
     }
 
     // =================================================================
-    // buildPost — matches working extension EXACTLY
+    // buildPost — exact match to working extension
     // =================================================================
 
     private fun buildPost(data: kotlinx.serialization.json.JsonObject): Request {
@@ -210,33 +180,46 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // STEP 1: Search
+    // STEP 1: Search — tries multiple title variants
     // =================================================================
 
     private suspend fun searchShow(title: String): String? {
-        val data = buildJsonObject {
-            putJsonObject("variables") {
-                putJsonObject("search") {
-                    put("query", title)
-                    put("allowAdult", true)
-                    put("allowUnknown", true)
-                }
-                put("limit", 26)
-                put("page", 1)
-                put("translationType", "sub")
-                put("countryOrigin", "ALL")
-            }
-            put("query", SEARCH_QUERY)
-        }
+        // Try the raw title first, then cleaned variants
+        val titlesToTry = listOf(
+            title,
+            title.replace(Regex("\\(.*?\\)"), "").trim(),
+            title.replace(Regex("\\[.*?\\]"), "").trim(),
+            title.replace(Regex("Season \\d+", RegexOption.IGNORE_CASE), "").trim(),
+            title.replace(Regex("\\d+(st|nd|rd|th)\\s+Season", RegexOption.IGNORE_CASE), "").trim(),
+        ).distinct().filter { it.isNotBlank() }
 
-        return try {
-            val responseBody = client.newCall(buildPost(data))
-                .awaitSuccess().bodyString()
-            val result = responseBody.parseAs<SearchResult>()
-            result.data.shows.edges.firstOrNull()?.id
-        } catch (_: Exception) {
-            null
+        for (searchTitle in titlesToTry) {
+            val data = buildJsonObject {
+                putJsonObject("variables") {
+                    putJsonObject("search") {
+                        put("query", searchTitle)
+                        put("allowAdult", true)
+                        put("allowUnknown", true)
+                    }
+                    put("limit", 26)
+                    put("page", 1)
+                    put("translationType", "sub")
+                    put("countryOrigin", "ALL")
+                }
+                put("query", SEARCH_QUERY)
+            }
+
+            try {
+                val responseBody = client.newCall(buildPost(data))
+                    .awaitSuccess().bodyString()
+                val result = responseBody.parseAs<SearchResult>()
+                val showId = result.data.shows.edges.firstOrNull()?.id
+                if (showId != null) return showId
+            } catch (_: Exception) {
+                continue
+            }
         }
+        return null
     }
 
     // =================================================================
@@ -284,7 +267,7 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // STEP 3: Extract from internal hosters
+    // STEP 3: Extract — NO FILTER, try everything
     // =================================================================
 
     private suspend fun extractFromInternal(
@@ -332,7 +315,7 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // CRYPTO: XOR source URL decryption
+    // CRYPTO
     // =================================================================
 
     private fun String.decryptSource(): String {
@@ -364,10 +347,6 @@ class AllAnimeProvider(
         })
     }
 
-    // =================================================================
-    // CRYPTO: AES-GCM tobeparsed decryption
-    // =================================================================
-
     private fun decryptTobeparsed(base64Payload: String): String {
         val blob = Base64.decode(base64Payload, Base64.DEFAULT)
         if (blob.size < 13) return ""
@@ -396,7 +375,7 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // ENTRY POINT
+    // ENTRY POINT — no filters, try everything
     // =================================================================
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
@@ -404,25 +383,32 @@ class AllAnimeProvider(
         val title = anime.title.ifBlank { meta.title }
         if (title.isBlank()) return emptyList()
 
+        // Ensure epNum is at least 1
+        val epNum = if (meta.epNum > 0) meta.epNum else 1
+
         return try {
             val showId = searchShow(title) ?: return emptyList()
-            val sourceUrls = getSourceUrls(showId, meta.epNum, "sub")
+            val sourceUrls = getSourceUrls(showId, epNum, "sub")
             if (sourceUrls.isEmpty()) return emptyList()
 
             val iframeEndpoint = getIframeEndpoint()
 
-            sourceUrls
-                .filter { source ->
+            // NO FILTER — try every source URL
+            sourceUrls.flatMap { source ->
+                runCatching {
                     val videoUrl = source.sourceUrl.decryptSource()
-                    videoUrl.startsWith("/apivtwo/") && INTERNAL_HOSTER_NAMES.any {
-                        Regex("""\b${it.lowercase()}\b""")
-                            .find(source.sourceName.lowercase()) != null
+                    when {
+                        videoUrl.startsWith("/apivtwo/") ->
+                            extractFromInternal(videoUrl, source.sourceName, iframeEndpoint)
+                        videoUrl.startsWith("http") && videoUrl.contains(".m3u8") ->
+                            playlistUtils.extractFromHls(
+                                videoUrl,
+                                videoNameGen = { "$name - $it (${source.sourceName})" },
+                            )
+                        else -> emptyList()
                     }
-                }
-                .flatMap { source ->
-                    val videoUrl = source.sourceUrl.decryptSource()
-                    extractFromInternal(videoUrl, source.sourceName, iframeEndpoint)
-                }
+                }.getOrElse { emptyList() }
+            }
         } catch (_: Exception) {
             emptyList()
         }
