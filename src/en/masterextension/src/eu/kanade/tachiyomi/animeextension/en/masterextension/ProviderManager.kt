@@ -6,6 +6,7 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniDapProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnikageProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniWaveProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniNekoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeKizzProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.MegaCloudProvider
@@ -36,7 +37,7 @@ class ProviderManager(
             "anineko"    to AniNekoProvider(client, headers),
             "animekizz"  to AnimeKizzProvider(client, headers),
             // Encrypted sources (slower, larger libraries)
-            "megacloud"  to MegaCloudProvider(client, headers),
+            "aniwave"    to AniWaveProvider(client, headers),
             "gogo"       to GogoProvider(client, headers),
             "allanime"   to AllAnimeProvider(client, headers),
             "rapidcloud" to RapidCloudProvider(client, headers, preferences),
