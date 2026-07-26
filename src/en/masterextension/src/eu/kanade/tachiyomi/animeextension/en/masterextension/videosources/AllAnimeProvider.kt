@@ -29,13 +29,6 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-/**
- * AllAnime provider — uses AllAnime's GraphQL API with XOR-encrypted
- * source URLs and AES-GCM encrypted episode responses.
- *
- * Flow: title search (GraphQL) → episode sources (GraphQL + decrypt) →
- *       XOR decrypt source URL → internal /clock.json → m3u8/mp4
- */
 class AllAnimeProvider(
     private val client: OkHttpClient,
     private val headers: Headers,
@@ -72,6 +65,34 @@ class AllAnimeProvider(
             "Default", "Ac", "Ak", "Kir", "Rab", "Luf-mp4",
             "Si-Hls", "S-mp4", "Ac-Hls", "Uv-mp4", "Pn-Hls",
         )
+
+        private const val SEARCH_QUERY = """
+            query(
+                ${'$'}search: SearchInput,
+                ${'$'}limit: Int,
+                ${'$'}page: Int,
+                ${'$'}translationType: VaildTranslationTypeEnumType,
+                ${'$'}countryOrigin: VaildCountryOriginEnumType
+            ) {
+                shows(
+                    search: ${'$'}search,
+                    limit: ${'$'}limit,
+                    page: ${'$'}page,
+                    translationType: ${'$'}translationType,
+                    countryOrigin: ${'$'}countryOrigin
+                ) {
+                    edges {
+                        _id
+                        name
+                        englishName
+                        nativeName
+                        thumbnail
+                        availableEpisodes
+                        __typename
+                    }
+                }
+            }
+        """
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
@@ -107,29 +128,6 @@ class AllAnimeProvider(
                     val id: String,
                     val name: String,
                     val englishName: String? = null,
-                )
-            }
-        }
-    }
-
-    @Serializable
-    private data class SeriesResult(
-        val data: DataShow,
-    ) {
-        @Serializable
-        data class DataShow(
-            val show: SeriesShows,
-        ) {
-            @Serializable
-            data class SeriesShows(
-                @SerialName("_id")
-                val id: String,
-                val availableEpisodesDetail: AvailableEps,
-            ) {
-                @Serializable
-                data class AvailableEps(
-                    val sub: List<String>? = null,
-                    val dub: List<String>? = null,
                 )
             }
         }
@@ -220,7 +218,11 @@ class AllAnimeProvider(
         }
 
         return try {
-            val result = buildPost(data).parseAs<SearchResult>()
+            val payload = data.toJsonString().toJsonBody()
+            val responseBody = client.newCall(
+                POST("$API_URL/api", headers = postHeaders, body = payload),
+            ).awaitSuccess().bodyString()
+            val result = responseBody.parseAs<SearchResult>()
             result.data.shows.edges.firstOrNull()?.id
         } catch (_: Exception) {
             null
@@ -257,7 +259,6 @@ class AllAnimeProvider(
         val responseBody = client.newCall(GET(url, headers))
             .awaitSuccess().bodyString()
 
-        // Check for encrypted response
         val tobeparsed = runCatching {
             responseBody.parseAs<EncryptedEpisodeResult>().data.tobeparsed
         }.getOrNull()
@@ -375,12 +376,6 @@ class AllAnimeProvider(
     // HELPERS
     // =================================================================
 
-    private suspend fun buildPost(data: kotlinx.serialization.json.JsonObject): String {
-        val payload = data.toJsonString().toJsonBody()
-        return client.newCall(POST("$API_URL/api", headers = postHeaders, body = payload))
-            .awaitSuccess().bodyString()
-    }
-
     private suspend fun getIframeEndpoint(): String {
         return runCatching {
             client.newCall(GET("$SITE_URL/getVersion", headers))
@@ -400,18 +395,14 @@ class AllAnimeProvider(
         if (title.isBlank()) return emptyList()
 
         return try {
-            // Step 1: Search → internal ID
             val showId = searchShow(title) ?: return emptyList()
 
-            // Step 2: Get source URLs
             val translationType = "sub"
             val sourceUrls = getSourceUrls(showId, meta.epNum, translationType)
             if (sourceUrls.isEmpty()) return emptyList()
 
-            // Step 3: Get player endpoint
             val iframeEndpoint = getIframeEndpoint()
 
-            // Step 4: Process internal hosters only (external hosters need separate extractors)
             sourceUrls
                 .filter { source ->
                     val videoUrl = source.sourceUrl.decryptSource()
@@ -426,35 +417,5 @@ class AllAnimeProvider(
         } catch (_: Exception) {
             emptyList()
         }
-    }
-
-    companion object Queries {
-        private const val SEARCH_QUERY = """
-            query(
-                ${'$'}search: SearchInput,
-                ${'$'}limit: Int,
-                ${'$'}page: Int,
-                ${'$'}translationType: VaildTranslationTypeEnumType,
-                ${'$'}countryOrigin: VaildCountryOriginEnumType
-            ) {
-                shows(
-                    search: ${'$'}search,
-                    limit: ${'$'}limit,
-                    page: ${'$'}page,
-                    translationType: ${'$'}translationType,
-                    countryOrigin: ${'$'}countryOrigin
-                ) {
-                    edges {
-                        _id
-                        name
-                        englishName
-                        nativeName
-                        thumbnail
-                        availableEpisodes
-                        __typename
-                    }
-                }
-            }
-        """
     }
 }
