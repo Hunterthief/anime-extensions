@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
+import android.app.Application
+import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import aniyomi.lib.gogostreamextractor.GogoStreamExtractor
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
@@ -8,10 +10,13 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 
 class GogoProvider(
     private val client: OkHttpClient,
@@ -31,6 +36,15 @@ class GogoProvider(
     private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
+    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+    // FIX: Manually attach CloudflareInterceptor to bypass CF challenges
+    private val cfClient by lazy {
+        client.newBuilder()
+            .addInterceptor(CloudflareInterceptor(Injekt.get(Application::class.java), client.cookieJar, userAgent))
+            .build()
+    }
+
     private fun debugVideo(msg: String): List<Video> {
         return listOf(
             Video(
@@ -44,7 +58,7 @@ class GogoProvider(
     private fun siteHeaders(baseUrl: String) = headers.newBuilder()
         .set("Referer", "$baseUrl/")
         .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .set("User-Agent", userAgent)
         .removeAll("Origin")
         .build()
 
@@ -56,16 +70,12 @@ class GogoProvider(
                     .addQueryParameter("keyword", title)
                     .build().toString()
 
-                val response = client.newCall(GET(url, siteHeaders(domain))).execute()
-                val html = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    lastError = Exception("HTTP ${response.code} - ${html.take(100)}")
-                    continue
-                }
+                // FIX: Use awaitSuccess to prevent blocking the thread
+                val response = cfClient.newCall(GET(url, siteHeaders(domain))).awaitSuccess()
+                val html = response.body.string()
 
                 val doc = Jsoup.parse(html, domain)
 
-                // FIX: Broadened selector to just look for the first category link inside the list
                 val firstResult = doc.selectFirst("ul.items li a[href*=/category/]")
                     ?: doc.selectFirst("div.last_recent ul li a[href*=/category/]")
                     ?: doc.selectFirst("a[href*=/category/]")
@@ -96,9 +106,8 @@ class GogoProvider(
     ): List<String> {
         val epUrl = categoryUrl.replace("/category/", "/") + "-episode-$epNum"
 
-        val response = client.newCall(GET(epUrl, siteHeaders(baseUrl))).execute()
-        val html = response.body?.string().orEmpty()
-        if (!response.isSuccessful) throw Exception("HTTP ${response.code} - ${html.take(100)}")
+        val response = cfClient.newCall(GET(epUrl, siteHeaders(baseUrl))).awaitSuccess()
+        val html = response.body.string()
 
         val doc = Jsoup.parse(html, baseUrl)
         val serverUrls = mutableListOf<String>()
