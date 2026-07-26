@@ -103,10 +103,11 @@ class AniWaveProvider(
             throw UnsupportedOperationException()
     }
 
-    // FIX: Override AniList Origin/Accept headers so the site doesn't block us
+    // FIX: Add User-Agent and remove AniList Origin/Accept headers
     private fun siteHeaders(baseUrl: String) = headers.newBuilder()
         .set("Referer", "$baseUrl/")
         .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
         .removeAll("Origin")
         .build()
 
@@ -114,6 +115,7 @@ class AniWaveProvider(
         .set("Accept", "application/json, text/javascript, */*; q=0.01")
         .set("Referer", "$baseUrl$refererPath")
         .set("X-Requested-With", "XMLHttpRequest")
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
         .removeAll("Origin")
         .build()
 
@@ -153,14 +155,13 @@ class AniWaveProvider(
         title: String,
     ): Triple<String, String, String> {
         var lastError: Throwable? = null
+        val encodedTitle = URLEncoder.encode(title, "utf-8")
+        
         for (domain in DOMAINS) {
             try {
                 val vrf = vrfEncrypt(title)
-                val url = "$domain/filter".toHttpUrl().newBuilder()
-                    .addQueryParameter("keyword", title)
-                    .addQueryParameter("page", "1")
-                    .addQueryParameter("vrf", vrf)
-                    .build().toString()
+                // FIX: Manually build URL to prevent OkHttp from double-encoding the VRF token
+                val url = "$domain/filter?keyword=$encodedTitle&page=1&vrf=$vrf"
 
                 val html = client.newCall(GET(url, siteHeaders(domain)))
                     .awaitSuccess().bodyString()
@@ -288,6 +289,7 @@ class AniWaveProvider(
 
         val pageHeaders = headers.newBuilder()
             .set("Referer", "$baseUrl/")
+            .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
             .removeAll("Origin")
             .build()
 
@@ -341,6 +343,7 @@ class AniWaveProvider(
             .set("X-Requested-With", "XMLHttpRequest")
             .set("Referer", embedUrl)
             .set("Origin", "https://$host")
+            .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
             .build()
 
         val sourceData = try {
@@ -362,6 +365,7 @@ class AniWaveProvider(
         val vidHeaders = headers.newBuilder()
             .set("Referer", "https://$host/")
             .set("Origin", "https://$host")
+            .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
             .build()
 
         return playlistUtils.extractFromHls(
@@ -381,6 +385,7 @@ class AniWaveProvider(
     ): List<Video> {
         val vidHeaders = headers.newBuilder()
             .set("Referer", referer)
+            .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
             .removeAll("Origin")
             .build()
         return playlistUtils.extractFromHls(
