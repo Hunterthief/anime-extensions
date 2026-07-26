@@ -93,37 +93,55 @@ class AnimePaheProvider(
     // =================================================================
 
     private suspend fun searchAnime(title: String): SearchResult? {
-        val url = "$BASE_URL/api".toHttpUrl().newBuilder()
-            .addQueryParameter("m", "search")
-            .addQueryParameter("q", title)
-            .build().toString()
+        // Try exact title first, then simplified
+        val titlesToTry = listOf(
+            title,
+            title.replace(Regex("[,;:!?]"), "").trim(),
+            title.substringBefore(":").trim(),
+            title.substringBefore(",").trim()
+        ).distinct()
 
-        return try {
-            client.newCall(GET(url, paheHeaders))
-                .awaitSuccess().bodyString()
-                .parseAs<SearchResponse>()
-                .data.firstOrNull()
-        } catch (_: Exception) {
-            null
+        for (searchTitle in titlesToTry) {
+            val url = "$BASE_URL/api".toHttpUrl().newBuilder()
+                .addQueryParameter("m", "search")
+                .addQueryParameter("q", searchTitle)
+                .build().toString()
+
+            try {
+                val result = client.newCall(GET(url, paheHeaders))
+                    .awaitSuccess().bodyString()
+                    .parseAs<SearchResponse>()
+                    .data.firstOrNull()
+
+                if (result != null) return result
+            } catch (_: Exception) {
+                continue
+            }
         }
+        return null
     }
 
     // =================================================================
-    // STEP 2: Anime page → UUID
+    // STEP 2: Anime page → UUID (parse from HTML, not redirect)
     // =================================================================
 
     private suspend fun getAnimeUuid(animeId: Int): String? {
-        return try {
-            val response = client.newCall(GET("$BASE_URL/anime/$animeId", pageHeaders))
-                .awaitSuccess()
-            val finalUrl = response.request.url.toString()
-            response.close()
-
-            val uuid = finalUrl.substringAfter("/anime/").substringBefore("/").substringBefore("?")
-            if (uuid.isNotBlank() && uuid != animeId.toString()) uuid else null
+        val html = try {
+            client.newCall(GET("$BASE_URL/anime/$animeId", pageHeaders))
+                .awaitSuccess().bodyString()
         } catch (_: Exception) {
-            null
+            return null
         }
+
+        // Look for /play/$uuid/ or /anime/$uuid in the page HTML
+        val uuidRegex = Regex("""/play/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/""")
+        uuidRegex.find(html)?.groupValues?.get(1)?.let { return it }
+
+        // Fallback: /anime/$uuid link
+        val animeUuidRegex = Regex("""/anime/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})""")
+        animeUuidRegex.find(html)?.groupValues?.get(1)?.let { return it }
+
+        return null
     }
 
     // =================================================================
@@ -185,7 +203,7 @@ class AnimePaheProvider(
     }
 
     // =================================================================
-    // STEP 5: Kwik page → m3u8 URL (packed JS extraction)
+    // STEP 5: Kwik page → m3u8 URL
     // =================================================================
 
     private suspend fun extractM3u8FromKwik(kwikUrl: String): String? {
@@ -195,11 +213,11 @@ class AnimePaheProvider(
             return null
         }
 
-        // Strategy 1: Direct m3u8 in plain text (unlikely but try first)
+        // Strategy 1: Direct m3u8 in plain text
         val directMatch = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(pageBody)
         if (directMatch != null) return directMatch.value
 
-        // Strategy 2: Unpack eval(function(p,a,c,k,e,d){...}) and regex
+        // Strategy 2: Unpack eval(function(p,a,c,k,e,d){...}) then regex
         val unpacked = JsUnpacker.unpackAndCombine(pageBody)
         if (unpacked != null) {
             val unpackedMatch = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(unpacked)
@@ -209,14 +227,18 @@ class AnimePaheProvider(
             if (varMatch != null) return varMatch.groupValues[1]
         }
 
-        // Strategy 3: Regex the packed dictionary directly
-        // The URL components appear at the end: 'm3u8|uwu|$hash|$num|stream|top|uwucdn|vault|https'
-        val dictMatch = Regex("""'(m3u8)\|(uwu)\|([a-f0-9]{64})\|(\d+)\|(stream)\|(top)\|(uwucdn)\|(vault)\|(https)'""").find(pageBody)
+        // Strategy 3: Regex the packed dictionary directly (no leading quote)
+        // Pattern in the packed string: m3u8|uwu|$hash|$num|stream|top|uwucdn|vault|https
+        val dictMatch = Regex("""m3u8\|uwu\|([a-f0-9]{64})\|(\d+)\|stream\|top\|(uwucdn)\|(vault)\|https""").find(pageBody)
         if (dictMatch != null) {
-            val hash = dictMatch.groupValues[3]
-            val num = dictMatch.groupValues[4]
+            val hash = dictMatch.groupValues[1]
+            val num = dictMatch.groupValues[2]
             return "https://vault-11.uwucdn.top/stream/$num/$hash/uwu.m3u8"
         }
+
+        // Strategy 4: Broader vault URL pattern in raw HTML
+        val vaultMatch = Regex("""https?://vault-\d+\.[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(pageBody)
+        if (vaultMatch != null) return vaultMatch.value
 
         return null
     }
@@ -255,7 +277,7 @@ class AnimePaheProvider(
         // Step 1: Search
         val searchResult = searchAnime(title) ?: return emptyList()
 
-        // Step 2: Get UUID
+        // Step 2: Get UUID from anime page HTML
         val uuid = getAnimeUuid(searchResult.id) ?: return emptyList()
 
         // Step 3: Get episode session
