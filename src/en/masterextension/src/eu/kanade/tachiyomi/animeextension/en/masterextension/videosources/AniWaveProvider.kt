@@ -14,7 +14,6 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.KSerializer
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
@@ -23,7 +22,6 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonDecoder
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
@@ -31,7 +29,6 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 
@@ -47,10 +44,9 @@ class AniWaveProvider(
 
         private val DATA_ID_REGEX = Regex("""data-id="([^"]+)"""")
         private val M3U8_REGEX = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""")
-        private val IFRAME_SRC_REGEX = Regex("""<iframe[^>]+src="([^"]+)"""")
         private val EP_URL_SUFFIX_REGEX = Regex("""/ep-\d+$""")
 
-        // VRF encryption keys (from AnikotoUtils)
+        // VRF keys from AnikotoUtils
         private val EXCHANGE_KEY_1 = listOf("AP6GeR8H0lwUz1", "UAz8Gwl10P6ReH")
         private const val RC4_KEY_1 = "ItFKjuWokn4ZpB"
         private const val RC4_KEY_2 = "fOyt97QWFB3"
@@ -62,9 +58,7 @@ class AniWaveProvider(
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
     private val docHeaders by lazy {
-        headers.newBuilder()
-            .set("Referer", "$BASE_URL/")
-            .build()
+        headers.newBuilder().set("Referer", "$BASE_URL/").build()
     }
 
     private fun xhrHeaders(referer: String): Headers {
@@ -76,7 +70,7 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // VRF Encryption (from AnikotoUtils)
+    // VRF Encryption
     // =================================================================
 
     private fun vrfEncrypt(input: String): String {
@@ -97,8 +91,7 @@ class AniWaveProvider(
         val rc4Key = SecretKeySpec(key.toByteArray(), "RC4")
         val cipher = Cipher.getInstance("RC4")
         cipher.init(Cipher.ENCRYPT_MODE, rc4Key, cipher.parameters)
-        val output = cipher.doFinal(input.toByteArray())
-        return Base64.encode(output, Base64.URL_SAFE or Base64.NO_WRAP)
+        return Base64.encode(cipher.doFinal(input.toByteArray()), Base64.URL_SAFE or Base64.NO_WRAP)
             .toString(Charsets.UTF_8)
     }
 
@@ -110,23 +103,37 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // STEP 1: Search by title → anime path
+    // STEP 1: Search — try with and without VRF
     // =================================================================
 
     private suspend fun searchAnime(title: String): String? {
-        val vrf = vrfEncrypt(title)
-        val encodedTitle = java.net.URLEncoder.encode(title, "utf-8")
-        val url = "$BASE_URL/filter?keyword=$encodedTitle&vrf=$vrf"
-        return try {
-            val doc = client.newCall(GET(url, docHeaders)).awaitSuccess().asJsoup()
-            val firstResult = doc.selectFirst("div.ani.items > div.item a.name")
-                ?: doc.selectFirst("div.item a[href*=/watch/]")
-                ?: doc.selectFirst("a[href*=/watch/]")
-            val href = firstResult?.attr("href") ?: return null
-            EP_URL_SUFFIX_REGEX.replace(href.substringBefore("?"), "")
-        } catch (_: Exception) {
-            null
+        val cleanTitle = title
+            .replace(Regex("\\(.*?\\)"), "")
+            .replace(Regex("\\[.*?\\]"), "")
+            .trim()
+
+        // Try with VRF first
+        val vrf = runCatching { vrfEncrypt(cleanTitle) }.getOrNull() ?: ""
+        val encodedTitle = java.net.URLEncoder.encode(cleanTitle, "utf-8")
+
+        val urlsToTry = listOf(
+            "$BASE_URL/filter?keyword=$encodedTitle&vrf=$vrf",
+            "$BASE_URL/filter?keyword=$encodedTitle",
+        )
+
+        for (url in urlsToTry) {
+            try {
+                val doc = client.newCall(GET(url, docHeaders)).awaitSuccess().asJsoup()
+                val firstResult = doc.selectFirst("div.ani.items > div.item a.name")
+                    ?: doc.selectFirst("div.item a[href*=/watch/]")
+                    ?: doc.selectFirst("a[href*=/watch/]")
+                val href = firstResult?.attr("href") ?: continue
+                return EP_URL_SUFFIX_REGEX.replace(href.substringBefore("?"), "")
+            } catch (_: Exception) {
+                continue
+            }
         }
+        return null
     }
 
     // =================================================================
@@ -145,11 +152,11 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // STEP 3: Get episode list → find episode's data-ids
+    // STEP 3: Get episode list → episode data-ids
     // =================================================================
 
     private suspend fun getEpisodeIds(animeId: String, epNum: Int, animePath: String): String? {
-        val vrf = vrfEncrypt(animeId)
+        val vrf = runCatching { vrfEncrypt(animeId) }.getOrNull() ?: ""
         val url = "$BASE_URL/ajax/episode/list/$animeId?vrf=$vrf"
         return try {
             val responseBody = client.newCall(GET(url, xhrHeaders("$BASE_URL$animePath")))
@@ -170,7 +177,7 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // STEP 4: Get server list → server IDs and names
+    // STEP 4: Get server list
     // =================================================================
 
     private data class ServerInfo(val id: String, val name: String, val type: String)
@@ -185,8 +192,7 @@ class AniWaveProvider(
 
             doc.select("div.servers > div.type").flatMap { typeElem ->
                 val label = typeElem.selectFirst("label")?.text()?.trim()
-                    ?: typeElem.attr("data-type")
-                    ?: "Sub"
+                    ?: typeElem.attr("data-type").ifEmpty { "Sub" }
 
                 typeElem.select("li").mapNotNull { li ->
                     if (li.hasClass("download-icon")) return@mapNotNull null
@@ -203,7 +209,7 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // STEP 5: Get embed URL for a server
+    // STEP 5: Get embed URL
     // =================================================================
 
     private suspend fun getEmbedUrl(serverId: String, epUrl: String): String? {
@@ -218,37 +224,25 @@ class AniWaveProvider(
     }
 
     // =================================================================
-    // STEP 6: Extract m3u8 from embed page
+    // STEP 6: Extract m3u8
     // =================================================================
 
     private suspend fun extractFromEmbed(embedUrl: String, server: ServerInfo): List<Video> {
         val host = try { embedUrl.toHttpUrl().host } catch (_: Exception) { return emptyList() }
 
-        val pageHeaders = headers.newBuilder()
-            .set("Referer", "$BASE_URL/")
-            .build()
-
         val pageBody = try {
-            client.newCall(GET(embedUrl, pageHeaders)).awaitSuccess().bodyString()
+            client.newCall(GET(embedUrl, docHeaders)).awaitSuccess().bodyString()
         } catch (_: Exception) {
             return emptyList()
         }
 
-        // Strategy 1: data-id → getSources API (AnikotoExtractor approach)
+        // Strategy 1: data-id → getSources API
         val dataId = DATA_ID_REGEX.find(pageBody)?.groupValues?.get(1)
         if (dataId != null) {
             return fetchSourcesFromApi(dataId, host, embedUrl, server)
         }
 
-        // Strategy 2: iframe redirect
-        val iframeSrc = IFRAME_SRC_REGEX.find(pageBody)?.groupValues?.get(1)
-        if (iframeSrc != null) {
-            val resolvedSrc = if (iframeSrc.startsWith("http")) iframeSrc
-            else embedUrl.toHttpUrl().resolve(iframeSrc)?.toString() ?: iframeSrc
-            return extractFromEmbed(resolvedSrc, server)
-        }
-
-        // Strategy 3: direct m3u8 in page
+        // Strategy 2: direct m3u8 in page
         val m3u8Url = M3U8_REGEX.find(pageBody)?.value
         if (m3u8Url != null) {
             return extractHls(m3u8Url, server, "https://$host/")
@@ -270,14 +264,12 @@ class AniWaveProvider(
             .set("Origin", "https://$host")
             .build()
 
-        // Try primary endpoint
         val data = try {
             val body = client.newCall(
                 GET("https://$host/stream/getSources?id=$dataId&id=$dataId", apiHeaders),
             ).awaitSuccess().bodyString()
             body.parseAs<SourceResponseDto>()
         } catch (_: Exception) {
-            // Try fallback endpoint
             try {
                 val body = client.newCall(
                     GET("https://$host/stream/getSourcesNew?id=$dataId&id=$dataId", apiHeaders),
@@ -330,23 +322,17 @@ class AniWaveProvider(
         val title = anime.title.ifBlank { meta.title }
         if (title.isBlank()) return emptyList()
 
+        val epNum = if (meta.epNum > 0) meta.epNum else 1
+
         return try {
-            // Step 1: Search → anime path
             val animePath = searchAnime(title) ?: return emptyList()
-
-            // Step 2: Anime page → data-id
             val animeId = getAnimeId(animePath) ?: return emptyList()
+            val episodeIds = getEpisodeIds(animeId, epNum, animePath) ?: return emptyList()
 
-            // Step 3: Episode list → episode data-ids
-            val episodeIds = getEpisodeIds(animeId, meta.epNum, animePath)
-                ?: return emptyList()
-
-            // Step 4: Server list
-            val epUrl = "$animePath/ep-${meta.epNum}"
+            val epUrl = "$animePath/ep-$epNum"
             val servers = getServerList(episodeIds, epUrl)
             if (servers.isEmpty()) return emptyList()
 
-            // Step 5+6: For each server → embed URL → extract
             servers.flatMap { server ->
                 runCatching {
                     val embedUrl = getEmbedUrl(server.id, epUrl) ?: return@flatMap emptyList()
