@@ -9,7 +9,6 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.Anikag
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniWaveProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniNekoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeKizzProvider
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.MegaCloudProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.GogoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AllAnimeProvider
 import keiyoushi.utils.parallelCatchingFlatMap
