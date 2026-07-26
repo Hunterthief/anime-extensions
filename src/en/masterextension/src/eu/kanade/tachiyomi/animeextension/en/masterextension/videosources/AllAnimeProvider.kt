@@ -404,7 +404,7 @@ class AllAnimeProvider(
             val showId = searchShow(title) ?: return emptyList()
 
             // Step 2: Get source URLs
-            val translationType = if (meta.isDub) "dub" else "sub"
+            val translationType = "sub"
             val sourceUrls = getSourceUrls(showId, meta.epNum, translationType)
             if (sourceUrls.isEmpty()) return emptyList()
 
