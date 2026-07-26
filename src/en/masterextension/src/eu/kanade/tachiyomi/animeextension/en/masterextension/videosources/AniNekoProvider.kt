@@ -83,7 +83,7 @@ class AniNekoProvider(
     }
 
     // =================================================================
-    // STEP 2: Watch page → extract server URLs
+    // STEP 2: Watch page → extract server URLs (skip vivibebe.site)
     // =================================================================
 
     private data class ServerSource(
@@ -112,6 +112,9 @@ class AniNekoProvider(
                 val serverName = btn.text().trim().substringBefore("\n").trim()
 
                 if (dataVideo.isNotBlank()) {
+                    // Skip vivibebe.site — no CORS headers, doesn't play in ExoPlayer
+                    if (dataVideo.contains("vivibebe.site")) return@forEach
+
                     val subtitleUrl = when {
                         dataVideo.contains("sub=") ->
                             dataVideo.substringAfter("sub=").substringBefore("&").ifBlank { null }
@@ -131,7 +134,7 @@ class AniNekoProvider(
     }
 
     // =================================================================
-    // STEP 3: Get m3u8 URL
+    // STEP 3: Get m3u8 URL from each server
     // =================================================================
 
     private suspend fun getM3u8(source: ServerSource): Pair<String, Headers>? {
@@ -139,17 +142,8 @@ class AniNekoProvider(
         val cleanUrl = dataVideo.substringBefore("?")
 
         return when {
-            // ─── vivibebe.site (HD-1): direct m3u8 on same domain ───
-            cleanUrl.contains("vivibebe.site") -> {
-                val id = cleanUrl.substringAfter("vivibebe.site/").trim('/')
-                val m3u8 = "https://vivibebe.site/public/stream/$id/master.m3u8"
-                val vidHeaders = headers.newBuilder()
-                    .set("Referer", cleanUrl)
-                    .build()
-                Pair(m3u8, vidHeaders)
-            }
-
-            // ─── bibiemb.xyz (HD-2): workers.dev CDN ───
+            // ─── bibiemb.xyz (HD-2): direct construction, workers.dev CDN ───
+            // access-control-allow-origin: *
             cleanUrl.contains("bibiemb.xyz") -> {
                 val id = cleanUrl.substringAfter("bibiemb.xyz/").trim('/')
                 val m3u8 = "https://morning-credit-3bcc.vibevibe.workers.dev/$id/master.m3u8"
@@ -160,10 +154,17 @@ class AniNekoProvider(
                 Pair(m3u8, vidHeaders)
             }
 
-            // ─── otakuhg.site (StreamHG): fetch player page → regex ───
+            // ─── otakuhg.site (StreamHG): fetch player page → regex m3u8 ───
+            // access-control-allow-origin: https://otakuhg.site
             cleanUrl.contains("otakuhg.site") -> {
+                val playerHeaders = headers.newBuilder()
+                    .set("Referer", cleanUrl)
+                    .set("Cookie", "lang=1")
+                    .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    .build()
+
                 val playerBody = try {
-                    client.newCall(GET(cleanUrl, nekoHeaders)).awaitSuccess().bodyString()
+                    client.newCall(GET(cleanUrl, playerHeaders)).awaitSuccess().bodyString()
                 } catch (_: Exception) { return null }
 
                 val m3u8 = Regex("""https?://[^\s"'<>\\]+\.urlset/master\.txt""").find(playerBody)?.value
@@ -178,10 +179,17 @@ class AniNekoProvider(
                 Pair(m3u8, vidHeaders)
             }
 
-            // ─── otakuvid.online (Earnvids): fetch player page → regex ───
+            // ─── otakuvid.online (Earnvids): fetch player page → regex m3u8 ───
+            // access-control-allow-origin: https://otakuvid.online
             cleanUrl.contains("otakuvid.online") -> {
+                val playerHeaders = headers.newBuilder()
+                    .set("Referer", cleanUrl)
+                    .set("Cookie", "lang=1")
+                    .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    .build()
+
                 val playerBody = try {
-                    client.newCall(GET(cleanUrl, nekoHeaders)).awaitSuccess().bodyString()
+                    client.newCall(GET(cleanUrl, playerHeaders)).awaitSuccess().bodyString()
                 } catch (_: Exception) { return null }
 
                 val m3u8 = Regex("""https?://[^\s"'<>\\]+/master\.m3u8""").find(playerBody)?.value
@@ -190,7 +198,7 @@ class AniNekoProvider(
                     ?: return null
 
                 val vidHeaders = headers.newBuilder()
-                    .set("Referer", cleanUrl)
+                    .set("Referer", "https://otakuvid.online/")
                     .set("Origin", "https://otakuvid.online")
                     .build()
                 Pair(m3u8, vidHeaders)
@@ -202,8 +210,7 @@ class AniNekoProvider(
 
     // =================================================================
     // STEP 4: Create Video directly with master m3u8
-    // ExoPlayer handles the full HLS chain (master → variants → segments)
-    // with the same headers on every request.
+    // ExoPlayer handles the full HLS chain internally.
     // =================================================================
 
     private fun createVideo(
