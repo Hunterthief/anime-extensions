@@ -103,14 +103,18 @@ class AniWaveProvider(
             throw UnsupportedOperationException()
     }
 
+    // FIX: Override AniList Origin/Accept headers so the site doesn't block us
     private fun siteHeaders(baseUrl: String) = headers.newBuilder()
         .set("Referer", "$baseUrl/")
+        .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .removeHeader("Origin")
         .build()
 
     private fun ajaxHeaders(baseUrl: String, refererPath: String) = headers.newBuilder()
         .set("Accept", "application/json, text/javascript, */*; q=0.01")
         .set("Referer", "$baseUrl$refererPath")
         .set("X-Requested-With", "XMLHttpRequest")
+        .removeHeader("Origin")
         .build()
 
     private fun vrfEncrypt(input: String): String {
@@ -147,22 +151,23 @@ class AniWaveProvider(
 
     private suspend fun searchAnime(
         title: String,
-    ): Triple<String, String, String>? {
+    ): Triple<String, String, String> {
+        var lastError: Throwable? = null
         for (domain in DOMAINS) {
             try {
                 val vrf = vrfEncrypt(title)
                 val url = "$domain/filter".toHttpUrl().newBuilder()
                     .addQueryParameter("keyword", title)
+                    .addQueryParameter("page", "1")
                     .addQueryParameter("vrf", vrf)
                     .build().toString()
 
                 val html = client.newCall(GET(url, siteHeaders(domain)))
                     .awaitSuccess().bodyString()
 
-                // FIX: pass domain to Jsoup so abs:href works properly
                 val doc = Jsoup.parse(html, domain)
                 
-                val item = doc.selectFirst("div.ani.items div.item a.name")
+                val item = doc.selectFirst("div.ani.items > div.item a.name")
                     ?: doc.selectFirst("div.item a[href*=/watch/]")
                     ?: doc.selectFirst("a[href*=/watch/]")
 
@@ -171,8 +176,9 @@ class AniWaveProvider(
                         .substringBefore("?").replace(Regex("/ep-\\d+$"), "")
                         
                     if (href.isNotBlank()) {
-                        val path = if (href.startsWith("http")) href.substringAfter(domain) else href
-                        // Load the anime page to get data-id
+                        var path = if (href.startsWith("http")) href.substringAfter(domain) else href
+                        if (!path.startsWith("/")) path = "/$path"
+                        
                         val animeHtml = client.newCall(GET("$domain$path", siteHeaders(domain)))
                             .awaitSuccess().bodyString()
                         val animeDoc = Jsoup.parse(animeHtml, domain)
@@ -182,13 +188,18 @@ class AniWaveProvider(
                         if (dataId.isNotBlank()) {
                             return Triple(domain, path, dataId)
                         }
+                        lastError = Exception("No data-id found at $path")
+                    } else {
+                        lastError = Exception("Empty href")
                     }
+                } else {
+                    lastError = Exception("No results in HTML")
                 }
-            } catch (_: Exception) {
-                continue
+            } catch (e: Exception) {
+                lastError = e
             }
         }
-        return null
+        throw lastError ?: Exception("Search returned null")
     }
 
     private suspend fun getEpisodeServerIds(
@@ -277,6 +288,7 @@ class AniWaveProvider(
 
         val pageHeaders = headers.newBuilder()
             .set("Referer", "$baseUrl/")
+            .removeHeader("Origin")
             .build()
 
         val pageBody = client.newCall(GET(embedUrl, pageHeaders))
@@ -332,10 +344,10 @@ class AniWaveProvider(
             .build()
 
         val sourceData = try {
-            client.newCall(GET("https://$host/stream/getSources?id=$dataId", apiHeaders))
+            client.newCall(GET("https://$host/stream/getSources?id=$dataId&id=$dataId", apiHeaders))
                 .awaitSuccess().parseAs<SourceResponseDto>()
         } catch (_: Exception) {
-            client.newCall(GET("https://$host/stream/getSourcesNew?id=$dataId", apiHeaders))
+            client.newCall(GET("https://$host/stream/getSourcesNew?id=$dataId&id=$dataId", apiHeaders))
                 .awaitSuccess().parseAs<SourceResponseDto>()
         }
 
@@ -369,6 +381,7 @@ class AniWaveProvider(
     ): List<Video> {
         val vidHeaders = headers.newBuilder()
             .set("Referer", referer)
+            .removeHeader("Origin")
             .build()
         return playlistUtils.extractFromHls(
             m3u8Url,
@@ -396,7 +409,7 @@ class AniWaveProvider(
             searchAnime(title)
         } catch (e: Exception) {
             return debugVideo("search threw: ${e.message}")
-        } ?: return debugVideo("search null for '$title' (${DOMAINS.size} domains tried)")
+        }
 
         val serverIds = try {
             getEpisodeServerIds(baseUrl, animePath, animeId, epNum)
