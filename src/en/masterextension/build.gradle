@@ -12,7 +12,6 @@ dependencies {
     implementation(project(':lib:cloudflareinterceptor'))
     implementation(project(':lib:megacloudextractor'))
     implementation(project(':lib:cryptoaes'))
-    implementation(project(":lib:rapidcloudextractor"))
     implementation(project(":lib:cloudflareinterceptor"))
     implementation(project(":lib:gogostreamextractor"))
 }
