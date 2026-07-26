@@ -30,8 +30,9 @@ class GogoProvider(
         )
     }
 
-    private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
-    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
+    // FIX: Use cfClient for the extractors so stream fetching is Cloudflare-aware
+    private val gogoStreamExtractor by lazy { GogoStreamExtractor(cfClient) }
+    private val playlistUtils by lazy { PlaylistUtils(cfClient, headers) }
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
@@ -60,18 +61,22 @@ class GogoProvider(
 
     private suspend fun searchAnime(title: String): Pair<String, String> {
         var lastError: Throwable? = null
+
         for (domain in DOMAINS) {
             try {
-                val url = "$domain/search.html".toHttpUrl().newBuilder()
-                    .addQueryParameter("keyword", title)
-                    .build().toString()
+                val url = domain.toHttpUrl().newBuilder()
+                    .addPathSegment("search.html")
+                    .addQueryParameter("keyword", title.trim())
+                    .build()
+                    .toString()
 
                 val response = cfClient.newCall(GET(url, siteHeaders(domain))).awaitSuccess()
                 val html = response.body.string()
+                val doc = Jsoup.parse(html, response.request.url.toString())
 
-                val doc = Jsoup.parse(html, domain)
-
-                val firstResult = doc.selectFirst("ul.items li a[href*=/category/]")
+                // FIX: More forgiving selector chain
+                val firstResult = doc.selectFirst("ul.items > li p.name a[href*=/category/]")
+                    ?: doc.selectFirst("ul.items li a[href*=/category/]")
                     ?: doc.selectFirst("div.last_recent ul li a[href*=/category/]")
                     ?: doc.selectFirst("a[href*=/category/]")
 
@@ -86,11 +91,14 @@ class GogoProvider(
                         return domain to fullUrl
                     }
                 }
-                lastError = Exception("No results (body: ${html.take(100)})")
+
+                // FIX: More diagnostic error message
+                lastError = Exception("No category link found (title=$title, body=${html.take(200)})")
             } catch (e: Exception) {
                 lastError = e
             }
         }
+
         throw lastError ?: Exception("Search returned null")
     }
 
