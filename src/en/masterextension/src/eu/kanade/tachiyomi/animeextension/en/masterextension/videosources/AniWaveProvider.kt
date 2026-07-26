@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
-import android.app.Application
 import android.util.Base64
 import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import aniyomi.lib.playlistutils.PlaylistUtils
@@ -28,8 +27,6 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
@@ -59,10 +56,9 @@ class AniWaveProvider(
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-    // FIX: Manually attach CloudflareInterceptor to bypass CF challenges
     private val cfClient by lazy {
         client.newBuilder()
-            .addInterceptor(CloudflareInterceptor(Injekt.get(Application::class.java), client.cookieJar, userAgent))
+            .addInterceptor(CloudflareInterceptor(client, userAgent))
             .build()
     }
 
@@ -176,7 +172,6 @@ class AniWaveProvider(
                     addQueryParameter("vrf", vrf)
                 }.build().toString()
 
-                // FIX: Use awaitSuccess to prevent blocking the thread
                 val response = cfClient.newCall(GET(url, siteHeaders(domain))).awaitSuccess()
                 val html = response.body.string()
 
