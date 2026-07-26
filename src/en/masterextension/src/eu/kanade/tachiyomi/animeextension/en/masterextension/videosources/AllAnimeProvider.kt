@@ -63,6 +63,11 @@ class AllAnimeProvider(
             key.fold(0) { mask, ch -> mask xor ch.code }
         }.toIntArray()
 
+        private val INTERNAL_HOSTER_NAMES = arrayOf(
+            "Default", "Ac", "Ak", "Kir", "Rab", "Luf-mp4",
+            "Si-Hls", "S-mp4", "Ac-Hls", "Uv-mp4", "Pn-Hls",
+        )
+
         private val SEARCH_QUERY = """
             query(
                 ${'$'}search: SearchInput
@@ -95,6 +100,20 @@ class AllAnimeProvider(
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
+
+    // =================================================================
+    // DEBUG HELPER — returns a fake video with the message as quality
+    // =================================================================
+
+    private fun debugVideo(msg: String): List<Video> {
+        return listOf(
+            Video(
+                url = "https://example.com/debug.m3u8",
+                quality = "DEBUG: $msg",
+                videoUrl = "https://example.com/debug.m3u8",
+            ),
+        )
+    }
 
     // =================================================================
     // DTOs
@@ -163,7 +182,7 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // buildPost — exact match to working extension
+    // buildPost
     // =================================================================
 
     private fun buildPost(data: kotlinx.serialization.json.JsonObject): Request {
@@ -180,46 +199,33 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // STEP 1: Search — tries multiple title variants
+    // STEP 1: Search
     // =================================================================
 
     private suspend fun searchShow(title: String): String? {
-        // Try the raw title first, then cleaned variants
-        val titlesToTry = listOf(
-            title,
-            title.replace(Regex("\\(.*?\\)"), "").trim(),
-            title.replace(Regex("\\[.*?\\]"), "").trim(),
-            title.replace(Regex("Season \\d+", RegexOption.IGNORE_CASE), "").trim(),
-            title.replace(Regex("\\d+(st|nd|rd|th)\\s+Season", RegexOption.IGNORE_CASE), "").trim(),
-        ).distinct().filter { it.isNotBlank() }
-
-        for (searchTitle in titlesToTry) {
-            val data = buildJsonObject {
-                putJsonObject("variables") {
-                    putJsonObject("search") {
-                        put("query", searchTitle)
-                        put("allowAdult", true)
-                        put("allowUnknown", true)
-                    }
-                    put("limit", 26)
-                    put("page", 1)
-                    put("translationType", "sub")
-                    put("countryOrigin", "ALL")
+        val data = buildJsonObject {
+            putJsonObject("variables") {
+                putJsonObject("search") {
+                    put("query", title)
+                    put("allowAdult", true)
+                    put("allowUnknown", true)
                 }
-                put("query", SEARCH_QUERY)
+                put("limit", 26)
+                put("page", 1)
+                put("translationType", "sub")
+                put("countryOrigin", "ALL")
             }
-
-            try {
-                val responseBody = client.newCall(buildPost(data))
-                    .awaitSuccess().bodyString()
-                val result = responseBody.parseAs<SearchResult>()
-                val showId = result.data.shows.edges.firstOrNull()?.id
-                if (showId != null) return showId
-            } catch (_: Exception) {
-                continue
-            }
+            put("query", SEARCH_QUERY)
         }
-        return null
+
+        return try {
+            val responseBody = client.newCall(buildPost(data))
+                .awaitSuccess().bodyString()
+            val result = responseBody.parseAs<SearchResult>()
+            result.data.shows.edges.firstOrNull()?.id
+        } catch (_: Exception) {
+            null
+        }
     }
 
     // =================================================================
@@ -267,7 +273,7 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // STEP 3: Extract — NO FILTER, try everything
+    // STEP 3: Extract from internal hosters
     // =================================================================
 
     private suspend fun extractFromInternal(
@@ -375,42 +381,61 @@ class AllAnimeProvider(
     }
 
     // =================================================================
-    // ENTRY POINT — no filters, try everything
+    // ENTRY POINT — DEBUG VERSION
     // =================================================================
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
         val title = anime.title.ifBlank { meta.title }
-        if (title.isBlank()) return emptyList()
 
-        // Ensure epNum is at least 1
-        val epNum = if (meta.epNum > 0) meta.epNum else 1
+        // DEBUG: show what we received
+        if (title.isBlank()) return debugVideo("title is blank, anilistId=${meta.anilistId}")
 
-        return try {
-            val showId = searchShow(title) ?: return emptyList()
-            val sourceUrls = getSourceUrls(showId, epNum, "sub")
-            if (sourceUrls.isEmpty()) return emptyList()
-
-            val iframeEndpoint = getIframeEndpoint()
-
-            // NO FILTER — try every source URL
-            sourceUrls.flatMap { source ->
-                runCatching {
-                    val videoUrl = source.sourceUrl.decryptSource()
-                    when {
-                        videoUrl.startsWith("/apivtwo/") ->
-                            extractFromInternal(videoUrl, source.sourceName, iframeEndpoint)
-                        videoUrl.startsWith("http") && videoUrl.contains(".m3u8") ->
-                            playlistUtils.extractFromHls(
-                                videoUrl,
-                                videoNameGen = { "$name - $it (${source.sourceName})" },
-                            )
-                        else -> emptyList()
-                    }
-                }.getOrElse { emptyList() }
-            }
-        } catch (_: Exception) {
-            emptyList()
+        // Step 1: Search
+        val showId = try {
+            searchShow(title)
+        } catch (e: Exception) {
+            return debugVideo("search threw: ${e.message}")
         }
+        if (showId == null) return debugVideo("search returned null for '$title'")
+
+        // Step 2: Get sources
+        val epNum = if (meta.epNum > 0) meta.epNum else 1
+        val sourceUrls = try {
+            getSourceUrls(showId, epNum, "sub")
+        } catch (e: Exception) {
+            return debugVideo("getSourceUrls threw: ${e.message}")
+        }
+        if (sourceUrls.isEmpty()) return debugVideo("no sourceUrls for showId=$showId ep=$epNum")
+
+        // Step 3: Get iframe endpoint
+        val iframeEndpoint = getIframeEndpoint()
+
+        // Step 4: Extract
+        val allVideos = mutableListOf<Video>()
+        val errors = mutableListOf<String>()
+
+        sourceUrls.forEach { source ->
+            try {
+                val videoUrl = source.sourceUrl.decryptSource()
+                val isInternal = videoUrl.startsWith("/apivtwo/") && INTERNAL_HOSTER_NAMES.any {
+                    Regex("""\b${it.lowercase()}\b""").find(source.sourceName.lowercase()) != null
+                }
+                if (isInternal) {
+                    val videos = extractFromInternal(videoUrl, source.sourceName, iframeEndpoint)
+                    allVideos.addAll(videos)
+                } else {
+                    errors.add("skip:${source.sourceName}(not internal)")
+                }
+            } catch (e: Exception) {
+                errors.add("err:${source.sourceName}:${e.message}")
+            }
+        }
+
+        if (allVideos.isEmpty()) {
+            return debugVideo("extracted 0 videos. ${errors.take(3).joinToString(" | ")}")
+        }
+
+        return allVideos
     }
 }
