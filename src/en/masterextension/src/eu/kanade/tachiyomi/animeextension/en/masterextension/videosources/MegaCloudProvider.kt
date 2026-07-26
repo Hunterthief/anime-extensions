@@ -148,7 +148,7 @@ class MegaCloudProvider(
             val embedUrl = getMegaCloudEmbedUrl(episodeDataId) ?: return emptyList()
 
             // Step 4: Extract videos via MegaCloudExtractor
-            val type = if (meta.isDub) "dub" else "sub"
+            val type = "sub"
             extractor.getVideosFromUrl(embedUrl, type, name)
         } catch (_: Exception) {
             emptyList()
