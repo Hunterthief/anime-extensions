@@ -107,14 +107,14 @@ class AniWaveProvider(
     private fun siteHeaders(baseUrl: String) = headers.newBuilder()
         .set("Referer", "$baseUrl/")
         .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .removeHeader("Origin")
+        .removeAll("Origin")
         .build()
 
     private fun ajaxHeaders(baseUrl: String, refererPath: String) = headers.newBuilder()
         .set("Accept", "application/json, text/javascript, */*; q=0.01")
         .set("Referer", "$baseUrl$refererPath")
         .set("X-Requested-With", "XMLHttpRequest")
-        .removeHeader("Origin")
+        .removeAll("Origin")
         .build()
 
     private fun vrfEncrypt(input: String): String {
@@ -288,7 +288,7 @@ class AniWaveProvider(
 
         val pageHeaders = headers.newBuilder()
             .set("Referer", "$baseUrl/")
-            .removeHeader("Origin")
+            .removeAll("Origin")
             .build()
 
         val pageBody = client.newCall(GET(embedUrl, pageHeaders))
@@ -381,7 +381,7 @@ class AniWaveProvider(
     ): List<Video> {
         val vidHeaders = headers.newBuilder()
             .set("Referer", referer)
-            .removeHeader("Origin")
+            .removeAll("Origin")
             .build()
         return playlistUtils.extractFromHls(
             m3u8Url,
