@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
+import android.app.Application
 import android.util.Base64
+import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
@@ -9,6 +11,7 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
@@ -25,6 +28,8 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
@@ -51,6 +56,15 @@ class AniWaveProvider(
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
+
+    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+    // FIX: Manually attach CloudflareInterceptor to bypass CF challenges
+    private val cfClient by lazy {
+        client.newBuilder()
+            .addInterceptor(CloudflareInterceptor(Injekt.get(Application::class.java), client.cookieJar, userAgent))
+            .build()
+    }
 
     private fun debugVideo(msg: String): List<Video> {
         return listOf(
@@ -104,7 +118,7 @@ class AniWaveProvider(
     private fun siteHeaders(baseUrl: String) = headers.newBuilder()
         .set("Referer", "$baseUrl/")
         .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .set("User-Agent", userAgent)
         .removeAll("Origin")
         .build()
 
@@ -112,7 +126,7 @@ class AniWaveProvider(
         .set("Accept", "application/json, text/javascript, */*; q=0.01")
         .set("Referer", "$baseUrl$refererPath")
         .set("X-Requested-With", "XMLHttpRequest")
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .set("User-Agent", userAgent)
         .removeAll("Origin")
         .build()
 
@@ -162,12 +176,9 @@ class AniWaveProvider(
                     addQueryParameter("vrf", vrf)
                 }.build().toString()
 
-                val response = client.newCall(GET(url, siteHeaders(domain))).execute()
-                val html = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    lastError = Exception("HTTP ${response.code} - ${html.take(100)}")
-                    continue
-                }
+                // FIX: Use awaitSuccess to prevent blocking the thread
+                val response = cfClient.newCall(GET(url, siteHeaders(domain))).awaitSuccess()
+                val html = response.body.string()
 
                 val doc = Jsoup.parse(html, domain)
                 
@@ -180,17 +191,15 @@ class AniWaveProvider(
                         .substringBefore("?").replace(Regex("/ep-\\d+$"), "")
                         
                     if (rawHref.isNotBlank()) {
-                        // FIX: Use OkHttp to safely extract the path without string manipulation bugs
                         val path = try {
                             rawHref.toHttpUrl().encodedPath
                         } catch (_: Exception) {
-                            // Fallback if it's a relative URL
                             rawHref.substringAfter(domain).substringBefore("?")
                         }
                         
                         if (path.startsWith("/watch/")) {
-                            val animeHtml = client.newCall(GET("$domain$path", siteHeaders(domain)))
-                                .execute().body?.string().orEmpty()
+                            val animeHtml = cfClient.newCall(GET("$domain$path", siteHeaders(domain)))
+                                .awaitSuccess().body.string()
                             val animeDoc = Jsoup.parse(animeHtml, domain)
                             val dataId = animeDoc.selectFirst("[data-id]")?.attr("data-id")
                                 ?: animeDoc.selectFirst("[data-tip]")?.attr("data-tip")
@@ -230,8 +239,8 @@ class AniWaveProvider(
             addQueryParameter("vrf", vrf)
         }.build().toString()
 
-        val body = client.newCall(GET(url, ajaxHeaders(baseUrl, animePath)))
-            .execute().body?.string().orEmpty()
+        val body = cfClient.newCall(GET(url, ajaxHeaders(baseUrl, animePath)))
+            .awaitSuccess().body.string()
 
         val result = body.parseAs<ResultResponse>()
         val doc = Jsoup.parseBodyFragment(result.result)
@@ -263,8 +272,8 @@ class AniWaveProvider(
             addQueryParameter("servers", serverIds)
         }.build().toString()
 
-        val body = client.newCall(GET(url, ajaxHeaders(baseUrl, epUrl)))
-            .execute().body?.string().orEmpty()
+        val body = cfClient.newCall(GET(url, ajaxHeaders(baseUrl, epUrl)))
+            .awaitSuccess().body.string()
 
         val result = body.parseAs<ResultResponse>()
         val doc = Jsoup.parseBodyFragment(result.result)
@@ -295,8 +304,8 @@ class AniWaveProvider(
             addQueryParameter("get", serverId)
         }.build().toString()
 
-        val body = client.newCall(GET(url, ajaxHeaders(baseUrl, epUrl)))
-            .execute().body?.string().orEmpty()
+        val body = cfClient.newCall(GET(url, ajaxHeaders(baseUrl, epUrl)))
+            .awaitSuccess().body.string()
         return body.parseAs<ServerResponseDto>().result.url
     }
 
@@ -317,12 +326,12 @@ class AniWaveProvider(
 
         val pageHeaders = headers.newBuilder()
             .set("Referer", "$baseUrl/")
-            .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .set("User-Agent", userAgent)
             .removeAll("Origin")
             .build()
 
-        val pageBody = client.newCall(GET(embedUrl, pageHeaders))
-            .execute().body?.string().orEmpty()
+        val pageBody = cfClient.newCall(GET(embedUrl, pageHeaders))
+            .awaitSuccess().body.string()
 
         val dataId = Regex("""data-id="([^"]+)"""").find(pageBody)?.groupValues?.get(1)
         if (dataId != null) {
@@ -371,15 +380,15 @@ class AniWaveProvider(
             .set("X-Requested-With", "XMLHttpRequest")
             .set("Referer", embedUrl)
             .set("Origin", "https://$host")
-            .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .set("User-Agent", userAgent)
             .build()
 
         val sourceData = try {
-            client.newCall(GET("https://$host/stream/getSources?id=$dataId&id=$dataId", apiHeaders))
-                .execute().parseAs<SourceResponseDto>()
+            cfClient.newCall(GET("https://$host/stream/getSources?id=$dataId&id=$dataId", apiHeaders))
+                .awaitSuccess().parseAs<SourceResponseDto>()
         } catch (_: Exception) {
-            client.newCall(GET("https://$host/stream/getSourcesNew?id=$dataId&id=$dataId", apiHeaders))
-                .execute().parseAs<SourceResponseDto>()
+            cfClient.newCall(GET("https://$host/stream/getSourcesNew?id=$dataId&id=$dataId", apiHeaders))
+                .awaitSuccess().parseAs<SourceResponseDto>()
         }
 
         val m3u8 = sourceData.sources
@@ -393,7 +402,7 @@ class AniWaveProvider(
         val vidHeaders = headers.newBuilder()
             .set("Referer", "https://$host/")
             .set("Origin", "https://$host")
-            .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .set("User-Agent", userAgent)
             .build()
 
         return playlistUtils.extractFromHls(
@@ -413,7 +422,7 @@ class AniWaveProvider(
     ): List<Video> {
         val vidHeaders = headers.newBuilder()
             .set("Referer", referer)
-            .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .set("User-Agent", userAgent)
             .removeAll("Origin")
             .build()
         return playlistUtils.extractFromHls(
