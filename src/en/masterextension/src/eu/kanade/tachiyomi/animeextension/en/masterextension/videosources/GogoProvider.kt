@@ -14,7 +14,6 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
-import java.net.URLEncoder
 
 class GogoProvider(
     private val client: OkHttpClient,
@@ -44,7 +43,6 @@ class GogoProvider(
         )
     }
 
-    // FIX: Add User-Agent and remove AniList Origin/Accept headers
     private fun siteHeaders(baseUrl: String) = headers.newBuilder()
         .set("Referer", "$baseUrl/")
         .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -54,18 +52,21 @@ class GogoProvider(
 
     private suspend fun searchAnime(title: String): Pair<String, String> {
         var lastError: Throwable? = null
-        val encodedTitle = URLEncoder.encode(title, "utf-8")
         for (domain in DOMAINS) {
             try {
-                val url = "$domain/search.html?keyword=$encodedTitle"
+                // FIX: Use OkHttp's URL builder to properly encode spaces as %20
+                val url = "$domain/search.html".toHttpUrl().newBuilder()
+                    .addQueryParameter("keyword", title)
+                    .build().toString()
 
                 val html = client.newCall(GET(url, siteHeaders(domain)))
                     .awaitSuccess().bodyString()
 
                 val doc = Jsoup.parse(html, domain)
 
-                val firstResult = doc.selectFirst("ul.items li p.name a")
-                    ?: doc.selectFirst("div.last_recent ul li p.name a")
+                // FIX: Match reference selectors exactly
+                val firstResult = doc.selectFirst("ul.items li:has(div.img) a[href*=/category/]")
+                    ?: doc.selectFirst("ul.items li a[href*=/category/]")
                     ?: doc.selectFirst("a[href*=/category/]")
 
                 if (firstResult != null) {
