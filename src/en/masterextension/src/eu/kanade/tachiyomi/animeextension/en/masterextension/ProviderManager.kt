@@ -11,6 +11,7 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeK
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeOnsenProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AllAnimeProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniZoneProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.SubspleaseProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
