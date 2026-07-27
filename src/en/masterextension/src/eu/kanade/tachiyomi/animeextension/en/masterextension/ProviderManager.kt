@@ -15,7 +15,6 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.Subspl
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.TorrentioProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeGGProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniDBProvider
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AV1EncodesProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -38,7 +37,6 @@ class ProviderManager(
             "animeonsen" to AnimeOnsenProvider(client, headers),
             "anizone"    to AniZoneProvider(client, headers),
             "animegg"    to AnimeGGProvider(client, headers),
-            "av1encodes" to AV1EncodesProvider(client, headers),
             "torrentio"  to TorrentioProvider(client, headers, "none", ""),
             "subsplease" to SubspleaseProvider(client, headers),
             "anidap"     to AniDapProvider(client, headers),
