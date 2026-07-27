@@ -28,11 +28,11 @@ class ProviderManager(
     // =================================================================
     private val allProviders: Map<String, VideoProvider> by lazy {
         linkedMapOf(
-            "animeonsen" to AnimeOnsenProvider(client, headers, preferences),
-            "anidap"     to AniDapProvider(client, headers, preferences),
-            "anikage"    to AnikageProvider(client, headers, preferences),
-            "anineko"    to AniNekoProvider(client, headers, preferences),
-            "animekizz"  to AnimeKizzProvider(client, headers, preferences),
+            "animeonsen" to AnimeOnsenProvider(client, headers),
+            "anidap"     to AniDapProvider(client, headers),
+            "anikage"    to AnikageProvider(client, headers),
+            "anineko"    to AniNekoProvider(client, headers),
+            "animekizz"  to AnimeKizzProvider(client, headers),
             //"allanime"   to AllAnimeProvider(client, headers, preferences),
         )
     }
