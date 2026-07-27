@@ -28,11 +28,11 @@ class ProviderManager(
     // =================================================================
     private val allProviders: Map<String, VideoProvider> by lazy {
         linkedMapOf(
-            "animeonsen" to AnimeOnsenProvider(client, headers),
-            "anidap"     to AniDapProvider(client, headers),
-            "anikage"    to AnikageProvider(client, headers),
-            "anineko"    to AniNekoProvider(client, headers),
-            "animekizz"  to AnimeKizzProvider(client, headers),
+            "animeonsen" to AnimeOnsenProvider(client, headers, preferences),
+            "anidap"     to AniDapProvider(client, headers, preferences),
+            "anikage"    to AnikageProvider(client, headers, preferences),
+            "anineko"    to AniNekoProvider(client, headers, preferences),
+            "animekizz"  to AnimeKizzProvider(client, headers, preferences),
             //"allanime"   to AllAnimeProvider(client, headers, preferences),
         )
     }
@@ -63,17 +63,43 @@ class ProviderManager(
     }
 
     private fun rankVideos(videos: List<Video>): List<Video> {
-        return videos.sortedWith(
-            compareByDescending<Video> {
-                Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            }.thenBy {
-                when {
-                    it.quality.contains("Sub", ignoreCase = true) -> 0
-                    it.quality.contains("Dub", ignoreCase = true) -> 1
-                    else -> 2
-                }
+    val preferredAudio = preferences.getString("preferred_audio_type", "sub") ?: "sub"
+    val preferredLang = preferences.getString("preferred_sub_lang", "en") ?: "en"
+    val preferredQuality = preferences.getString("preferred_quality", "1080") ?: "1080"
+
+    return videos.sortedWith(
+        // 1st: preferred quality first
+        compareByDescending<Video> {
+            if (preferredQuality == "auto") 0
+            else if (it.quality.contains(preferredQuality)) 1 else 0
+        }.thenByDescending {
+            // 2nd: resolution descending
+            Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        }.thenBy {
+            // 3rd: audio type preference
+            when {
+                preferredAudio == "both" -> 0
+                it.quality.contains(preferredAudio, ignoreCase = true) -> 0
+                it.quality.contains("Sub", ignoreCase = true) -> 1
+                it.quality.contains("Dub", ignoreCase = true) -> 2
+                else -> 3
             }
-        )
+        }.thenBy {
+            // 4th: subtitle language preference
+            when {
+                preferredLang == "none" -> 0
+                it.subtitleTracks.any { track ->
+                    track.lang.contains(preferredLang, ignoreCase = true) ||
+                    track.lang.contains(
+                        java.util.Locale(preferredLang).displayLanguage,
+                        ignoreCase = true
+                    )
+                } -> 0
+                it.subtitleTracks.isEmpty() -> 1
+                else -> 2
+            }
+        }
+    )
     }
 
     // =================================================================
