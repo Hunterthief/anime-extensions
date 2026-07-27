@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniDap
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnikageProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniNekoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeKizzProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeOnsenProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AllAnimeProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
@@ -28,6 +29,7 @@ class ProviderManager(
     private val allProviders: Map<String, VideoProvider> by lazy {
         linkedMapOf(
             // Clean JSON sources (fast, reliable)
+            "animeonsen" to AnimeOnsenProvider(client, headers),
             "anidap"     to AniDapProvider(client, headers),
             "anikage"    to AnikageProvider(client, headers),
             "anineko"    to AniNekoProvider(client, headers),
