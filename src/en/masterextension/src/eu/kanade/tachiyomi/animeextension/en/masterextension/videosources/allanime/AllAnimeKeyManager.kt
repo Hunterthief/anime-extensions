@@ -54,13 +54,20 @@ class AllAnimeKeyManager(
 
     @Volatile
     private var appEntryUrl: String? = null
-
     private val maskMutex = Mutex()
+
+    private fun cryptoHeaders(): Headers = headers.newBuilder()
+        .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .removeAll("Origin")
+        .build()
 
     suspend fun material(forceRefresh: Boolean = false): Material {
         val enteredAt = System.currentTimeMillis()
         if (!forceRefresh) {
-            cachedMaterial?.let { if (!it.isExpired()) return it }
+            cachedMaterial?.let {
+                if (!it.isExpired()) return it
+            }
         }
 
         return materialMutex.withLock {
@@ -68,18 +75,26 @@ class AllAnimeKeyManager(
                 if (it.fetchedAt > enteredAt || (!forceRefresh && !it.isExpired())) return@withLock it
             }
 
-            val html = client.newCall(GET("$siteUrl/", headers))
+            val html = client.newCall(GET("$siteUrl/", cryptoHeaders()))
                 .awaitSuccess().bodyString()
 
-            APP_ENTRY_REGEX.find(html)?.groupValues?.get(1)?.let { appEntryUrl = it }
+            APP_ENTRY_REGEX.find(html)?.groupValues?.get(1)?.let {
+                appEntryUrl = if (it.startsWith("http")) it else "$siteUrl$it"
+            }
 
             val json = AA_CRYPTO_REGEX.find(html)?.groupValues?.get(1)
                 ?: throw Exception("Unable to obtain AllAnime crypto material")
 
             val bootstrap = json.parseAs<AaCryptoBootstrap>()
-            val partB = runCatching { Base64.decode(bootstrap.partB, Base64.DEFAULT) }
-                .getOrElse { throw Exception("AllAnime crypto material changed") }
-            require(partB.size >= 32) { "AllAnime crypto material changed" }
+            val partB = runCatching {
+                Base64.decode(bootstrap.partB, Base64.DEFAULT)
+            }.getOrElse {
+                throw Exception("AllAnime crypto material changed")
+            }
+
+            require(partB.size >= 32) {
+                "AllAnime crypto material changed"
+            }
 
             val now = System.currentTimeMillis()
             Material(
@@ -87,7 +102,9 @@ class AllAnimeKeyManager(
                 epoch = bootstrap.epoch,
                 expiresAt = now + MATERIAL_TTL_MS,
                 fetchedAt = now,
-            ).also { cachedMaterial = it }
+            ).also {
+                cachedMaterial = it
+            }
         }
     }
 
@@ -102,7 +119,9 @@ class AllAnimeKeyManager(
     }
 
     fun isCryptoError(body: String): Boolean =
-        runCatching { body.parseAs<AaApiError>().errors }.getOrNull()
+        runCatching {
+            body.parseAs<AaApiError>().errors
+        }.getOrNull()
             ?.any { it.extensions?.code?.startsWith("AA_CRYPTO") == true } == true
 
     suspend fun healMask(): Boolean = resolveMask() != null
@@ -121,7 +140,7 @@ class AllAnimeKeyManager(
         if (!chunkBase.startsWith("http")) return@withLock null
 
         val appJs = runCatching {
-            client.newCall(GET(appUrl, headers)).awaitSuccess().bodyString()
+            client.newCall(GET(appUrl, cryptoHeaders())).awaitSuccess().bodyString()
         }.getOrNull() ?: return@withLock null
 
         val chunkNames = CHUNK_REF_REGEX.findAll(appJs)
@@ -133,7 +152,7 @@ class AllAnimeKeyManager(
 
         for (name in chunkNames) {
             val body = runCatching {
-                client.newCall(GET(chunkBase + name, headers)).awaitSuccess().bodyString()
+                client.newCall(GET(chunkBase + name, cryptoHeaders())).awaitSuccess().bodyString()
             }.getOrNull() ?: continue
 
             if (!body.contains(CRYPTO_CHUNK_MARKER)) continue
@@ -142,9 +161,8 @@ class AllAnimeKeyManager(
                 .map { it.value }
                 .firstOrNull {
                     !it.equals(streamHash, ignoreCase = true) &&
-                        !it.equals(stored, ignoreCase = true)
-                }
-                ?: continue
+                    !it.equals(stored, ignoreCase = true)
+                } ?: continue
 
             val bytes = AllAnimeCrypto.hexToBytesOrNull(hex) ?: continue
             preferences.edit().putString(PREF_MASK_KEY, hex).apply()
@@ -153,7 +171,8 @@ class AllAnimeKeyManager(
         null
     }
 
-    private fun Material.isExpired(): Boolean = System.currentTimeMillis() >= expiresAt
+    private fun Material.isExpired(): Boolean =
+        System.currentTimeMillis() >= expiresAt
 
     companion object {
         private const val CLIENT_BUILD_ID = "12"
@@ -162,10 +181,18 @@ class AllAnimeKeyManager(
         private const val MASK_HEX_LENGTH = 64
         private const val MATERIAL_TTL_MS = 6 * 60 * 60 * 1000L
 
-        private val AA_CRYPTO_REGEX = Regex("""window\.__aaCrypto\s*=\s*(\{[^{}]*\})""")
-        private val APP_ENTRY_REGEX = Regex("""import\("([^"]*/entry/app\.[^"]*\.js)"\)""")
-        private val CHUNK_REF_REGEX = Regex("""\.\./chunks/([A-Za-z0-9_-]+\.js)""")
+        // Loosened regex to handle formatting changes
+        private val AA_CRYPTO_REGEX =
+            Regex("""window\.__aaCrypto\s*=\s*(\{.*?\})\s*;?""", RegexOption.DOT_MATCHES_ALL)
+
+        private val APP_ENTRY_REGEX =
+            Regex("""import\("([^"]*/entry/app\.[^"]*\.js)"\)""")
+
+        private val CHUNK_REF_REGEX =
+            Regex("""\.\./chunks/([A-Za-z0-9_-]+\.js)""")
+
         private const val CRYPTO_CHUNK_MARKER = "aaReq"
-        private val HEX64_REGEX = Regex("""(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])""")
+        private val HEX64_REGEX =
+            Regex("""(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])""")
     }
 }
