@@ -38,7 +38,6 @@ class AnimenosubProvider(
 
     private val moonExtractor by lazy { MoonExtractor(client, headers, BASE_URL) }
     private val vidMolyExtractor by lazy { VidMolyExtractor(client, headers) }
-    private val streamWishExtractor by lazy { StreamWishExtractor(client) }
     private val vtubeExtractor by lazy { VtubeExtractor(client, headers) }
     private val wolfstreamExtractor by lazy { WolfstreamExtractor(client) }
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
@@ -67,7 +66,6 @@ class AnimenosubProvider(
             return null
         }
         
-        // AnimeStream search results usually use div.bsx > a or article.bs > a
         val results = doc.select("div.bsx > a, article.bs > a, div.item > a, div.poster > a")
         val cleanTitle = title.trim().lowercase()
         
@@ -89,7 +87,6 @@ class AnimenosubProvider(
             return null
         }
         
-        // AnimeStream episode list: div.eplister ul li a
         val episodes = doc.select("div.eplister ul li a, div.eplister li a, ul.eplister li a")
         val epRegex = Regex("""(?:Ep\.?|Episode)\s*(\d+(?:\.\d+)?)""", RegexOption.IGNORE_CASE)
         val hrefRegex = Regex("""/episode[-/](\d+(?:\.\d+)?)""", RegexOption.IGNORE_CASE)
@@ -115,11 +112,9 @@ class AnimenosubProvider(
             return emptyList()
         }
         
-        // Standard iframes
         val iframes = doc.select("iframe[src]")
         val embedUrls = iframes.map { it.attr("abs:src") }.filter { it.isNotBlank() }
         
-        // AnimeStream mirror dropdowns often use data-video
         val dataVideos = doc.select("[data-video]").map { it.attr("abs:data-video") }.filter { it.isNotBlank() }
         
         return (embedUrls + dataVideos).distinct()
@@ -144,8 +139,9 @@ class AnimenosubProvider(
                         vidMolyExtractor.videosFromUrl(url, prefix)
                     }
                     listOf("streamwish", "swdyu").any { host.contains(it) } -> {
+                        // FIX: Instantiate inline with custom headers, matching original extension
                         val wishHeaders = headers.newBuilder().set("Referer", "$BASE_URL/").build()
-                        streamWishExtractor.videosFromUrl(url, prefix, wishHeaders)
+                        StreamWishExtractor(client, wishHeaders).videosFromUrl(url, prefix)
                     }
                     listOf("vtbe", "vtube").any { host.contains(it) } -> {
                         vtubeExtractor.videosFromUrl(url, BASE_URL, prefix)
@@ -154,7 +150,6 @@ class AnimenosubProvider(
                         wolfstreamExtractor.videosFromUrl(url, prefix)
                     }
                     else -> {
-                        // Fallback: try PlaylistUtils if it's a direct m3u8/mp4
                         if (url.contains(".m3u8") || url.contains(".mp4")) {
                             playlistUtils.extractFromHls(
                                 url,
