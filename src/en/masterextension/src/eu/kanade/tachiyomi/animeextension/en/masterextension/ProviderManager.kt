@@ -13,6 +13,7 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AllAni
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniZoneProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.SubspleaseProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.TorrentioProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeGGProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
