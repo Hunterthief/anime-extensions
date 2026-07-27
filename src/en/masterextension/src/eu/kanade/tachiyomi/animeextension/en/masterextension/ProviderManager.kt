@@ -12,6 +12,7 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeO
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AllAnimeProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniZoneProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.SubspleaseProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.TorrentioProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -32,6 +33,7 @@ class ProviderManager(
         linkedMapOf(
             "animeonsen" to AnimeOnsenProvider(client, headers),
             "anizone"    to AniZoneProvider(client, headers),
+            "torrentio" to TorrentioProvider(client, headers, "none", ""),
             "subsplease" to SubspleaseProvider(client, headers),
             "anidap"     to AniDapProvider(client, headers),
             "anikage"    to AnikageProvider(client, headers),
