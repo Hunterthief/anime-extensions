@@ -8,7 +8,6 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
-import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
@@ -20,20 +19,21 @@ import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
 
 /**
- * Subsplease video source.
+ * Subsplease video source — magnet-link based.
+ *
+ * Subsplease provides torrent magnet links directly via a JSON API.
+ * Aniyomi's built-in libtorrent engine handles magnet: URIs natively,
+ * so no extraction, decryption, or m3u8 parsing is needed.
  *
  * Flow:
- *   1. GET /api/?f=search&s=$title → find show slug
- *   2. GET /shows/$slug → extract sid from #show-release-table
- *   3. GET /api/?f=show&sid=$sid → episode list with magnet downloads
- *   4. Filter by episode number → return magnet links as Videos
- *
- * Note: Videos are magnet/torrent links. Requires a debrid service
- * or torrent-capable player to actually stream.
+ *   1. Search API by title → get show slug
+ *   2. Fetch show page HTML → extract sid
+ *   3. Episode API with sid + epNum → magnet links
+ *   4. Return magnets as Video objects → Aniyomi streams via P2P
  */
 class SubspleaseProvider(
     private val client: OkHttpClient,
-    private val headers: Headers,
+    private val headers: Headers
 ) : VideoProvider {
 
     override val name = "Subsplease"
@@ -47,8 +47,14 @@ class SubspleaseProvider(
         ignoreUnknownKeys = true
     }
 
+    private val siteHeaders by lazy {
+        headers.newBuilder()
+            .set("Referer", "$BASE_URL/")
+            .build()
+    }
+
     // =================================================================
-    // STEP 1: Search for the show by title
+    // STEP 1: Search by title → get show page slug
     // =================================================================
     private suspend fun searchShow(title: String): String? {
         val url = "$BASE_URL/api/".toHttpUrl().newBuilder()
@@ -57,59 +63,64 @@ class SubspleaseProvider(
             .addQueryParameter("s", title)
             .build().toString()
 
-        val body = client.newCall(GET(url, headers)).awaitSuccess().bodyString()
-        val jObject = json.decodeFromString<JsonObject>(body)
+        val body = client.newCall(GET(url, siteHeaders))
+            .awaitSuccess().bodyString()
 
-        // Response is a flat object: { "key": { "show": "...", "page": "..." }, ... }
-        for (entry in jObject.entries) {
-            val item = entry.value.jsonObject
-            val showName = item["show"]?.jsonPrimitive?.content ?: continue
-            val page = item["page"]?.jsonPrimitive?.content ?: continue
-            // Match by title (case-insensitive, trimmed)
-            if (showName.equals(title, ignoreCase = true) ||
-                showName.contains(title, ignoreCase = true) ||
-                title.contains(showName, ignoreCase = true)
+        val jObject = json.decodeFromString<JsonObject>(body)
+        // Response is a flat object: { "0": {show, page, image_url}, "1": {...}, ... }
+        for ((_, value) in jObject) {
+            val entry = value.jsonObject
+            val show = entry["show"]?.jsonPrimitive?.content ?: continue
+            val page = entry["page"]?.jsonPrimitive?.content ?: continue
+            // Match by title (case-insensitive, trim)
+            if (show.equals(title, ignoreCase = true) ||
+                title.contains(show, ignoreCase = true) ||
+                show.contains(title, ignoreCase = true)
             ) {
                 return page
             }
         }
         // Fallback: return first result
-        return jObject.entries.firstOrNull()?.value?.jsonObject?.get("page")?.jsonPrimitive?.content
+        val first = jObject.values.firstOrNull()?.jsonObject
+        return first?.get("page")?.jsonPrimitive?.content
     }
 
     // =================================================================
-    // STEP 2: Get the show page and extract sid
+    // STEP 2: Fetch show page → extract sid
     // =================================================================
     private suspend fun getShowId(slug: String): String? {
         val url = "$BASE_URL/shows/$slug"
-        val html = client.newCall(GET(url, headers)).awaitSuccess().bodyString()
+        val html = client.newCall(GET(url, siteHeaders))
+            .awaitSuccess().bodyString()
+
         val doc = Jsoup.parse(html)
         val sid = doc.selectFirst("#show-release-table")?.attr("sid")
         return sid?.takeIf { it.isNotBlank() }
     }
 
     // =================================================================
-    // STEP 3: Get episode data and extract magnet links
+    // STEP 3: Episode API → magnet links
     // =================================================================
-    private suspend fun getEpisodeVideos(sid: String, epNum: Int): List<Video> {
+    private suspend fun getMagnets(sid: String, epNum: Int): List<Video> {
         val url = "$BASE_URL/api/".toHttpUrl().newBuilder()
             .addQueryParameter("f", "show")
             .addQueryParameter("tz", "Europe/Berlin")
             .addQueryParameter("sid", sid)
+            .addQueryParameter("num", epNum.toString())
             .build().toString()
 
-        val body = client.newCall(GET(url, headers)).awaitSuccess().bodyString()
+        val body = client.newCall(GET(url, siteHeaders))
+            .awaitSuccess().bodyString()
+
         val jObject = json.decodeFromString<JsonObject>(body)
         val episodes = jObject["episode"]?.jsonObject?.entries ?: return emptyList()
 
         val videos = mutableListOf<Video>()
-
-        for (entry in episodes) {
-            val epObj = entry.value.jsonObject
-            val epNumber = epObj["episode"]?.jsonPrimitive?.content ?: continue
-
-            // Match episode number (handle "1", "1.5", "01", etc.)
-            val epFloat = epNumber.takeWhile { it.isDigit() || it == '.' }.toFloatOrNull() ?: continue
+        for ((_, value) in episodes) {
+            val epObj = value.jsonObject
+            val epStr = epObj["episode"]?.jsonPrimitive?.content ?: continue
+            // Match episode number (handle "1", "1.5", etc.)
+            val epFloat = epStr.takeWhile { it.isDigit() || it == '.' }.toFloatOrNull() ?: continue
             if (epFloat.toInt() != epNum) continue
 
             val downloads = epObj["downloads"]?.jsonArray ?: continue
@@ -117,17 +128,17 @@ class SubspleaseProvider(
                 val dlObj = dl.jsonObject
                 val res = dlObj["res"]?.jsonPrimitive?.content ?: continue
                 val magnet = dlObj["magnet"]?.jsonPrimitive?.content ?: continue
+                if (!magnet.startsWith("magnet:")) continue
+
                 videos.add(
                     Video(
                         magnet,
                         "$name ${res}p",
-                        magnet,
-                    ),
+                        magnet
+                    )
                 )
             }
-            break // Found our episode, stop
         }
-
         return videos
     }
 
@@ -145,7 +156,7 @@ class SubspleaseProvider(
         // Step 2: Get the show ID
         val sid = getShowId(slug) ?: return emptyList()
 
-        // Step 3: Get magnet links for the episode
-        return getEpisodeVideos(sid, meta.epNum)
+        // Step 3: Get magnets for this episode
+        return getMagnets(sid, meta.epNum)
     }
 }
