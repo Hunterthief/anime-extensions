@@ -32,6 +32,7 @@ class ProviderManager(
         linkedMapOf(
             "animeonsen" to AnimeOnsenProvider(client, headers),
             "anizone"    to AniZoneProvider(client, headers),
+            "subsplease" to SubspleaseProvider(client, headers),
             "anidap"     to AniDapProvider(client, headers),
             "anikage"    to AnikageProvider(client, headers),
             "anineko"    to AniNekoProvider(client, headers),
