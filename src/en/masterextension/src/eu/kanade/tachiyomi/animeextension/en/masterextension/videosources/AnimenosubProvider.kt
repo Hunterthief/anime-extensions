@@ -121,10 +121,11 @@ class AnimenosubProvider(
     }
 
     // =================================================================
-    // STEP 4: Extract videos from embed URLs
+    // STEP 4: Extract videos from embed URLs (WITH DETAILED ERROR TRACKING)
     // =================================================================
     private suspend fun extractVideos(embedUrls: List<String>): List<Video> {
         val allVideos = mutableListOf<Video>()
+        val errors = mutableListOf<String>()
         
         for (url in embedUrls) {
             val host = url.toHttpUrl().host
@@ -139,7 +140,6 @@ class AnimenosubProvider(
                         vidMolyExtractor.videosFromUrl(url, prefix)
                     }
                     listOf("streamwish", "swdyu").any { host.contains(it) } -> {
-                        // FIX: Instantiate inline with custom headers, matching original extension
                         val wishHeaders = headers.newBuilder().set("Referer", "$BASE_URL/").build()
                         StreamWishExtractor(client, wishHeaders).videosFromUrl(url, prefix)
                     }
@@ -157,14 +157,23 @@ class AnimenosubProvider(
                                 videoNameGen = { "$prefix $it" }
                             )
                         } else {
+                            errors.add("unhandled_host:$host")
                             emptyList()
                         }
                     }
                 }
+                
+                if (videos.isEmpty()) {
+                    errors.add("empty_extract:$host")
+                }
                 allVideos.addAll(videos)
-            } catch (_: Exception) {
-                // Skip failed extractors
+            } catch (e: Exception) {
+                errors.add("err:$host:${e.message?.take(30)}")
             }
+        }
+        
+        if (allVideos.isEmpty()) {
+            return debugVideo("0 videos from ${embedUrls.size} embeds. ${errors.take(3).joinToString(" | ")}")
         }
         
         return allVideos
@@ -198,10 +207,6 @@ class AnimenosubProvider(
         
         val videos = try { extractVideos(embedUrls) } catch (e: Exception) {
             return debugVideo("extractVideos threw: ${e.message}")
-        }
-        
-        if (videos.isEmpty()) {
-            return debugVideo("0 videos extracted from ${embedUrls.size} embeds")
         }
         
         return videos
