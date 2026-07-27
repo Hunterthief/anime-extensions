@@ -13,6 +13,7 @@ dependencies {
     implementation(project(':lib:megacloudextractor'))
     implementation(project(':lib:cryptoaes'))
     implementation(project(":lib:rapidcloudextractor"))
-    implementation(project(":lib:cloudflareinterceptor"))
     implementation(project(":lib:gogostreamextractor"))
+    implementation(project(':lib:streamwishextractor'))
+    implementation(project(':lib:vidmolyextractor'))
 }
