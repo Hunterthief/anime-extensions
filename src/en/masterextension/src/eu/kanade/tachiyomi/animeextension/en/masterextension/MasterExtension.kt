@@ -319,26 +319,56 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     // =================================================================
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        val providerKeys = providerManager.providerDisplayNames.keys.toTypedArray()
-        val providerNames = providerManager.providerDisplayNames.values.toTypedArray()
+    // --- Streaming Source Switcher ---
+    val providerKeys = providerManager.providerDisplayNames.keys.toTypedArray()
+    val providerNames = providerManager.providerDisplayNames.values.toTypedArray()
 
-        MultiSelectListPreference(screen.context).apply {
-            key = "enabled_providers"
-            title = "Streaming Sources"
-            entries = providerNames
-            entryValues = providerKeys
-            summary = "Select which sources to fetch videos from.\nSelected: %s"
-            setDefaultValue(providerManager.defaultProviderKeys)
-        }.also { screen.addPreference(it) }
+    MultiSelectListPreference(screen.context).apply {
+        key = "enabled_providers"
+        title = "Streaming Sources"
+        entries = providerNames
+        entryValues = providerKeys
+        summary = "Select which sources to fetch videos from.\nSelected: %s"
+        setDefaultValue(providerManager.defaultProviderKeys)
+    }.also { screen.addPreference(it) }
 
-        ListPreference(screen.context).apply {
-            key = "preferred_sub_type"
-            title = "Preferred Subtitle Type"
-            entries = arrayOf("Sub", "Dub")
-            entryValues = arrayOf("sub", "dub")
-            summary = "Used for sorting video results.\n%s"
-            setDefaultValue("sub")
-        }.also { screen.addPreference(it) }
+    // --- Sub / Dub Preference ---
+    ListPreference(screen.context).apply {
+        key = "preferred_audio_type"
+        title = "Preferred Audio Type"
+        entries = arrayOf("Sub", "Dub", "Both")
+        entryValues = arrayOf("sub", "dub", "both")
+        summary = "Filter videos by audio type.\n%s"
+        setDefaultValue("sub")
+    }.also { screen.addPreference(it) }
+
+    // --- Preferred Subtitle Language ---
+    ListPreference(screen.context).apply {
+        key = "preferred_sub_lang"
+        title = "Preferred Subtitle Language"
+        entries = arrayOf(
+            "English", "Spanish", "French", "German",
+            "Portuguese", "Italian", "Arabic", "Japanese",
+            "Korean", "Chinese", "None"
+        )
+        entryValues = arrayOf(
+            "en", "es", "fr", "de",
+            "pt", "it", "ar", "ja",
+            "ko", "zh", "none"
+        )
+        summary = "Sort videos to prefer this subtitle language.\n%s"
+        setDefaultValue("en")
+    }.also { screen.addPreference(it) }
+
+    // --- Preferred Quality ---
+    ListPreference(screen.context).apply {
+        key = "preferred_quality"
+        title = "Preferred Quality"
+        entries = arrayOf("1080p", "720p", "480p", "360p", "Auto")
+        entryValues = arrayOf("1080", "720", "480", "360", "auto")
+        summary = "Sort videos to prefer this resolution.\n%s"
+        setDefaultValue("720")
+    }.also { screen.addPreference(it) }
     }
 
     override fun getFilterList(): AnimeFilterList = MasterFilters.filterList
