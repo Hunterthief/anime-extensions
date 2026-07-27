@@ -24,12 +24,6 @@ import org.jsoup.Jsoup
  * Subsplease provides torrent magnet links directly via a JSON API.
  * Aniyomi's built-in libtorrent engine handles magnet: URIs natively,
  * so no extraction, decryption, or m3u8 parsing is needed.
- *
- * Flow:
- *   1. Search API by title → get show slug
- *   2. Fetch show page HTML → extract sid
- *   3. Episode API with sid + epNum → magnet links
- *   4. Return magnets as Video objects → Aniyomi streams via P2P
  */
 class SubspleaseProvider(
     private val client: OkHttpClient,
@@ -54,6 +48,19 @@ class SubspleaseProvider(
     }
 
     // =================================================================
+    // DEBUG HELPER
+    // =================================================================
+    private fun debugVideo(msg: String): List<Video> {
+        return listOf(
+            Video(
+                url = "https://example.com/debug.m3u8",
+                quality = "DEBUG: $msg",
+                videoUrl = "https://example.com/debug.m3u8",
+            ),
+        )
+    }
+
+    // =================================================================
     // STEP 1: Search by title → get show page slug
     // =================================================================
     private suspend fun searchShow(title: String): String? {
@@ -63,16 +70,15 @@ class SubspleaseProvider(
             .addQueryParameter("s", title)
             .build().toString()
 
-        val body = client.newCall(GET(url, siteHeaders))
-            .awaitSuccess().bodyString()
-
+        val body = client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
         val jObject = json.decodeFromString<JsonObject>(body)
-        // Response is a flat object: { "0": {show, page, image_url}, "1": {...}, ... }
+        
         for ((_, value) in jObject) {
             val entry = value.jsonObject
             val show = entry["show"]?.jsonPrimitive?.content ?: continue
             val page = entry["page"]?.jsonPrimitive?.content ?: continue
-            // Match by title (case-insensitive, trim)
+            
+            // Match by title (case-insensitive)
             if (show.equals(title, ignoreCase = true) ||
                 title.contains(show, ignoreCase = true) ||
                 show.contains(title, ignoreCase = true)
@@ -80,9 +86,9 @@ class SubspleaseProvider(
                 return page
             }
         }
+        
         // Fallback: return first result
-        val first = jObject.values.firstOrNull()?.jsonObject
-        return first?.get("page")?.jsonPrimitive?.content
+        return jObject.values.firstOrNull()?.jsonObject?.get("page")?.jsonPrimitive?.content
     }
 
     // =================================================================
@@ -90,9 +96,7 @@ class SubspleaseProvider(
     // =================================================================
     private suspend fun getShowId(slug: String): String? {
         val url = "$BASE_URL/shows/$slug"
-        val html = client.newCall(GET(url, siteHeaders))
-            .awaitSuccess().bodyString()
-
+        val html = client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
         val doc = Jsoup.parse(html)
         val sid = doc.selectFirst("#show-release-table")?.attr("sid")
         return sid?.takeIf { it.isNotBlank() }
@@ -102,44 +106,50 @@ class SubspleaseProvider(
     // STEP 3: Episode API → magnet links
     // =================================================================
     private suspend fun getMagnets(sid: String, epNum: Int): List<Video> {
-        val url = "$BASE_URL/api/".toHttpUrl().newBuilder()
-            .addQueryParameter("f", "show")
-            .addQueryParameter("tz", "Europe/Berlin")
-            .addQueryParameter("sid", sid)
-            .addQueryParameter("num", epNum.toString())
-            .build().toString()
-
-        val body = client.newCall(GET(url, siteHeaders))
-            .awaitSuccess().bodyString()
-
+        // FIX: Exact URL pattern from the original working extension. 
+        // Do NOT pass "num" to the API. The API returns the full list, we filter locally.
+        val url = "$BASE_URL/api/?f=show&tz=Europe/Berlin&sid=$sid"
+        
+        val body = client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
         val jObject = json.decodeFromString<JsonObject>(body)
         val episodes = jObject["episode"]?.jsonObject?.entries ?: return emptyList()
 
-        val videos = mutableListOf<Video>()
+        var bestMatchVideos = emptyList<Video>()
+        var isExactMatch = false
+
         for ((_, value) in episodes) {
             val epObj = value.jsonObject
             val epStr = epObj["episode"]?.jsonPrimitive?.content ?: continue
-            // Match episode number (handle "1", "1.5", etc.)
-            val epFloat = epStr.takeWhile { it.isDigit() || it == '.' }.toFloatOrNull() ?: continue
-            if (epFloat.toInt() != epNum) continue
-
-            val downloads = epObj["downloads"]?.jsonArray ?: continue
-            for (dl in downloads) {
-                val dlObj = dl.jsonObject
-                val res = dlObj["res"]?.jsonPrimitive?.content ?: continue
-                val magnet = dlObj["magnet"]?.jsonPrimitive?.content ?: continue
-                if (!magnet.startsWith("magnet:")) continue
-
-                videos.add(
-                    Video(
-                        magnet,
-                        "$name ${res}p",
-                        magnet
-                    )
-                )
+            
+            val epFloat = epStr.toFloatOrNull() ?: continue
+            val isCurrentExact = (epFloat == epNum.toFloat())
+            
+            // If we already found an exact match, skip non-exact matches (e.g., skip "1.5" if we want "1")
+            if (isExactMatch && !isCurrentExact) continue
+            
+            if (epFloat.toInt() == epNum) {
+                val downloads = epObj["downloads"]?.jsonArray ?: continue
+                val currentVideos = mutableListOf<Video>()
+                
+                for (dl in downloads) {
+                    val dlObj = dl.jsonObject
+                    val res = dlObj["res"]?.jsonPrimitive?.content ?: continue
+                    val magnet = dlObj["magnet"]?.jsonPrimitive?.content ?: continue
+                    
+                    if (magnet.startsWith("magnet:")) {
+                        currentVideos.add(Video(magnet, "$name ${res}p", magnet))
+                    }
+                }
+                
+                if (currentVideos.isNotEmpty()) {
+                    bestMatchVideos = currentVideos
+                    isExactMatch = isCurrentExact
+                    if (isExactMatch) break // Found exact match, no need to look further
+                }
             }
         }
-        return videos
+        
+        return bestMatchVideos
     }
 
     // =================================================================
@@ -148,15 +158,30 @@ class SubspleaseProvider(
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
         val title = anime.title.ifBlank { meta.title }
-        if (title.isBlank()) return emptyList()
+        if (title.isBlank()) return debugVideo("title is blank")
 
-        // Step 1: Find the show
-        val slug = searchShow(title) ?: return emptyList()
+        val slug = try {
+            searchShow(title)
+        } catch (e: Exception) {
+            return debugVideo("search threw: ${e.message}")
+        } ?: return debugVideo("search null for '$title'")
 
-        // Step 2: Get the show ID
-        val sid = getShowId(slug) ?: return emptyList()
+        val sid = try {
+            getShowId(slug)
+        } catch (e: Exception) {
+            return debugVideo("getShowId threw: ${e.message}")
+        } ?: return debugVideo("getShowId null for slug '$slug'")
 
-        // Step 3: Get magnets for this episode
-        return getMagnets(sid, meta.epNum)
+        val videos = try {
+            getMagnets(sid, meta.epNum)
+        } catch (e: Exception) {
+            return debugVideo("getMagnets threw: ${e.message}")
+        }
+
+        if (videos.isEmpty()) {
+            return debugVideo("no magnets found for sid '$sid' ep ${meta.epNum}")
+        }
+
+        return videos
     }
 }
