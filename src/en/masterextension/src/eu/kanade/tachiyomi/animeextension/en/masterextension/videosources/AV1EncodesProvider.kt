@@ -12,24 +12,12 @@ import keiyoushi.utils.parseAs
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import okhttp3.Headers
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-/**
- * AV1Encodes video source.
- *
- * Clean REST pipeline: Search → Episodes Page → Download Page (Token) → DDL API → DASH/Stream/DL.
- * No encryption, no JS execution, no anti-bot. Just HTML parsing + JSON API + redirect resolution.
- *
- * Flow:
- *   1. GET /search?q={title} → find anime slug
- *   2. GET /episodes/{slug}/1/1920%20x%201080 → find episode download link by filename
- *   3. GET {download_link} → regex extract ddl-token
- *   4. GET /get_ddl/{filename} with X-Ddl-Token header → JSON with stream/watch/dl links
- *   5. Resolve redirects → construct DASH MPD or direct stream URLs
- */
 class AV1EncodesProvider(
     private val client: OkHttpClient,
     private val headers: Headers,
@@ -57,9 +45,6 @@ class AV1EncodesProvider(
         .set("X-Ddl-Token", token)
         .build()
 
-    // =================================================================
-    // DEBUG HELPER
-    // =================================================================
     private fun debugVideo(msg: String): List<Video> {
         return listOf(
             Video(
@@ -70,9 +55,6 @@ class AV1EncodesProvider(
         )
     }
 
-    // =================================================================
-    // DTOs
-    // =================================================================
     @Serializable
     private data class DdlResponse(
         @SerialName("success") val success: Boolean = false,
@@ -85,46 +67,106 @@ class AV1EncodesProvider(
     // =================================================================
     // STEP 1: Search → anime slug
     // =================================================================
-    private suspend fun searchAnime(title: String): String? {
-        val url = "$BASE_URL/search?q=${URLEncoder.encode(title, "UTF-8")}"
-        val doc = try {
-            client.newCall(GET(url, siteHeaders())).awaitSuccess().bodyString().let { Jsoup.parse(it) }
-        } catch (_: Exception) {
-            return null
+    private suspend fun searchAnime(title: String): Pair<String?, String?> {
+        val url = "$BASE_URL/search".toHttpUrl().newBuilder()
+            .addQueryParameter("q", title)
+            .addQueryParameter("page", "1")
+            .build().toString()
+            
+        val html = try {
+            client.newCall(GET(url, siteHeaders())).awaitSuccess().bodyString()
+        } catch (e: Exception) {
+            return null to "network_err: ${e.message?.take(20)}"
         }
-
+        
+        val doc = Jsoup.parse(html)
         val cleanTitle = title.trim().lowercase()
-        val match = doc.select("article.anime-card a[href*=/anime/], a[href*=/anime/]").firstOrNull { link ->
-            val text = link.text().trim().lowercase()
-            text == cleanTitle || text.contains(cleanTitle) || cleanTitle.contains(text)
-        } ?: doc.selectFirst("article.anime-card a[href*=/anime/], a[href*=/anime/]")
-
-        val href = match?.attr("abs:href") ?: match?.attr("href") ?: return null
-        return href.removePrefix(BASE_URL).substringBefore("?")
+        
+        // The original extension parses cards like this:
+        val cards = doc.select("article.anime-card, article[class*='card'], article[class*='anime']")
+        if (cards.isNotEmpty()) {
+            val matchCard = cards.firstOrNull { card ->
+                val cardTitle = (card.selectFirst("h3, h4")?.text() ?: card.text()).trim().lowercase()
+                cardTitle == cleanTitle || cardTitle.contains(cleanTitle) || cleanTitle.contains(cardTitle)
+            } ?: cards.firstOrNull()
+            
+            val a = matchCard?.selectFirst("a[href*='/anime/']")
+            val href = a?.attr("abs:href") ?: a?.attr("href")
+            if (href != null) {
+                val path = href.removePrefix(BASE_URL).substringBefore("?")
+                return path.substringAfterLast("/") to null // returns "death-note"
+            }
+            return null to "cards_found_but_no_link"
+        }
+        
+        // Fallback: h3-based selector
+        val contentRoot = doc.selectFirst("main, #main, #content, .content, [class*='anime-list'], [class*='result'], section.animes") ?: doc
+        val h3s = contentRoot.select("h3")
+        if (h3s.isNotEmpty()) {
+            val matchH3 = h3s.firstOrNull { h3 ->
+                val text = h3.text().trim().lowercase()
+                text == cleanTitle || text.contains(cleanTitle) || cleanTitle.contains(text)
+            } ?: h3s.firstOrNull()
+            
+            val block = matchH3?.parent()
+            val a = block?.selectFirst("a[href*='/anime/']") ?: block?.parent()?.selectFirst("a[href*='/anime/']")
+            val href = a?.attr("abs:href") ?: a?.attr("href")
+            if (href != null) {
+                val path = href.removePrefix(BASE_URL).substringBefore("?")
+                return path.substringAfterLast("/") to null
+            }
+            return null to "h3s_found_but_no_link"
+        }
+        
+        return null to "no_results_in_html"
     }
 
     // =================================================================
-    // STEP 2: Episodes page → find episode download URL
+    // STEP 2: Episodes page → find episode download URL (with resolution fallback)
     // =================================================================
-    private suspend fun getEpisodeUrl(animeSlug: String, epNum: Int): String? {
-        val encodedRes = "1920%20x%201080" // Default to 1080p
-        val url = "$BASE_URL/episodes$animeSlug/1/$encodedRes"
+    private suspend fun getEpisodeUrl(animeSlug: String, epNum: Int): Pair<String?, String?> {
+        // Try multiple resolutions in case the encode group didn't release 1080p
+        val resolutions = listOf("1920%20x%201080", "1280%20x%20720", "854%20x%20480", "640%20x%20360")
         
-        val doc = try {
-            client.newCall(GET(url, siteHeaders("$BASE_URL/"))).awaitSuccess().bodyString().let { Jsoup.parse(it) }
-        } catch (_: Exception) {
-            return null
+        for (encodedRes in resolutions) {
+            val url = "$BASE_URL/episodes/$animeSlug/1/$encodedRes"
+            val html = try {
+                client.newCall(GET(url, siteHeaders("$BASE_URL/anime/$animeSlug"))).awaitSuccess().bodyString()
+            } catch (_: Exception) {
+                continue
+            }
+            
+            val doc = Jsoup.parse(html)
+            val links = doc.select("a[href*='/download/']")
+            
+            val matchLink = links.firstOrNull { link ->
+                val href = link.attr("href")
+                val filename = href.substringAfterLast("/").substringBefore("?")
+                val decoded = URLDecoder.decode(filename, "UTF-8")
+                EP_NUM_REGEX.find(decoded)?.groupValues?.getOrNull(1)?.toIntOrNull() == epNum
+            }
+            
+            if (matchLink != null) {
+                val href = matchLink.attr("href")
+                return (if (href.startsWith("http")) href.removePrefix(BASE_URL) else href) to null
+            }
+            
+            // Fallback: regex on raw HTML if links aren't rendered properly
+            val filenameRegex = Regex("""([a-zA-Z0-9_ \-\[\]().%]+?\.(?:mkv|mp4))""", RegexOption.IGNORE_CASE)
+            val filenames = filenameRegex.findAll(html).map { it.groupValues[1] }.toList()
+            
+            val matchFilename = filenames.firstOrNull { fn ->
+                val decoded = URLDecoder.decode(fn, "UTF-8")
+                EP_NUM_REGEX.find(decoded)?.groupValues?.getOrNull(1)?.toIntOrNull() == epNum
+            }
+            
+            if (matchFilename != null) {
+                val encodedFilename = URLEncoder.encode(matchFilename, "UTF-8").replace("+", "%20")
+                return "/download/$animeSlug/1/$encodedRes/$encodedFilename" to null
+            }
         }
-
-        val match = doc.select("a[href*=/download/]").firstOrNull { link ->
-            val href = link.attr("href")
-            val filename = href.substringAfterLast("/").substringBefore("?")
-            val decoded = URLDecoder.decode(filename, "UTF-8")
-            EP_NUM_REGEX.find(decoded)?.groupValues?.getOrNull(1)?.toIntOrNull() == epNum
-        }
-
-        val href = match?.attr("href") ?: return null
-        return if (href.startsWith("http")) href.removePrefix(BASE_URL) else href
+        
+        return null to "no_ep_${epNum}_found_in_any_res"
     }
 
     // =================================================================
@@ -183,14 +225,26 @@ class AV1EncodesProvider(
         val epNum = if (meta.epNum > 0) meta.epNum else 1
 
         // Step 1: Search
-        val animeSlug = try { searchAnime(title) } catch (e: Exception) {
+        val (animeSlug, searchErr) = try { 
+            searchAnime(title) 
+        } catch (e: Exception) {
             return debugVideo("search threw: ${e.message}")
-        } ?: return debugVideo("search null for '$title'")
+        }
+        
+        if (animeSlug == null) {
+            return debugVideo("search null for '$title' (${searchErr ?: "unknown"})")
+        }
 
         // Step 2: Get episode URL
-        val rawEpisodePath = try { getEpisodeUrl(animeSlug, epNum) } catch (e: Exception) {
+        val (rawEpisodePath, epErr) = try { 
+            getEpisodeUrl(animeSlug, epNum) 
+        } catch (e: Exception) {
             return debugVideo("getEpisodeUrl threw: ${e.message}")
-        } ?: return debugVideo("no episode $epNum found for '$title'")
+        }
+        
+        if (rawEpisodePath == null) {
+            return debugVideo("no episode $epNum found for '$title' (${epErr ?: "unknown"})")
+        }
         
         val episodePath = if (rawEpisodePath.startsWith("/")) rawEpisodePath else "/$rawEpisodePath"
 
