@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.reanime.FlixcloudDecryptor
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.reanime.ReAnimeSearchResponse
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
@@ -11,7 +10,6 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -25,7 +23,6 @@ class ReAnimeProvider(
     override val name = "ReAnime"
     override val baseUrl = "https://reanime.to"
 
-    private val flixcloudBase = "https://flixcloud.cc"
     private val json = Json { ignoreUnknownKeys = true }
 
     private val reHeaders: Headers
@@ -35,8 +32,6 @@ class ReAnimeProvider(
 
     private data class AnimeInfo(val slug: String, val title: String)
     private val animeCache = ConcurrentHashMap<Int, AnimeInfo>()
-
-    // ======================== VideoProvider ========================
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
@@ -49,38 +44,34 @@ class ReAnimeProvider(
         }
         if (info == null) return dbg("FAIL: 0 results for '${anime.title}'")
 
-        // Step 2: Fetch watch page
-        val watchUrl = "$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2"
-        val watchHtml = try {
-            client.newCall(GET(watchUrl, reHeaders)).awaitSuccess()
-                .use { it.body.string() }
-        } catch (e: Exception) {
-            return dbg("FAIL watch page: ${e.message?.take(80)}")
-        }
+        // Step 2: Probe API endpoints to find server/embed info
+        val jsonHeaders = headers.newBuilder()
+            .set("Referer", "$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2")
+            .set("Accept", "application/json")
+            .set("X-Requested-With", "XMLHttpRequest")
+            .build()
 
-        // Step 3: Find server/embed info in SvelteKit data
-        val svelteData = SVELTEKIT_DATA_REGEX.find(watchHtml)?.groupValues?.get(1)
-        if (svelteData == null) return dbg("NO SVELTEKIT DATA in watch page")
+        val endpoints = listOf(
+            "$baseUrl/api/v1/anime/${info.slug}/meta",
+            "$baseUrl/api/v1/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2",
+            "$baseUrl/api/v1/anime/${info.slug}/episode/${meta.epNum}",
+            "$baseUrl/api/v1/anime/${info.slug}/servers?ep=${meta.epNum}",
+            "$baseUrl/api/v1/anime/${info.slug}/stream?ep=${meta.epNum}&server=HD-2",
+        )
 
-        val dataLower = svelteData.lowercase()
-
-        // Search for server/embed related keywords
-        for (kw in listOf("flixcloud", "server", "hd-", "embed", "source", "access", "stream", "iframe", "player")) {
-            val idx = dataLower.indexOf(kw)
-            if (idx != -1) {
-                val ctx = svelteData
-                    .substring(maxOf(0, idx - 30), minOf(svelteData.length, idx + 170))
-                    .replace("\n", " ")
-                return dbg("FOUND '$kw': ...$ctx...")
+        for (ep in endpoints) {
+            try {
+                val resp = client.newCall(GET(ep, jsonHeaders)).awaitSuccess()
+                    .use { it.body.string() }
+                val snippet = resp.take(250).replace("\n", " ")
+                return dbg("HIT ${ep.substringAfter("/api/v1/")}: $snippet")
+            } catch (_: Exception) {
+                continue
             }
         }
 
-        // No keywords — dump a bigger chunk so I can see the structure
-        val chunk = svelteData.take(800).replace("\n", " ")
-        return dbg("NO KEYWORDS. DATA: $chunk")
+        return dbg("ALL 5 ENDPOINTS FAILED for ${info.slug} ep${meta.epNum}")
     }
-
-    // ======================== Search ========================
 
     private suspend fun findAnime(anilistId: Int, title: String): AnimeInfo? {
         animeCache[anilistId]?.let { return it }
@@ -114,13 +105,6 @@ class ReAnimeProvider(
         return info
     }
 
-    // ======================== Helpers ========================
-
     private fun dbg(msg: String): List<Video> =
         listOf(Video("debug://x", msg.take(120), "debug://x"))
-
-    companion object {
-        private val SVELTEKIT_DATA_REGEX =
-            Regex("""data:\s*(\[.+?\]),\s*form:""", RegexOption.DOT_MATCHES_ALL)
-    }
 }
