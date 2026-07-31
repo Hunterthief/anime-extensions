@@ -62,12 +62,27 @@ class ReAnimeProvider(
             return listOf(Video("debug://x", "FAIL watch page: ${e.message?.take(80)}", "debug://x"))
         }
 
-        // Step 3: Find flixcloud embed URL
-        val embedUrl = FLIXCLOUD_EMBED_REGEX.find(watchHtml)?.value
-        if (embedUrl == null) {
-            val snippet = watchHtml.take(200).replace("\n", " ")
-            return listOf(Video("debug://x", "FAIL: no flixcloud URL in watch page. HTML starts: $snippet", "debug://x"))
+        // Step 3: Find flixcloud embed URL or access ID
+        val watchLower = watchHtml.lowercase()
+        val flixcloudIdx = watchLower.indexOf("flixcloud")
+
+        if (flixcloudIdx != -1) {
+            // flixcloud IS mentioned — show the surrounding context to see the format
+            val context = watchHtml
+                .substring(maxOf(0, flixcloudIdx - 150), minOf(watchHtml.length, flixcloudIdx + 250))
+                .replace("\n", " ").replace("\t", " ")
+            return listOf(Video("debug://x", "FLIXCLOUD CTX: $context", "debug://x"))
         }
+
+        // flixcloud NOT in HTML — pull the SvelteKit SSR data instead
+        val svelteData = SVELTEKIT_DATA_REGEX.find(watchHtml)?.groupValues?.get(1)
+        if (svelteData == null) {
+            val snippet = watchHtml.take(300).replace("\n", " ")
+            return listOf(Video("debug://x", "NO FLIXCLOUD + NO SVELTEKIT. HTML: $snippet", "debug://x"))
+        }
+
+        val dataSnippet = svelteData.take(400).replace("\n", " ")
+        return listOf(Video("debug://x", "NO FLIXCLOUD. SVELTEKIT DATA: $dataSnippet", "debug://x"))
 
         // Step 4: Fetch flixcloud embed page
         val embedHtml = try {
