@@ -44,33 +44,35 @@ class ReAnimeProvider(
         }
         if (info == null) return dbg("FAIL: 0 results for '${anime.title}'")
 
-        // Step 2: Probe API endpoints to find server/embed info
-        val jsonHeaders = headers.newBuilder()
-            .set("Referer", "$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2")
+        // Step 2: Call meta API
+        val metaUrl = "$baseUrl/api/v1/anime/${info.slug}/meta"
+        val metaHeaders = headers.newBuilder()
+            .set("Referer", "$baseUrl/anime/${info.slug}")
             .set("Accept", "application/json")
-            .set("X-Requested-With", "XMLHttpRequest")
             .build()
 
-        val endpoints = listOf(
-            "$baseUrl/api/v1/anime/${info.slug}/meta",
-            "$baseUrl/api/v1/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2",
-            "$baseUrl/api/v1/anime/${info.slug}/episode/${meta.epNum}",
-            "$baseUrl/api/v1/anime/${info.slug}/servers?ep=${meta.epNum}",
-            "$baseUrl/api/v1/anime/${info.slug}/stream?ep=${meta.epNum}&server=HD-2",
-        )
+        val metaBody = try {
+            client.newCall(GET(metaUrl, metaHeaders)).awaitSuccess()
+                .use { it.body.string() }
+        } catch (e: Exception) {
+            return dbg("FAIL meta API: ${e.message?.take(80)}")
+        }
 
-        for (ep in endpoints) {
-            try {
-                val resp = client.newCall(GET(ep, jsonHeaders)).awaitSuccess()
-                    .use { it.body.string() }
-                val snippet = resp.take(250).replace("\n", " ")
-                return dbg("HIT ${ep.substringAfter("/api/v1/")}: $snippet")
-            } catch (_: Exception) {
-                continue
+        // Step 3: Search meta response for embed-related keywords
+        val metaLower = metaBody.lowercase()
+        for (kw in listOf("flixcloud", "embed", "server", "source", "stream", "watch", "iframe", "player", "hd-")) {
+            val idx = metaLower.indexOf(kw)
+            if (idx != -1) {
+                val ctx = metaBody
+                    .substring(maxOf(0, idx - 40), minOf(metaBody.length, idx + 200))
+                    .replace("\n", " ")
+                return dbg("META '$kw': ...$ctx...")
             }
         }
 
-        return dbg("ALL 5 ENDPOINTS FAILED for ${info.slug} ep${meta.epNum}")
+        // No keywords — dump first 600 chars
+        val chunk = metaBody.take(600).replace("\n", " ")
+        return dbg("META NO KW: $chunk")
     }
 
     private suspend fun findAnime(anilistId: Int, title: String): AnimeInfo? {
