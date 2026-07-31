@@ -42,7 +42,7 @@ class AnimeOnsenProvider(
 ) : VideoProvider {
 
     override val name = "AnimeOnsen"
-    override val baseUrl = "https://auth.animeonsen.xyz"
+    override val baseUrl = "https://www.animeonsen.xyz"
 
     companion object {
         private const val AUTH_URL = "https://auth.animeonsen.xyz/oauth/token"
