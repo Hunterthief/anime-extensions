@@ -44,43 +44,36 @@ class ReAnimeProvider(
         }
         if (info == null) return dbg("FAIL: 0 results for '${anime.title}'")
 
-        // Step 2: Try endpoints that might return server/embed info
-        val watchRef = "$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2"
-        val jsonHeaders = headers.newBuilder()
-            .set("Referer", watchRef)
+        // Step 2: Fetch __data.json (SvelteKit client-side data endpoint)
+        val dataUrl = "$baseUrl/watch/${info.slug}/__data.json" +
+            "?ep=${meta.epNum}&lang=sub&server=HD-2"
+        val dataHeaders = headers.newBuilder()
+            .set("Referer", "$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2")
             .set("Accept", "application/json")
             .build()
 
-        val endpoints = listOf(
-            // SvelteKit __data.json (client-side navigation data)
-            "$baseUrl/watch/${info.slug}/__data.json?ep=${meta.epNum}&lang=sub&server=HD-2",
-            // Possible API patterns
-            "$baseUrl/api/v1/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2",
-            "$baseUrl/api/v1/anime/${info.slug}/episode/${meta.epNum}",
-            "$baseUrl/api/v1/anime/${info.slug}/servers?ep=${meta.epNum}",
-            "$baseUrl/api/v1/anime/${info.slug}/stream?ep=${meta.epNum}&server=HD-2",
-        )
+        val dataBody = try {
+            client.newCall(GET(dataUrl, dataHeaders)).awaitSuccess()
+                .use { it.body.string() }
+        } catch (e: Exception) {
+            return dbg("FAIL __data.json: ${e.message?.take(80)}")
+        }
 
-        val results = StringBuilder()
-        for ((i, ep) in endpoints.withIndex()) {
-            try {
-                val resp = client.newCall(GET(ep, jsonHeaders)).awaitSuccess()
-                    .use { it.body.string() }
-                val short = ep.substringAfter(baseUrl).take(40)
-                val snippet = resp.take(100).replace("\n", " ")
-                results.append("[$i] $short → $snippet | ")
-                // If we found something with flixcloud/embed/server, return immediately
-                val lower = resp.lowercase()
-                if (lower.contains("flixcloud") || lower.contains("embed") || lower.contains("access_id")) {
-                    return dbg("HIT[$i] $short: ${resp.take(200).replace("\n", " ")}")
-                }
-            } catch (e: Exception) {
-                val short = ep.substringAfter(baseUrl).take(40)
-                results.append("[$i] $short → ERR:${e.message?.take(30)} | ")
+        // Step 3: Search __data.json for embed-related keywords
+        val dataLower = dataBody.lowercase()
+        for (kw in listOf("flixcloud", "embed", "iframe", "access_id", "hd-1", "hd-2", "server", "source", "stream", "player", "video_url", "m3u8")) {
+            val idx = dataLower.indexOf(kw)
+            if (idx != -1) {
+                val ctx = dataBody
+                    .substring(maxOf(0, idx - 40), minOf(dataBody.length, idx + 200))
+                    .replace("\n", " ")
+                return dbg("DATA '$kw': ...$ctx...")
             }
         }
 
-        return dbg(results.toString().take(120))
+        // No keywords — dump first 600 chars
+        val chunk = dataBody.take(600).replace("\n", " ")
+        return dbg("DATA NO KW ($${dataBody.length} chars): $chunk")
     }
 
     private suspend fun findAnime(anilistId: Int, title: String): AnimeInfo? {
