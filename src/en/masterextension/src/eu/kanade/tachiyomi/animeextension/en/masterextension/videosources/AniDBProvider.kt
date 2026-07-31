@@ -36,6 +36,7 @@ class AniDBProvider(
 ) : VideoProvider {
 
     override val name = "AniDB"
+    override val baseUrl = "https://anidb.app"
 
     companion object {
         private const val BASE = "https://anidb.app"
