@@ -369,7 +369,20 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         summary = "Sort videos to prefer this resolution.\n%s"
         setDefaultValue("720")
     }.also { screen.addPreference(it) }
-    }
+
+    // --- Default Verification Site (NEW) ---
+    val verificationEntries = providerManager.providerDisplayNames.values.toList()
+    val verificationValues = providerManager.providerBaseUrls.values.toList()
+
+    ListPreference(screen.context).apply {
+        key = "verification_site_url"
+        title = "Default Verification Site"
+        entries = verificationEntries.toTypedArray()
+        entryValues = verificationValues.toTypedArray()
+        summary = "Choose which provider opens when using \"Open Verification WebView\".\n%s"
+        setDefaultValue(verificationValues.firstOrNull() ?: "")
+    }.also { screen.addPreference(it) }
+}
 
     override fun getFilterList(): AnimeFilterList = MasterFilters.filterList
 
