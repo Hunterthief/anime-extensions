@@ -44,80 +44,63 @@ class ReAnimeProvider(
         }
         if (info == null) return dbg("FAIL: 0 results for '${anime.title}'")
 
-        // Step 2: Fetch __data.json
-        val dataUrl = "$baseUrl/watch/${info.slug}/__data.json" +
-            "?ep=${meta.epNum}&lang=sub&server=HD-2"
-        val dataHeaders = headers.newBuilder()
-            .set("Referer", "$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2")
-            .set("Accept", "application/json")
-            .build()
-
-        val dataBody = try {
-            client.newCall(GET(dataUrl, dataHeaders)).awaitSuccess()
-                .use { it.body.string() }
-        } catch (e: Exception) {
-            return dbg("FAIL __data.json: ${e.message?.take(80)}")
-        }
-
-        // Step 3: Search for "aid" field (flixcloud's internal name for access ID)
-        val dataLower = dataBody.lowercase()
-        for (kw in listOf("\"aid\"", "\"aid\":", "flixcloud.cc/e/", "flixcloud", "\"url\"", "\"src\"", "\"link\"", "\"href\"")) {
-            var searchFrom = 0
-            while (true) {
-                val idx = dataLower.indexOf(kw, searchFrom)
-                if (idx == -1) break
-                // Skip embedurl false positive
-                if (kw == "\"url\"" || kw == "\"src\"") {
-                    val ctx = dataBody.substring(maxOf(0, idx - 5), minOf(dataBody.length, idx + 60))
-                    if (ctx.contains("embedurl", ignoreCase = true) || ctx.contains("embed_url", ignoreCase = true)) {
-                        searchFrom = idx + kw.length
-                        continue
-                    }
-                }
-                val ctx = dataBody
-                    .substring(maxOf(0, idx - 20), minOf(dataBody.length, idx + 200))
-                    .replace("\n", " ")
-                return dbg("$kw@${idx}: $ctx")
-            }
-        }
-
-        // Step 4: If nothing found in __data.json, fetch the watch page JS module
+        // Step 2: Fetch watch page HTML → extract JS module URLs
+        val watchUrl = "$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2"
         val watchHtml = try {
-            client.newCall(GET("$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2", reHeaders))
-                .awaitSuccess().use { it.body.string() }
+            client.newCall(GET(watchUrl, reHeaders)).awaitSuccess()
+                .use { it.body.string() }
         } catch (e: Exception) {
             return dbg("FAIL watch HTML: ${e.message?.take(60)}")
         }
 
-        // Find the watch page module URL (nodes_2.*.js or similar)
-        val moduleMatch = Regex("""(/assets/immutable/nodes_\d+\.[A-Za-z0-9_-]+\.js)""")
-            .findAll(watchHtml).map { it.groupValues[1] }.distinct().toList()
-
-        if (moduleMatch.isEmpty()) {
-            return dbg("NO MODULES found in watch HTML (${watchHtml.length} chars)")
+        // Find all JS module URLs (modulepreload + script src)
+        val moduleUrls = mutableSetOf<String>()
+        for (m in Regex("""(?:src|href)="([^"]*(?:nodes|chunks)[^"]*\.js)"""").findAll(watchHtml)) {
+            moduleUrls.add(m.groupValues[1])
+        }
+        // Also match relative paths like ../assets/immutable/...
+        for (m in Regex("""(?:src|href)="(\.\./[^"]*\.js)"""").findAll(watchHtml)) {
+            moduleUrls.add(m.groupValues[1])
         }
 
-        // Try each module - search for flixcloud URL construction
-        for (modulePath in moduleMatch.take(5)) {
+        if (moduleUrls.isEmpty()) {
+            return dbg("NO MODULES in HTML (${watchHtml.length}ch)")
+        }
+
+        // Step 3: Fetch each module, search for flixcloud embed construction
+        val results = StringBuilder()
+        for ((i, modulePath) in moduleUrls.withIndex()) {
+            val fullUrl = when {
+                modulePath.startsWith("http") -> modulePath
+                modulePath.startsWith("../") -> "$baseUrl/${modulePath.removePrefix("../")}"
+                modulePath.startsWith("/") -> "$baseUrl$modulePath"
+                else -> "$baseUrl/$modulePath"
+            }
+
             try {
-                val moduleBody = client.newCall(GET("$baseUrl$modulePath", reHeaders))
-                    .awaitSuccess().use { it.body.string() }
+                val moduleBody = client.newCall(GET(fullUrl, reHeaders)).awaitSuccess()
+                    .use { it.body.string() }
+
                 val mLower = moduleBody.lowercase()
-                for (kw in listOf("flixcloud", "embed_url", "iframe", "/e/", "access_id", "aid")) {
+                for (kw in listOf("flixcloud", "embed_url", "iframe_src", "/e/", "access_id", "\"aid\"", "kuudere")) {
                     val idx = mLower.indexOf(kw)
                     if (idx != -1) {
                         val ctx = moduleBody
-                            .substring(maxOf(0, idx - 40), minOf(moduleBody.length, idx + 160))
-                            .replace("\n", " ")
-                        return dbg("MOD ${modulePath.take(25)} '$kw': $ctx")
+                            .substring(maxOf(0, idx - 60), minOf(moduleBody.length, idx + 180))
+                            .replace("\n", " ").replace("\t", " ")
+                        return dbg("MOD[$i] '$kw': $ctx")
                     }
                 }
-            } catch (_: Exception) {
-                continue
+                results.append("[$i]✓ ")
+            } catch (e: Exception) {
+                results.append("[$i]✗ ")
             }
+
+            // Limit to 15 modules to avoid timeout
+            if (i >= 14) break
         }
 
-        return dbg("NOTHING FOUND. modules=${moduleMatch.size} data=${dataBody.length}ch")
+        return dbg("SCANNED ${moduleUrls.size} modules, no flixcloud. ${results}")
     }
 
     private suspend fun findAnime(anilistId: Int, title: String): AnimeInfo? {
