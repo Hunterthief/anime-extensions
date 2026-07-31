@@ -37,6 +37,7 @@ class AnimeKizzProvider(
 ) : VideoProvider {
 
     override val name = "AnimeKizz"
+    override val baseUrl = "https://animekizz.live"
 
     companion object {
         private const val BASE_URL = "https://animekizz.live"
