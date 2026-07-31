@@ -40,7 +40,7 @@ class ProviderManager(
             "mkissa"     to MKissaProvider(client, headers, preferences),
             "animeonsen" to AnimeOnsenProvider(client, headers),
             "anizone"    to AniZoneProvider(client, headers),
-            "anikoto"    to AnikotoProvider(client, headers, preferences),
+            "anikoto"    to AnikotoProvider(),
             "animegg"    to AnimeGGProvider(client, headers),
             "torrentio"  to TorrentioProvider(client, headers, "none", ""),
             "subsplease" to SubspleaseProvider(client, headers),
