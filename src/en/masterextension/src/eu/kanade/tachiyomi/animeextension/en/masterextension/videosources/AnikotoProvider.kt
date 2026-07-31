@@ -13,13 +13,19 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
+import eu.kanade.tachiyomi.network.interceptor.rateLimitHost
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
 import okhttp3.CacheControl
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.MediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody
+import okio.BufferedSource
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.time.Duration.Companion.hours
@@ -34,19 +40,17 @@ class AnikotoProvider(
     override val baseUrl = "https://anikototv.to"
 
     // =================================================================
-    // DEDICATED CLIENT — clean, no CloudflareInterceptor
-    // Anikoto is behind Cloudflare CDN but does not challenge requests.
+    // DEDICATED CLIENTS — mirrors the OG AnikotoTheme chain
+    //
+    // anikotoClient → network.client equivalent + rate limiting (OG's "client")
+    // playlistClient → anikotoClient + HTTP/1.1 + 30s timeout
+    // m3u8Client    → anikotoClient + HTTP/1.1 + 30s timeout + JunkBytesInterceptor
     // =================================================================
 
     private val anikotoClient: OkHttpClient by lazy {
         client.newBuilder()
             .apply { networkInterceptors().clear() }
-            .build()
-    }
-
-    private val anikotoHeaders: Headers by lazy {
-        headers.newBuilder()
-            .set("Referer", "$baseUrl/")
+            .rateLimitHost(baseUrl.toHttpUrl(), permits = 5, period = 1L, unit = TimeUnit.SECONDS)
             .build()
     }
 
@@ -57,22 +61,73 @@ class AnikotoProvider(
             .build()
     }
 
-    private val playlistUtils by lazy { PlaylistUtils(playlistClient, anikotoHeaders) }
+    private val playlistUtils by lazy { PlaylistUtils(playlistClient, buildHeaders()) }
 
     private val m3u8Client by lazy {
         anikotoClient.newBuilder()
             .readTimeout(30, TimeUnit.SECONDS)
             .protocols(listOf(Protocol.HTTP_1_1))
+            .addInterceptor(JunkBytesInterceptor())
             .build()
     }
 
     private val m3u8ServerManager by lazy { M3u8ServerManager(m3u8Client) }
 
     private val extractor by lazy {
-        AnikotoExtractor(anikotoClient, anikotoHeaders, baseUrl, playlistUtils, m3u8ServerManager)
+        AnikotoExtractor(anikotoClient, buildHeaders(), baseUrl, playlistUtils, m3u8ServerManager)
     }
 
     private val cacheControl by lazy { CacheControl.Builder().maxAge(1.hours).build() }
+
+    // =================================================================
+    // Headers — built fresh, not cached in a lazy, so they always
+    // carry the correct Referer for this provider regardless of what
+    // the master extension's dynamic baseUrl is set to.
+    // =================================================================
+
+    private fun buildHeaders(): Headers = headers.newBuilder()
+        .set("Referer", "$baseUrl/")
+        .build()
+
+    // =================================================================
+    // JunkBytesInterceptor — strips 252 junk bytes that Anikoto's CDN
+    // (ibyteimg.com / tiktokcdn.com) prepends to segment responses.
+    // Copied verbatim from AnikotoTheme.
+    // =================================================================
+
+    private class JunkBytesInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            val response = chain.proceed(request)
+
+            if (!JUNK_URL_REGEX.containsMatchIn(request.url.toString())) return response
+
+            val body = response.body
+            val originalLength = body.contentLength()
+            if (originalLength != -1L && originalLength <= STRIP_BYTES) return response
+
+            val source = body.source()
+            try {
+                source.skip(STRIP_BYTES.toLong())
+            } catch (_: Exception) {
+                return response
+            }
+
+            val newBody = object : ResponseBody() {
+                override fun contentType(): MediaType? = body.contentType()
+                override fun contentLength(): Long = if (originalLength == -1L) -1L else (originalLength - STRIP_BYTES)
+                override fun source(): BufferedSource = source
+            }
+
+            return response.newBuilder().body(newBody).build()
+        }
+
+        companion object {
+            private const val STRIP_BYTES = 252
+            private val JUNK_URL_REGEX =
+                Regex("ibyteimg\\.com|tiktokcdn\\.com", RegexOption.IGNORE_CASE)
+        }
+    }
 
     // =================================================================
     // Caches
@@ -115,6 +170,7 @@ class AnikotoProvider(
     private suspend fun findAnime(anilistId: Int, title: String): AnimeInfo? {
         animeCache[anilistId]?.let { return it }
 
+        val docHeaders = buildHeaders()
         val vrf = AnikotoVrf.encrypt(title)
         val url = baseUrl.toHttpUrl().newBuilder().apply {
             addPathSegment("filter")
@@ -123,7 +179,7 @@ class AnikotoProvider(
             addQueryParameter("vrf", vrf)
         }.build()
 
-        val document = anikotoClient.newCall(GET(url, anikotoHeaders, cacheControl))
+        val document = anikotoClient.newCall(GET(url, docHeaders, cacheControl))
             .awaitSuccess()
             .useAsJsoup()
 
@@ -165,14 +221,12 @@ class AnikotoProvider(
 
     private suspend fun fetchAnimeId(animePath: String): String? {
         return try {
-            val document = anikotoClient.newCall(GET(baseUrl + animePath, anikotoHeaders))
+            val document = anikotoClient.newCall(GET(baseUrl + animePath, buildHeaders()))
                 .awaitSuccess()
                 .useAsJsoup()
 
             document.selectFirst("[data-id]")?.attr("data-id")
                 ?: document.selectFirst("[data-tip]")?.attr("data-tip")
-                ?: document.selectFirst("#watch-page[data-id]")?.attr("data-id")
-                ?: document.selectFirst(".watch-page[data-id]")?.attr("data-id")
         } catch (_: Exception) {
             null
         }
@@ -183,7 +237,7 @@ class AnikotoProvider(
     // =================================================================
 
     private suspend fun findEpisode(info: AnimeInfo, epNum: Int): EpisodeInfo? {
-        val listHeaders = anikotoHeaders.newBuilder().apply {
+        val listHeaders = buildHeaders().newBuilder().apply {
             add("Accept", "application/json, text/javascript, */*; q=0.01")
             add("Referer", baseUrl + info.path)
             add("X-Requested-With", "XMLHttpRequest")
@@ -221,12 +275,13 @@ class AnikotoProvider(
 
         return EpisodeInfo(ids, epUrl, malId, slug, ts)
     }
+
     // =================================================================
     // Step 3 — fetch server list and extract videos
     // =================================================================
 
     private suspend fun extractVideos(epInfo: EpisodeInfo): List<Video> {
-        val listHeaders = anikotoHeaders.newBuilder().apply {
+        val listHeaders = buildHeaders().newBuilder().apply {
             add("Accept", "application/json, text/javascript, */*; q=0.01")
             add("Referer", "$baseUrl${epInfo.epUrl}")
             add("X-Requested-With", "XMLHttpRequest")
