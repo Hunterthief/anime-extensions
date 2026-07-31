@@ -42,14 +42,13 @@ class AnikotoProvider(
     // =================================================================
     // DEDICATED CLIENTS — mirrors the OG AnikotoTheme chain
     //
-    // anikotoClient → network.client equivalent + rate limiting (OG's "client")
+    // anikotoClient → master client + rate limiting (keeps app interceptors)
     // playlistClient → anikotoClient + HTTP/1.1 + 30s timeout
     // m3u8Client    → anikotoClient + HTTP/1.1 + 30s timeout + JunkBytesInterceptor
     // =================================================================
 
     private val anikotoClient: OkHttpClient by lazy {
         client.newBuilder()
-            .apply { networkInterceptors().clear() }
             .rateLimitHost(baseUrl.toHttpUrl(), permits = 5, period = 1L, unit = TimeUnit.SECONDS)
             .build()
     }
@@ -80,9 +79,9 @@ class AnikotoProvider(
     private val cacheControl by lazy { CacheControl.Builder().maxAge(1.hours).build() }
 
     // =================================================================
-    // Headers — built fresh, not cached in a lazy, so they always
-    // carry the correct Referer for this provider regardless of what
-    // the master extension's dynamic baseUrl is set to.
+    // Headers — built fresh each call so the Referer always matches
+    // this provider's baseUrl regardless of the master extension's
+    // dynamic verification-site baseUrl.
     // =================================================================
 
     private fun buildHeaders(): Headers = headers.newBuilder()
@@ -177,7 +176,7 @@ class AnikotoProvider(
             addQueryParameter("keyword", title)
             addQueryParameter("page", "1")
             addQueryParameter("vrf", vrf)
-        }.build()
+        }.build().toString()
 
         val document = anikotoClient.newCall(GET(url, docHeaders, cacheControl))
             .awaitSuccess()
