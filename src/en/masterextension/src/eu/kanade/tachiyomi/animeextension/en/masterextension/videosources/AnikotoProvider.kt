@@ -25,43 +25,82 @@ class AnikotoProvider :
     VideoProvider {
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
+        val meta = EpisodeMeta.from(episode)
+        val debug = mutableListOf<String>()
+
+        // Step 1: Can we build a search request?
+        val searchRequest = try {
+            val req = searchAnimeRequest(1, anime.title, getFilterList())
+            debug.add("1-OK")
+            req
+        } catch (e: Exception) {
+            return listOf(Video("debug://fail", "FAIL step1: ${e.message}", "debug://fail"))
+        }
+
+        // Step 2: Does the HTTP call succeed?
+        val searchResponse = try {
+            val resp = client.newCall(searchRequest).awaitSuccess()
+            debug.add("2-OK:${resp.code}")
+            resp
+        } catch (e: Exception) {
+            return listOf(Video("debug://fail", "FAIL step2: ${e.message}", "debug://fail"))
+        }
+
+        // Step 3: Does parsing return results?
+        val searchResults = try {
+            val results = searchAnimeParse(searchResponse)
+            debug.add("3-OK:${results.animes.size}")
+            results
+        } catch (e: Exception) {
+            return listOf(Video("debug://fail", "FAIL step3: ${e.message}", "debug://fail"))
+        }
+
+        if (searchResults.animes.isEmpty()) {
+            return listOf(Video("debug://fail", "FAIL: search returned 0 results for '${anime.title}'", "debug://fail"))
+        }
+
+        // Step 4: Title match
+        val titleLower = anime.title.lowercase().trim()
+        val matchedAnime = searchResults.animes.firstOrNull {
+            it.title.lowercase().trim() == titleLower
+        } ?: searchResults.animes.first()
+
+        debug.add("4-OK:${matchedAnime.title}")
+
+        // Step 5: Episode list
+        val episodes = try {
+            val eps = getEpisodeList(matchedAnime)
+            debug.add("5-OK:${eps.size}")
+            eps
+        } catch (e: Exception) {
+            return listOf(Video("debug://fail", "FAIL step5: ${e.message}", "debug://fail"))
+        }
+
+        if (episodes.isEmpty()) {
+            return listOf(Video("debug://fail", "FAIL: 0 episodes for '${matchedAnime.title}'", "debug://fail"))
+        }
+
+        // Step 6: Episode match
+        val matchedEpisode = episodes.firstOrNull {
+            it.episode_number.toInt() == meta.epNum
+        } ?: episodes.getOrNull(meta.epNum - 1)
+
+        if (matchedEpisode == null) {
+            return listOf(Video("debug://fail", "FAIL: ep ${meta.epNum} not found in ${episodes.size} eps", "debug://fail"))
+        }
+
+        debug.add("6-OK:ep${matchedEpisode.episode_number}")
+
+        // Step 7: Video extraction
         return try {
-            val meta = EpisodeMeta.from(episode)
-
-            // 1. Search — use getFilterList() so AnikotoThemeFilters can
-            //    extract its typed filters. An empty AnimeFilterList() throws
-            //    NoSuchElementException inside getSearchParameters().
-            val searchRequest = searchAnimeRequest(1, anime.title, getFilterList())
-            val searchResponse = client.newCall(searchRequest).awaitSuccess()
-            val searchResults = searchAnimeParse(searchResponse)
-
-            // 2. Match anime by title
-            val titleLower = anime.title.lowercase().trim()
-            val matchedAnime = searchResults.animes.firstOrNull {
-                it.title.lowercase().trim() == titleLower
-            } ?: searchResults.animes.minByOrNull {
-                val n = it.title.lowercase().trim()
-                when {
-                    n.startsWith(titleLower) -> n.length
-                    titleLower.startsWith(n) -> n.length + 1000
-                    n.contains(titleLower) -> n.length + 2000
-                    else -> Int.MAX_VALUE
-                }
-            } ?: return emptyList()
-
-            // 3. Get episodes
-            val episodes = getEpisodeList(matchedAnime)
-            if (episodes.isEmpty()) return emptyList()
-
-            // 4. Match episode by number
-            val matchedEpisode = episodes.firstOrNull {
-                it.episode_number.toInt() == meta.epNum
-            } ?: episodes.getOrNull(meta.epNum - 1) ?: return emptyList()
-
-            // 5. Get videos
-            getVideoList(matchedEpisode)
-        } catch (_: Exception) {
-            emptyList()
+            val videos = getVideoList(matchedEpisode)
+            if (videos.isEmpty()) {
+                listOf(Video("debug://fail", "FAIL step7: getVideoList returned 0 videos", "debug://fail"))
+            } else {
+                videos
+            }
+        } catch (e: Exception) {
+            listOf(Video("debug://fail", "FAIL step7: ${e.message}", "debug://fail"))
         }
     }
 }
