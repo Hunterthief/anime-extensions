@@ -31,6 +31,7 @@ class SubspleaseProvider(
 ) : VideoProvider {
 
     override val name = "Subsplease"
+    override val baseUrl = "https://subsplease.org"
 
     companion object {
         private const val BASE_URL = "https://subsplease.org"
