@@ -1,4 +1,4 @@
-package eu.kanade.tachiyomi.animeextension.en.masterextension.mkissa
+package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa
 
 import android.content.SharedPreferences
 import android.util.Base64
