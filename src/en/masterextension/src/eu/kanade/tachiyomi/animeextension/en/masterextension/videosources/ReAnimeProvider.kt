@@ -10,13 +10,6 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -66,51 +59,65 @@ class ReAnimeProvider(
             return dbg("FAIL __data.json: ${e.message?.take(80)}")
         }
 
-        // Step 3: Parse devalue format and dereference "server"
-        return try {
-            val root = json.parseToJsonElement(dataBody).jsonObject
-            val nodes = root["nodes"]?.jsonArray ?: return dbg("NO NODES array")
-
-            for ((nodeIdx, node) in nodes.withIndex()) {
-                if (node is JsonNull) continue
-                val nodeObj = try { node.jsonObject } catch (_: Exception) { continue }
-                val data = nodeObj["data"]?.jsonArray ?: continue
-
-                // Search for objects containing "server" key
-                for (elem in data) {
-                    if (elem !is JsonObject) continue
-                    val serverRef = elem["server"] ?: continue
-                    val serverIdx = serverRef.jsonPrimitive.intOrNull
-                    if (serverIdx == null || serverIdx < 0 || serverIdx >= data.size) {
-                        return dbg("N$nodeIdx server ref=$serverRef (bad idx)")
+        // Step 3: Search for "aid" field (flixcloud's internal name for access ID)
+        val dataLower = dataBody.lowercase()
+        for (kw in listOf("\"aid\"", "\"aid\":", "flixcloud.cc/e/", "flixcloud", "\"url\"", "\"src\"", "\"link\"", "\"href\"")) {
+            var searchFrom = 0
+            while (true) {
+                val idx = dataLower.indexOf(kw, searchFrom)
+                if (idx == -1) break
+                // Skip embedurl false positive
+                if (kw == "\"url\"" || kw == "\"src\"") {
+                    val ctx = dataBody.substring(maxOf(0, idx - 5), minOf(dataBody.length, idx + 60))
+                    if (ctx.contains("embedurl", ignoreCase = true) || ctx.contains("embed_url", ignoreCase = true)) {
+                        searchFrom = idx + kw.length
+                        continue
                     }
-
-                    // Dereference: get the actual value at that index
-                    val serverVal = data[serverIdx]
-                    val serverStr = serverVal.toString().take(300)
-
-                    // If it's an object, also dereference its fields
-                    if (serverVal is JsonObject) {
-                        val resolved = StringBuilder()
-                        for ((k, v) in serverVal) {
-                            val vIdx = v.jsonPrimitive.intOrNull
-                            if (vIdx != null && vIdx >= 0 && vIdx < data.size) {
-                                resolved.append("$k=${data[vIdx].toString().take(60)}; ")
-                            } else {
-                                resolved.append("$k=$v; ")
-                            }
-                        }
-                        return dbg("N$nodeIdx SRV OBJ: $resolved")
-                    }
-
-                    return dbg("N$nodeIdx SRV@$serverIdx: $serverStr")
                 }
+                val ctx = dataBody
+                    .substring(maxOf(0, idx - 20), minOf(dataBody.length, idx + 200))
+                    .replace("\n", " ")
+                return dbg("$kw@${idx}: $ctx")
             }
-
-            dbg("NO 'server' KEY in ${nodes.size} nodes")
-        } catch (e: Exception) {
-            dbg("PARSE ERR: ${e.message?.take(80)}")
         }
+
+        // Step 4: If nothing found in __data.json, fetch the watch page JS module
+        val watchHtml = try {
+            client.newCall(GET("$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2", reHeaders))
+                .awaitSuccess().use { it.body.string() }
+        } catch (e: Exception) {
+            return dbg("FAIL watch HTML: ${e.message?.take(60)}")
+        }
+
+        // Find the watch page module URL (nodes_2.*.js or similar)
+        val moduleMatch = Regex("""(/assets/immutable/nodes_\d+\.[A-Za-z0-9_-]+\.js)""")
+            .findAll(watchHtml).map { it.groupValues[1] }.distinct().toList()
+
+        if (moduleMatch.isEmpty()) {
+            return dbg("NO MODULES found in watch HTML (${watchHtml.length} chars)")
+        }
+
+        // Try each module - search for flixcloud URL construction
+        for (modulePath in moduleMatch.take(5)) {
+            try {
+                val moduleBody = client.newCall(GET("$baseUrl$modulePath", reHeaders))
+                    .awaitSuccess().use { it.body.string() }
+                val mLower = moduleBody.lowercase()
+                for (kw in listOf("flixcloud", "embed_url", "iframe", "/e/", "access_id", "aid")) {
+                    val idx = mLower.indexOf(kw)
+                    if (idx != -1) {
+                        val ctx = moduleBody
+                            .substring(maxOf(0, idx - 40), minOf(moduleBody.length, idx + 160))
+                            .replace("\n", " ")
+                        return dbg("MOD ${modulePath.take(25)} '$kw': $ctx")
+                    }
+                }
+            } catch (_: Exception) {
+                continue
+            }
+        }
+
+        return dbg("NOTHING FOUND. modules=${moduleMatch.size} data=${dataBody.length}ch")
     }
 
     private suspend fun findAnime(anilistId: Int, title: String): AnimeInfo? {
