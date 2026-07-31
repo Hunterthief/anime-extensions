@@ -33,6 +33,7 @@ class AnimeGGProvider(
 ) : VideoProvider {
 
     override val name = "AnimeGG"
+    override val baseUrl = "https://www.animegg.org"
 
     companion object {
         private const val BASE = "https://www.animegg.org"
