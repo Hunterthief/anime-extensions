@@ -18,7 +18,6 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -49,17 +48,15 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     private val preferences by getPreferencesLazy()
 
     // =================================================================
-    // HEADERS — dynamic so Referer always matches the current baseUrl.
-    // UA matches the OG AnimePahe extension's mobile Chrome UA so the
-    // app's verification WebView presents the same fingerprint that
-    // Cloudflare Turnstile accepts.
+    // HEADERS — mobile Chrome UA matching the OG AnimePahe extension
+    // so the app's verification WebView presents the same fingerprint
+    // that Cloudflare Turnstile accepts. Referer tracks baseUrl so it
+    // always matches whichever provider is selected for verification.
     // =================================================================
 
-    override val headers: Headers
-        get() = super.headersBuilder()
-            .set("User-Agent", USER_AGENT)
-            .set("Referer", "$baseUrl/")
-            .build()
+    override fun headersBuilder() = super.headersBuilder()
+        .set("User-Agent", USER_AGENT)
+        .set("Referer", "$baseUrl/")
 
     // =================================================================
     // CLIENT — CloudflareInterceptor wired as network interceptor
