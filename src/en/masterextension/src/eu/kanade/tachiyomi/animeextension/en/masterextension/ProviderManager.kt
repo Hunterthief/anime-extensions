@@ -17,6 +17,7 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniDBP
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.MKissaProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimePaheProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnikotoProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.ReAnimeProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -40,6 +41,7 @@ class ProviderManager(
             "mkissa"     to MKissaProvider(client, headers, preferences),
             "animeonsen" to AnimeOnsenProvider(client, headers),
             "anizone"    to AniZoneProvider(client, headers),
+            "reanime"    to ReAnimeProvider(client, headers),
             "anikoto"    to AnikotoProvider(),
             "animegg"    to AnimeGGProvider(client, headers),
             "torrentio"  to TorrentioProvider(client, headers, "none", ""),
