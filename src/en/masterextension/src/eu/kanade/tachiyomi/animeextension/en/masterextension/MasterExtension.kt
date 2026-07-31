@@ -381,8 +381,9 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }.also { screen.addPreference(it) }
 
     // --- Default Verification Site (NEW) ---
-    val verificationEntries = providerManager.providerDisplayNames.values.toList()
-    val verificationValues = providerManager.providerBaseUrls.values.toList()
+    val verificationNames = providerManager.providerDisplayNames.values.toList()
+    val verificationUrls = providerManager.providerBaseUrls.values.toList()
+    val defaultVerificationUrl = verificationUrls.firstOrNull() ?: "https://anidb.app"
 
     ListPreference(screen.context).apply {
         key = "verification_site_url"
