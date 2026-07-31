@@ -134,7 +134,7 @@ class MKissaProvider(
                     put("allowAdult", true)
                     put("allowUnknown", true)
                 }
-                put("limit", 5)
+                put("limit", 10)
                 put("page", 1)
                 put("translationType", "sub")
                 put("countryOrigin", "ALL")
@@ -146,7 +146,30 @@ class MKissaProvider(
             .awaitSuccess()
             .parseAs<MKissaSearchResult>()
 
-        val showId = result.data.shows.edges.firstOrNull()?.id ?: return null
+        val edges = result.data.shows.edges
+        if (edges.isEmpty()) return null
+
+        val titleLower = title.lowercase().trim()
+
+        val best = edges.firstOrNull { edge ->
+            listOfNotNull(edge.name, edge.englishName, edge.nativeName)
+                .any { it.lowercase().trim() == titleLower }
+        }
+            ?: edges.minByOrNull { edge ->
+                listOfNotNull(edge.name, edge.englishName, edge.nativeName)
+                    .minOf { name ->
+                        val n = name.lowercase().trim()
+                        when {
+                            n.startsWith(titleLower) -> n.length
+                            titleLower.startsWith(n) -> n.length + 1000
+                            n.contains(titleLower) -> n.length + 2000
+                            else -> Int.MAX_VALUE
+                        }
+                    }
+            }
+            ?: edges.firstOrNull()
+
+        val showId = best?.id ?: return null
         showIdCache[anilistId] = showId
         return showId
     }
