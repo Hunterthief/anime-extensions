@@ -119,6 +119,7 @@ class AnikotoProvider(
         val url = baseUrl.toHttpUrl().newBuilder().apply {
             addPathSegment("filter")
             addQueryParameter("keyword", title)
+            addQueryParameter("page", "1")
             addQueryParameter("vrf", vrf)
         }.build()
 
@@ -127,15 +128,20 @@ class AnikotoProvider(
             .useAsJsoup()
 
         val items = document.select("div.ani.items > div.item")
+            .ifEmpty { document.select("div.item") }
+            .ifEmpty { document.select("a[href*=/watch/]") }
+
         if (items.isEmpty()) return null
 
         val titleLower = title.lowercase().trim()
 
         val bestElement = items.firstOrNull { item ->
-            val name = item.selectFirst("a.name")?.text()?.lowercase()?.trim() ?: ""
+            val name = (item.selectFirst("a.name") ?: item.selectFirst("a"))
+                ?.text()?.lowercase()?.trim() ?: ""
             name == titleLower
         } ?: items.minByOrNull { item ->
-            val name = item.selectFirst("a.name")?.text()?.lowercase()?.trim() ?: ""
+            val name = (item.selectFirst("a.name") ?: item.selectFirst("a"))
+                ?.text()?.lowercase()?.trim() ?: ""
             when {
                 name.startsWith(titleLower) -> name.length
                 titleLower.startsWith(name) -> name.length + 1000
@@ -144,8 +150,11 @@ class AnikotoProvider(
             }
         } ?: items.firstOrNull()
 
-        val href = bestElement?.selectFirst("a.name")?.attr("href") ?: return null
+        val href = (bestElement?.selectFirst("a.name") ?: bestElement?.selectFirst("a[href*=/watch/]"))
+            ?.attr("href") ?: return null
+
         val animePath = EP_URL_SUFFIX_REGEX.replace(href.substringBefore("?"), "")
+            .takeIf { it.startsWith("/watch/") } ?: return null
 
         val animeId = fetchAnimeId(animePath) ?: return null
 
@@ -162,6 +171,8 @@ class AnikotoProvider(
 
             document.selectFirst("[data-id]")?.attr("data-id")
                 ?: document.selectFirst("[data-tip]")?.attr("data-tip")
+                ?: document.selectFirst("#watch-page[data-id]")?.attr("data-id")
+                ?: document.selectFirst(".watch-page[data-id]")?.attr("data-id")
         } catch (_: Exception) {
             null
         }
@@ -185,15 +196,23 @@ class AnikotoProvider(
 
         val document = response.parseAs<AnikotoResultResponse>().toDocument()
 
-        val episodeElement = document.select("div.episodes ul > li > a").firstOrNull { a ->
+        val allEpisodes = document.select("div.episodes ul > li > a")
+            .ifEmpty { document.select("ul > li > a[data-num]") }
+            .ifEmpty { document.select("a[data-ids]") }
+
+        if (allEpisodes.isEmpty()) return null
+
+        val episodeElement = allEpisodes.firstOrNull { a ->
             val num = a.attr("data-num")
             num.toFloatOrNull()?.toInt() == epNum
-        } ?: document.select("div.episodes ul > li > a").getOrNull(epNum - 1)
+        } ?: allEpisodes.getOrNull(epNum - 1)
 
         if (episodeElement == null) return null
 
         val ids = episodeElement.attr("data-ids")
-        val epNumStr = episodeElement.attr("data-num")
+        if (ids.isEmpty()) return null
+
+        val epNumStr = episodeElement.attr("data-num").ifEmpty { epNum.toString() }
         val malId = episodeElement.attr("data-mal")
         val slug = episodeElement.attr("data-slug")
         val ts = episodeElement.attr("data-timestamp")
@@ -202,7 +221,6 @@ class AnikotoProvider(
 
         return EpisodeInfo(ids, epUrl, malId, slug, ts)
     }
-
     // =================================================================
     // Step 3 — fetch server list and extract videos
     // =================================================================
