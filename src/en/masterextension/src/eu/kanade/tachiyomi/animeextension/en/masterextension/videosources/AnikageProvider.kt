@@ -21,6 +21,7 @@ class AnikageProvider(
 ) : VideoProvider {
 
     override val name = "Anikage"
+    override val baseUrl = "https://anikage.cc"
 
     companion object {
         private const val API_URL = "https://anikage.cc/api/media/anime"
