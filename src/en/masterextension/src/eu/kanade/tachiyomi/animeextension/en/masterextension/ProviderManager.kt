@@ -15,6 +15,7 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.Torren
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeGGProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniDBProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.MKissaProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimePaheProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -34,6 +35,7 @@ class ProviderManager(
     private val allProviders: Map<String, VideoProvider> by lazy {
         linkedMapOf(
             "anidb"      to AniDBProvider(client, headers),
+            "animepahe"  to AnimePaheProvider(client, headers, preferences),
             "animeonsen" to AnimeOnsenProvider(client, headers),
             "anizone"    to AniZoneProvider(client, headers),
             "animegg"    to AnimeGGProvider(client, headers),
