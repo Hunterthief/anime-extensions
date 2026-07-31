@@ -44,7 +44,7 @@ class ReAnimeProvider(
         }
         if (info == null) return dbg("FAIL: 0 results for '${anime.title}'")
 
-        // Step 2: Fetch __data.json (SvelteKit client-side data endpoint)
+        // Step 2: Fetch __data.json
         val dataUrl = "$baseUrl/watch/${info.slug}/__data.json" +
             "?ep=${meta.epNum}&lang=sub&server=HD-2"
         val dataHeaders = headers.newBuilder()
@@ -59,21 +59,37 @@ class ReAnimeProvider(
             return dbg("FAIL __data.json: ${e.message?.take(80)}")
         }
 
-        // Step 3: Search __data.json for embed-related keywords
+        // Step 3: Search for server/embed keywords (skip "embed" since it's just embedurl)
         val dataLower = dataBody.lowercase()
-        for (kw in listOf("flixcloud", "embed", "iframe", "access_id", "hd-1", "hd-2", "server", "source", "stream", "player", "video_url", "m3u8")) {
-            val idx = dataLower.indexOf(kw)
-            if (idx != -1) {
+        for (kw in listOf("flixcloud", "iframe", "access_id", "hd-1", "hd-2", "server", "source", "stream", "player", "m3u8", "video_url", "src")) {
+            var searchFrom = 0
+            while (true) {
+                val idx = dataLower.indexOf(kw, searchFrom)
+                if (idx == -1) break
+                // Skip "embedurl" false positive
+                val before = dataBody.substring(maxOf(0, idx - 10), idx).lowercase()
+                if (kw == "src" && before.contains("embed")) {
+                    searchFrom = idx + kw.length
+                    continue
+                }
                 val ctx = dataBody
-                    .substring(maxOf(0, idx - 40), minOf(dataBody.length, idx + 200))
+                    .substring(maxOf(0, idx - 30), minOf(dataBody.length, idx + 250))
                     .replace("\n", " ")
-                return dbg("DATA '$kw': ...$ctx...")
+                return dbg("'$kw'@${idx}: ...$ctx...")
             }
         }
 
-        // No keywords — dump first 600 chars
+        // No keywords — dump chunk starting after "embedurl" to see what follows
+        val embedIdx = dataLower.indexOf("embedurl")
+        if (embedIdx != -1) {
+            val afterEmbed = dataBody
+                .substring(embedIdx, minOf(dataBody.length, embedIdx + 400))
+                .replace("\n", " ")
+            return dbg("AFTER EMBED: $afterEmbed")
+        }
+
         val chunk = dataBody.take(600).replace("\n", " ")
-        return dbg("DATA NO KW ($${dataBody.length} chars): $chunk")
+        return dbg("NO KW ($${dataBody.length}ch): $chunk")
     }
 
     private suspend fun findAnime(anilistId: Int, title: String): AnimeInfo? {
