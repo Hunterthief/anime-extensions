@@ -39,7 +39,9 @@ import kotlinx.serialization.json.putJsonObject
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 class MKissaProvider(
     private val client: OkHttpClient,
@@ -52,13 +54,40 @@ class MKissaProvider(
 
     private val apiUrl = "https://api.mkissa.net"
 
+    // =================================================================
+    // DEDICATED CLIENT — no CloudflareInterceptor
+    // The master client's CloudflareInterceptor hijacks 403/503 responses
+    // and tries to launch a WebView. MKissa's crypto handshake scrapes
+    // the site HTML and JS chunks; the interceptor hangs the coroutine
+    // for 30s × 3 retries, then the provider silently returns nothing.
+    // MKissa has its own anti-bot crypto (aaReq) and does not need CF bypass.
+    // =================================================================
+
+    private val mkissaClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .apply { networkInterceptors().clear() }
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private val mkissaHeaders: Headers by lazy {
+        headers.newBuilder()
+            .set("Referer", "$baseUrl/anime/")
+            .build()
+    }
+
+    // =================================================================
+    // Caches + extractors
+    // =================================================================
+
     private val showIdCache = ConcurrentHashMap<Int, String>()
 
     private val keyManager by lazy {
-        MKissaKeyManager(client, headers, preferences, baseUrl, apiUrl)
+        MKissaKeyManager(mkissaClient, mkissaHeaders, preferences, baseUrl, apiUrl)
     }
 
-    private val mkissaExtractor by lazy { MKissaExtractor(client, headers) }
+    private val mkissaExtractor by lazy { MKissaExtractor(mkissaClient, mkissaHeaders) }
     private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
     private val doodExtractor by lazy { DoodExtractor(client) }
     private val okruExtractor by lazy { OkruExtractor(client) }
@@ -113,7 +142,7 @@ class MKissaProvider(
             put("query", SEARCH_QUERY)
         }
 
-        val result = client.newCall(buildPost(data))
+        val result = mkissaClient.newCall(buildPost(data))
             .awaitSuccess()
             .parseAs<MKissaSearchResult>()
 
@@ -138,7 +167,7 @@ class MKissaProvider(
             put("query", EPISODES_QUERY)
         }
 
-        val result = client.newCall(buildPost(data))
+        val result = mkissaClient.newCall(buildPost(data))
             .awaitSuccess()
             .parseAs<MKissaSeriesResult>()
 
@@ -193,12 +222,12 @@ class MKissaProvider(
                 addQueryParameter("extensions", extensions.toJsonString())
             }.build()
 
-            val streamHeaders = headers.newBuilder()
+            val streamHeaders = mkissaHeaders.newBuilder()
                 .set("x-build-id", material.buildId)
                 .build()
 
             val responseBody = runCatching {
-                client.newCall(GET(url, streamHeaders)).awaitSuccess().bodyString()
+                mkissaClient.newCall(GET(url, streamHeaders)).awaitSuccess().bodyString()
             }.getOrElse {
                 lastError = it
                 null
@@ -287,7 +316,7 @@ class MKissaProvider(
                     mkissaExtractor.videoFromUrl(server.sourceUrl, server.sourceName, PLAYER_DOMAIN)
 
                 sName.startsWith("player@") -> {
-                    val videoHeaders = headers.newBuilder().apply {
+                    val videoHeaders = mkissaHeaders.newBuilder().apply {
                         add("Accept", "video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5")
                         add("Host", server.sourceUrl.toHttpUrl().host)
                         add("Referer", "$PLAYER_DOMAIN/")
@@ -338,10 +367,10 @@ class MKissaProvider(
         return if (audioPref == "dub") "dub" else "sub"
     }
 
-    private fun buildPost(dataObject: kotlinx.serialization.json.JsonObject): okhttp3.Request {
+    private fun buildPost(dataObject: kotlinx.serialization.json.JsonObject): Request {
         val payload = dataObject.toJsonString().toJsonBody()
 
-        val postHeaders = headers.newBuilder().apply {
+        val postHeaders = mkissaHeaders.newBuilder().apply {
             add("Accept", "*/*")
             add("Content-Length", payload.contentLength().toString())
             add("Content-Type", payload.contentType().toString())
