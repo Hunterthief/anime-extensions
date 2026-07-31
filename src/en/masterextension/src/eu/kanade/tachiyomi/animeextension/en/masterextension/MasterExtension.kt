@@ -18,6 +18,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -31,6 +32,7 @@ import kotlin.math.roundToInt
 class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
     override val name = "Master Extension"
+
     override val baseUrl: String
         get() {
             val fallback = "https://anidb.app"
@@ -39,11 +41,25 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             } catch (_: Exception) {
                 fallback
             }
-    }
+        }
+
     override val lang = "en"
     override val supportsLatest = true
 
     private val preferences by getPreferencesLazy()
+
+    // =================================================================
+    // HEADERS — dynamic so Referer always matches the current baseUrl.
+    // UA matches the OG AnimePahe extension's mobile Chrome UA so the
+    // app's verification WebView presents the same fingerprint that
+    // Cloudflare Turnstile accepts.
+    // =================================================================
+
+    override val headers: Headers
+        get() = super.headersBuilder()
+            .set("User-Agent", USER_AGENT)
+            .set("Referer", "$baseUrl/")
+            .build()
 
     // =================================================================
     // CLIENT — CloudflareInterceptor wired as network interceptor
@@ -62,14 +78,11 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             .build()
     }
 
-    override fun headersBuilder() = super.headersBuilder()
-        .set("User-Agent", USER_AGENT)
-
     private val providerManager by lazy { ProviderManager(client, headers, preferences) }
 
     companion object {
         private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Mobile Safari/537.36"
 
         private const val ANILIST_API_URL = "https://graphql.anilist.co"
     }
@@ -329,71 +342,71 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     // =================================================================
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-    // --- Streaming Source Switcher ---
-    val providerKeys = providerManager.providerDisplayNames.keys.toTypedArray()
-    val providerNames = providerManager.providerDisplayNames.values.toTypedArray()
+        // --- Streaming Source Switcher ---
+        val providerKeys = providerManager.providerDisplayNames.keys.toTypedArray()
+        val providerNames = providerManager.providerDisplayNames.values.toTypedArray()
 
-    MultiSelectListPreference(screen.context).apply {
-        key = "enabled_providers"
-        title = "Streaming Sources"
-        entries = providerNames
-        entryValues = providerKeys
-        summary = "Select which sources to fetch videos from.\nSelected: %s"
-        setDefaultValue(providerManager.defaultProviderKeys)
-    }.also { screen.addPreference(it) }
+        MultiSelectListPreference(screen.context).apply {
+            key = "enabled_providers"
+            title = "Streaming Sources"
+            entries = providerNames
+            entryValues = providerKeys
+            summary = "Select which sources to fetch videos from.\nSelected: %s"
+            setDefaultValue(providerManager.defaultProviderKeys)
+        }.also { screen.addPreference(it) }
 
-    // --- Sub / Dub Preference ---
-    ListPreference(screen.context).apply {
-        key = "preferred_audio_type"
-        title = "Preferred Audio Type"
-        entries = arrayOf("Sub", "Dub", "Both")
-        entryValues = arrayOf("sub", "dub", "both")
-        summary = "Filter videos by audio type.\n%s"
-        setDefaultValue("sub")
-    }.also { screen.addPreference(it) }
+        // --- Sub / Dub Preference ---
+        ListPreference(screen.context).apply {
+            key = "preferred_audio_type"
+            title = "Preferred Audio Type"
+            entries = arrayOf("Sub", "Dub", "Both")
+            entryValues = arrayOf("sub", "dub", "both")
+            summary = "Filter videos by audio type.\n%s"
+            setDefaultValue("sub")
+        }.also { screen.addPreference(it) }
 
-    // --- Preferred Subtitle Language ---
-    ListPreference(screen.context).apply {
-        key = "preferred_sub_lang"
-        title = "Preferred Subtitle Language"
-        entries = arrayOf(
-            "English", "Spanish", "French", "German",
-            "Portuguese", "Italian", "Arabic", "Japanese",
-            "Korean", "Chinese", "None"
-        )
-        entryValues = arrayOf(
-            "en", "es", "fr", "de",
-            "pt", "it", "ar", "ja",
-            "ko", "zh", "none"
-        )
-        summary = "Sort videos to prefer this subtitle language.\n%s"
-        setDefaultValue("en")
-    }.also { screen.addPreference(it) }
+        // --- Preferred Subtitle Language ---
+        ListPreference(screen.context).apply {
+            key = "preferred_sub_lang"
+            title = "Preferred Subtitle Language"
+            entries = arrayOf(
+                "English", "Spanish", "French", "German",
+                "Portuguese", "Italian", "Arabic", "Japanese",
+                "Korean", "Chinese", "None"
+            )
+            entryValues = arrayOf(
+                "en", "es", "fr", "de",
+                "pt", "it", "ar", "ja",
+                "ko", "zh", "none"
+            )
+            summary = "Sort videos to prefer this subtitle language.\n%s"
+            setDefaultValue("en")
+        }.also { screen.addPreference(it) }
 
-    // --- Preferred Quality ---
-    ListPreference(screen.context).apply {
-        key = "preferred_quality"
-        title = "Preferred Quality"
-        entries = arrayOf("1080p", "720p", "480p", "360p", "Auto")
-        entryValues = arrayOf("1080", "720", "480", "360", "auto")
-        summary = "Sort videos to prefer this resolution.\n%s"
-        setDefaultValue("720")
-    }.also { screen.addPreference(it) }
+        // --- Preferred Quality ---
+        ListPreference(screen.context).apply {
+            key = "preferred_quality"
+            title = "Preferred Quality"
+            entries = arrayOf("1080p", "720p", "480p", "360p", "Auto")
+            entryValues = arrayOf("1080", "720", "480", "360", "auto")
+            summary = "Sort videos to prefer this resolution.\n%s"
+            setDefaultValue("720")
+        }.also { screen.addPreference(it) }
 
-    // --- Default Verification Site ---
-    val verificationNames = providerManager.providerDisplayNames.values.toList()
-    val verificationUrls = providerManager.providerBaseUrls.values.toList()
-    val defaultVerificationUrl = verificationUrls.firstOrNull() ?: "https://anidb.app"
+        // --- Default Verification Site ---
+        val verificationNames = providerManager.providerDisplayNames.values.toList()
+        val verificationUrls = providerManager.providerBaseUrls.values.toList()
+        val defaultVerificationUrl = verificationUrls.firstOrNull() ?: "https://anidb.app"
 
-    ListPreference(screen.context).apply {
-        key = "verification_site_url"
-        title = "Default Verification Site"
-        entries = verificationNames.toTypedArray()
-        entryValues = verificationUrls.toTypedArray()
-        summary = "Choose which provider opens when using \"Open Verification WebView\".\n%s"
-        setDefaultValue(defaultVerificationUrl)
-    }.also { screen.addPreference(it) }
-}
+        ListPreference(screen.context).apply {
+            key = "verification_site_url"
+            title = "Default Verification Site"
+            entries = verificationNames.toTypedArray()
+            entryValues = verificationUrls.toTypedArray()
+            summary = "Choose which provider opens when using \"Open Verification WebView\".\n%s"
+            setDefaultValue(defaultVerificationUrl)
+        }.also { screen.addPreference(it) }
+    }
 
     override fun getFilterList(): AnimeFilterList = MasterFilters.filterList
 
