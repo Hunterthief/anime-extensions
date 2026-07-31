@@ -58,26 +58,26 @@ class ReAnimeProvider(
             return dbg("FAIL watch page: ${e.message?.take(80)}")
         }
 
-        // Step 3: Find flixcloud embed URL
-        val watchLower = watchHtml.lowercase()
-        val flixcloudIdx = watchLower.indexOf("flixcloud")
+        // Step 3: Find server/embed info in SvelteKit data
+        val svelteData = SVELTEKIT_DATA_REGEX.find(watchHtml)?.groupValues?.get(1)
+        if (svelteData == null) return dbg("NO SVELTEKIT DATA in watch page")
 
-        if (flixcloudIdx == -1) {
-            // flixcloud NOT in HTML — dump SvelteKit data
-            val svelteData = SVELTEKIT_DATA_REGEX.find(watchHtml)?.groupValues?.get(1)
-            if (svelteData == null) {
-                val snippet = watchHtml.take(300).replace("\n", " ")
-                return dbg("NO FLIXCLOUD + NO SVELTEKIT. HTML: $snippet")
+        val dataLower = svelteData.lowercase()
+
+        // Search for server/embed related keywords
+        for (kw in listOf("flixcloud", "server", "hd-", "embed", "source", "access", "stream", "iframe", "player")) {
+            val idx = dataLower.indexOf(kw)
+            if (idx != -1) {
+                val ctx = svelteData
+                    .substring(maxOf(0, idx - 30), minOf(svelteData.length, idx + 170))
+                    .replace("\n", " ")
+                return dbg("FOUND '$kw': ...$ctx...")
             }
-            val dataSnippet = svelteData.take(400).replace("\n", " ")
-            return dbg("NO FLIXCLOUD. SVELTEKIT DATA: $dataSnippet")
         }
 
-        // flixcloud IS mentioned — show context
-        val context = watchHtml
-            .substring(maxOf(0, flixcloudIdx - 150), minOf(watchHtml.length, flixcloudIdx + 250))
-            .replace("\n", " ").replace("\t", " ")
-        return dbg("FLIXCLOUD CTX: $context")
+        // No keywords — dump a bigger chunk so I can see the structure
+        val chunk = svelteData.take(800).replace("\n", " ")
+        return dbg("NO KEYWORDS. DATA: $chunk")
     }
 
     // ======================== Search ========================
