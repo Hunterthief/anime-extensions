@@ -32,6 +32,7 @@ class TorrentioProvider(
 ) : VideoProvider {
 
     override val name = "Torrentio"
+    override val baseUrl = "https://torrentio.strem.fun/"
 
     private val json = Json {
         isLenient = true
