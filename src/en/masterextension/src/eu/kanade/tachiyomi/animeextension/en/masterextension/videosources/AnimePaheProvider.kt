@@ -14,7 +14,6 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
@@ -35,15 +34,25 @@ class AnimePaheProvider(
     override val baseUrl = "https://animepahe.pw"
 
     // =================================================================
-    // DEDICATED CLIENTS
-    // paheClient  → AnimePahe API (DDos-Guard interceptor, no CF interceptor)
-    // kwikClient  → Kwik extraction (no interceptors, Kwik has its own CF bypass)
+    // DEDICATED CLIENTS — mirrors the OG extension's chain exactly
+    //
+    // cleanClient  → network.client equivalent (no custom interceptors)
+    // paheClient   → cleanClient + DdosGuardInterceptor  (OG's "client")
+    // kwikClient   → cleanClient, no DdosGuardInterceptor (OG's "extractorClient")
+    //
+    // DdosGuardInterceptor is constructed with cleanClient so its
+    // internal getNewCookie() calls never touch CloudflareInterceptor.
     // =================================================================
 
-    private val paheClient: OkHttpClient by lazy {
+    private val cleanClient: OkHttpClient by lazy {
         client.newBuilder()
             .apply { networkInterceptors().clear() }
-            .addInterceptor(DdosGuardInterceptor(client) { ANIMEPAHE_UA })
+            .build()
+    }
+
+    private val paheClient: OkHttpClient by lazy {
+        cleanClient.newBuilder()
+            .addInterceptor(DdosGuardInterceptor(cleanClient) { ANIMEPAHE_UA })
             .build()
     }
 
@@ -132,7 +141,7 @@ class AnimePaheProvider(
 
         return try {
             val session = paheClient.newCall(GET("$baseUrl/a/$animeId", paheHeaders))
-                .await()
+                .awaitSuccess()
                 .use { it.request.url.pathSegments.last() }
 
             sessionCache[animeId] = session
