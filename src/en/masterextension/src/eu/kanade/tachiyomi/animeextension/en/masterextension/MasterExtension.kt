@@ -31,7 +31,15 @@ import kotlin.math.roundToInt
 class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
     override val name = "Master Extension"
-    override val baseUrl = "https://graphql.anilist.co"
+    override val baseUrl: String
+        get() {
+            val fallback = "https://anidb.app"
+            return try {
+                preferences.getString("verification_site_url", fallback) ?: fallback
+            } catch (_: Exception) {
+                fallback
+            }
+    }
     override val lang = "en"
     override val supportsLatest = true
 
@@ -62,6 +70,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     companion object {
         private const val USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+        private const val ANILIST_API_URL = "https://graphql.anilist.co"
     }
 
     // =================================================================
@@ -92,7 +102,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             put("season", season)
             put("year", year)
         }
-        return graphQLPost(baseUrl, headers, query, variables = variables)
+        return graphQLPost(ANILIST_API_URL, headers, query, variables = variables)
     }
 
     override fun popularAnimeParse(response: Response): AnimesPage {
@@ -115,7 +125,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun latestUpdatesRequest(page: Int): Request {
         val query = "query (\$page: Int) { Page(page: \$page, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC) { id title { romaji english } coverImage { large } } } }"
         val variables = buildJsonObject { put("page", page) }
-        return graphQLPost(baseUrl, headers, query, variables = variables)
+        return graphQLPost(ANILIST_API_URL, headers, query, variables = variables)
     }
 
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
@@ -148,7 +158,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             if (formatStr != null) put("format", formatStr)
             put("sort", JsonArray(listOf(JsonPrimitive(sortStr))))
         }
-        return graphQLPost(baseUrl, headers, gqlQuery, variables = variables)
+        return graphQLPost(ANILIST_API_URL, headers, gqlQuery, variables = variables)
     }
 
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
@@ -160,7 +170,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun animeDetailsRequest(anime: SAnime): Request {
         val query = "query (\$id: Int) { Media(id: \$id, type: ANIME) { id idMal title { romaji english native } description episodes duration status season seasonYear format genres averageScore studios { nodes { name isAnimationStudio } } nextAiringEpisode { airingAt episode timeUntilAiring } } }"
         val variables = buildJsonObject { put("id", anime.url.toInt()) }
-        return graphQLPost(baseUrl, headers, query, variables = variables)
+        return graphQLPost(ANILIST_API_URL, headers, query, variables = variables)
     }
 
     override fun animeDetailsParse(response: Response): SAnime {
