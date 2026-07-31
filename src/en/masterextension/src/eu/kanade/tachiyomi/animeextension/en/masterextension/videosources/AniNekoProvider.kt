@@ -20,6 +20,7 @@ class AniNekoProvider(
 ) : VideoProvider {
 
     override val name = "AniNeko"
+    override val baseUrl = "https://anineko.to"
 
     companion object {
         private const val BASE_URL = "https://anineko.to"
