@@ -23,5 +23,5 @@ dependencies {
     implementation(project(':lib:filemoonextractor'))
     implementation(project(':lib:m3u8server'))
     implementation(project(':lib-multisrc:anikototheme'))
-    implementation("org.nanohttpd:nanohttpd:2.3.1")
+    compileOnly("org.nanohttpd:nanohttpd:2.3.1")
 }
