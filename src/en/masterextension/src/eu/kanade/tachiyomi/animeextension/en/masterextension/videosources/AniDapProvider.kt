@@ -25,6 +25,7 @@ class AniDapProvider(
 ) : VideoProvider {
 
     override val name = "AniDap"
+    override val baseUrl = "https://anidap.lol"
 
     companion object {
         private const val SITE_URL = "https://anidap.lol"
