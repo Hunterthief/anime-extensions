@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
-import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -25,14 +24,14 @@ class AnikotoProvider :
     ),
     VideoProvider {
 
-    // name and baseUrl are inherited from AnikotoTheme — satisfies VideoProvider
-
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         return try {
             val meta = EpisodeMeta.from(episode)
 
-            // 1. Search using the theme's own VRF-encrypted search
-            val searchRequest = searchAnimeRequest(1, anime.title, AnimeFilterList())
+            // 1. Search — use getFilterList() so AnikotoThemeFilters can
+            //    extract its typed filters. An empty AnimeFilterList() throws
+            //    NoSuchElementException inside getSearchParameters().
+            val searchRequest = searchAnimeRequest(1, anime.title, getFilterList())
             val searchResponse = client.newCall(searchRequest).awaitSuccess()
             val searchResults = searchAnimeParse(searchResponse)
 
@@ -50,7 +49,7 @@ class AnikotoProvider :
                 }
             } ?: return emptyList()
 
-            // 3. Get episodes using the theme's AJAX episode list
+            // 3. Get episodes
             val episodes = getEpisodeList(matchedAnime)
             if (episodes.isEmpty()) return emptyList()
 
@@ -59,8 +58,7 @@ class AnikotoProvider :
                 it.episode_number.toInt() == meta.epNum
             } ?: episodes.getOrNull(meta.epNum - 1) ?: return emptyList()
 
-            // 5. Get videos using the theme's full extraction pipeline
-            //    (server list → embed links → player strategies → M3U8 proxy)
+            // 5. Get videos
             getVideoList(matchedEpisode)
         } catch (_: Exception) {
             emptyList()
