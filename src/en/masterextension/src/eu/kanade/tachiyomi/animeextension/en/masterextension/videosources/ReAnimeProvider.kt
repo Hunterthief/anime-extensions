@@ -10,6 +10,13 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -59,37 +66,51 @@ class ReAnimeProvider(
             return dbg("FAIL __data.json: ${e.message?.take(80)}")
         }
 
-        // Step 3: Search for server/embed keywords (skip "embed" since it's just embedurl)
-        val dataLower = dataBody.lowercase()
-        for (kw in listOf("flixcloud", "iframe", "access_id", "hd-1", "hd-2", "server", "source", "stream", "player", "m3u8", "video_url", "src")) {
-            var searchFrom = 0
-            while (true) {
-                val idx = dataLower.indexOf(kw, searchFrom)
-                if (idx == -1) break
-                // Skip "embedurl" false positive
-                val before = dataBody.substring(maxOf(0, idx - 10), idx).lowercase()
-                if (kw == "src" && before.contains("embed")) {
-                    searchFrom = idx + kw.length
-                    continue
+        // Step 3: Parse devalue format and dereference "server"
+        return try {
+            val root = json.parseToJsonElement(dataBody).jsonObject
+            val nodes = root["nodes"]?.jsonArray ?: return dbg("NO NODES array")
+
+            for ((nodeIdx, node) in nodes.withIndex()) {
+                if (node is JsonNull) continue
+                val nodeObj = try { node.jsonObject } catch (_: Exception) { continue }
+                val data = nodeObj["data"]?.jsonArray ?: continue
+
+                // Search for objects containing "server" key
+                for (elem in data) {
+                    if (elem !is JsonObject) continue
+                    val serverRef = elem["server"] ?: continue
+                    val serverIdx = serverRef.jsonPrimitive.intOrNull
+                    if (serverIdx == null || serverIdx < 0 || serverIdx >= data.size) {
+                        return dbg("N$nodeIdx server ref=$serverRef (bad idx)")
+                    }
+
+                    // Dereference: get the actual value at that index
+                    val serverVal = data[serverIdx]
+                    val serverStr = serverVal.toString().take(300)
+
+                    // If it's an object, also dereference its fields
+                    if (serverVal is JsonObject) {
+                        val resolved = StringBuilder()
+                        for ((k, v) in serverVal) {
+                            val vIdx = v.jsonPrimitive.intOrNull
+                            if (vIdx != null && vIdx >= 0 && vIdx < data.size) {
+                                resolved.append("$k=${data[vIdx].toString().take(60)}; ")
+                            } else {
+                                resolved.append("$k=$v; ")
+                            }
+                        }
+                        return dbg("N$nodeIdx SRV OBJ: $resolved")
+                    }
+
+                    return dbg("N$nodeIdx SRV@$serverIdx: $serverStr")
                 }
-                val ctx = dataBody
-                    .substring(maxOf(0, idx - 30), minOf(dataBody.length, idx + 250))
-                    .replace("\n", " ")
-                return dbg("'$kw'@${idx}: ...$ctx...")
             }
-        }
 
-        // No keywords — dump chunk starting after "embedurl" to see what follows
-        val embedIdx = dataLower.indexOf("embedurl")
-        if (embedIdx != -1) {
-            val afterEmbed = dataBody
-                .substring(embedIdx, minOf(dataBody.length, embedIdx + 400))
-                .replace("\n", " ")
-            return dbg("AFTER EMBED: $afterEmbed")
+            dbg("NO 'server' KEY in ${nodes.size} nodes")
+        } catch (e: Exception) {
+            dbg("PARSE ERR: ${e.message?.take(80)}")
         }
-
-        val chunk = dataBody.take(600).replace("\n", " ")
-        return dbg("NO KW ($${dataBody.length}ch): $chunk")
     }
 
     private suspend fun findAnime(anilistId: Int, title: String): AnimeInfo? {
