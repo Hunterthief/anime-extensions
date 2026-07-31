@@ -33,8 +33,6 @@ class ReAnimeProvider(
             .set("Referer", "$baseUrl/")
             .build()
 
-    // ======================== cache ========================
-
     private data class AnimeInfo(val slug: String, val title: String)
     private val animeCache = ConcurrentHashMap<Int, AnimeInfo>()
 
@@ -47,11 +45,9 @@ class ReAnimeProvider(
         val info = try {
             findAnime(meta.anilistId, anime.title)
         } catch (e: Exception) {
-            return listOf(Video("debug://x", "FAIL search: ${e.message?.take(80)}", "debug://x"))
+            return dbg("FAIL search: ${e.message?.take(80)}")
         }
-        if (info == null) {
-            return listOf(Video("debug://x", "FAIL: 0 results for '${anime.title}'", "debug://x"))
-        }
+        if (info == null) return dbg("FAIL: 0 results for '${anime.title}'")
 
         // Step 2: Fetch watch page
         val watchUrl = "$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2"
@@ -59,98 +55,32 @@ class ReAnimeProvider(
             client.newCall(GET(watchUrl, reHeaders)).awaitSuccess()
                 .use { it.body.string() }
         } catch (e: Exception) {
-            return listOf(Video("debug://x", "FAIL watch page: ${e.message?.take(80)}", "debug://x"))
+            return dbg("FAIL watch page: ${e.message?.take(80)}")
         }
 
-        // Step 3: Find flixcloud embed URL or access ID
+        // Step 3: Find flixcloud embed URL
         val watchLower = watchHtml.lowercase()
         val flixcloudIdx = watchLower.indexOf("flixcloud")
 
-        if (flixcloudIdx != -1) {
-            // flixcloud IS mentioned — show the surrounding context to see the format
-            val context = watchHtml
-                .substring(maxOf(0, flixcloudIdx - 150), minOf(watchHtml.length, flixcloudIdx + 250))
-                .replace("\n", " ").replace("\t", " ")
-            return listOf(Video("debug://x", "FLIXCLOUD CTX: $context", "debug://x"))
+        if (flixcloudIdx == -1) {
+            // flixcloud NOT in HTML — dump SvelteKit data
+            val svelteData = SVELTEKIT_DATA_REGEX.find(watchHtml)?.groupValues?.get(1)
+            if (svelteData == null) {
+                val snippet = watchHtml.take(300).replace("\n", " ")
+                return dbg("NO FLIXCLOUD + NO SVELTEKIT. HTML: $snippet")
+            }
+            val dataSnippet = svelteData.take(400).replace("\n", " ")
+            return dbg("NO FLIXCLOUD. SVELTEKIT DATA: $dataSnippet")
         }
 
-        // flixcloud NOT in HTML — pull the SvelteKit SSR data instead
-        val svelteData = SVELTEKIT_DATA_REGEX.find(watchHtml)?.groupValues?.get(1)
-        if (svelteData == null) {
-            val snippet = watchHtml.take(300).replace("\n", " ")
-            return listOf(Video("debug://x", "NO FLIXCLOUD + NO SVELTEKIT. HTML: $snippet", "debug://x"))
-        }
-
-        val dataSnippet = svelteData.take(400).replace("\n", " ")
-        return listOf(Video("debug://x", "NO FLIXCLOUD. SVELTEKIT DATA: $dataSnippet", "debug://x"))
-
-        // Step 4: Fetch flixcloud embed page
-        val embedHtml = try {
-            val embedHeaders = headers.newBuilder().set("Referer", "$baseUrl/").build()
-            client.newCall(GET(embedUrl, embedHeaders)).awaitSuccess()
-                .use { it.body.string() }
-        } catch (e: Exception) {
-            return listOf(Video("debug://x", "FAIL embed fetch: ${e.message?.take(80)}", "debug://x"))
-        }
-
-        // Step 5: Parse SvelteKit data
-        val dataJson = SVELTEKIT_DATA_REGEX.find(embedHtml)?.groupValues?.get(1)
-        if (dataJson == null) {
-            val snippet = embedHtml.take(200).replace("\n", " ")
-            return listOf(Video("debug://x", "FAIL: no SvelteKit data. HTML starts: $snippet", "debug://x"))
-        }
-
-        // Step 6: Extract seed + crypto data
-        val pageDataMap = parseFlatData(dataJson)
-        val seed = pageDataMap["obfuscation_seed"]
-        if (seed == null) {
-            return listOf(Video("debug://x", "FAIL: no obfuscation_seed in data", "debug://x"))
-        }
-
-        val cryptoDataStr = extractJsonObject(dataJson, "obfuscated_crypto_data")
-        if (cryptoDataStr == null) {
-            return listOf(Video("debug://x", "FAIL: no obfuscated_crypto_data", "debug://x"))
-        }
-
-        // Step 7: Get token ref + call API
-        val mapping = FlixcloudDecryptor.resolveFieldMapping(seed)
-        val tokenRef = pageDataMap[mapping.tokenField]
-        if (tokenRef == null) {
-            return listOf(Video("debug://x", "FAIL: no tokenRef (field=${mapping.tokenField})", "debug://x"))
-        }
-
-        val apiBody = try {
-            val apiUrl = "$flixcloudBase/api/m3u8/$tokenRef"
-            val apiHeaders = headers.newBuilder().set("Referer", embedUrl).build()
-            client.newCall(GET(apiUrl, apiHeaders)).awaitSuccess()
-                .use { it.body.string() }
-        } catch (e: Exception) {
-            return listOf(Video("debug://x", "FAIL API call: ${e.message?.take(80)}", "debug://x"))
-        }
-
-        // Step 8: Decrypt
-        val m3u8Url = try {
-            val cryptoData = json.parseToJsonElement(cryptoDataStr).jsonObject
-            val apiResponse = json.parseToJsonElement(apiBody).jsonObject
-            FlixcloudDecryptor.decrypt(seed, cryptoData, pageDataMap, apiResponse)
-        } catch (e: Exception) {
-            return listOf(Video("debug://x", "FAIL decrypt: ${e.message?.take(80)}", "debug://x"))
-        }
-
-        return listOf(
-            Video(
-                url = m3u8Url,
-                quality = "$name - Auto",
-                videoUrl = m3u8Url,
-                headers = Headers.Builder()
-                    .set("Referer", "$flixcloudBase/")
-                    .set("Origin", flixcloudBase)
-                    .build(),
-            ),
-        )
+        // flixcloud IS mentioned — show context
+        val context = watchHtml
+            .substring(maxOf(0, flixcloudIdx - 150), minOf(watchHtml.length, flixcloudIdx + 250))
+            .replace("\n", " ").replace("\t", " ")
+        return dbg("FLIXCLOUD CTX: $context")
     }
 
-    // ======================== Step 1: Search ========================
+    // ======================== Search ========================
 
     private suspend fun findAnime(anilistId: Int, title: String): AnimeInfo? {
         animeCache[anilistId]?.let { return it }
@@ -184,84 +114,12 @@ class ReAnimeProvider(
         return info
     }
 
-    // ======================== Step 2: Extract video URL ========================
-
-    private suspend fun extractVideoUrl(slug: String, epNum: Int): String? {
-        // Fetch watch page → find flixcloud embed URL
-        val watchUrl = "$baseUrl/watch/$slug?ep=$epNum&lang=sub&server=HD-2"
-        val watchHtml = client.newCall(GET(watchUrl, reHeaders)).awaitSuccess()
-            .use { it.body.string() }
-
-        val embedUrl = FLIXCLOUD_EMBED_REGEX.find(watchHtml)?.value ?: return null
-
-        // Fetch flixcloud embed page
-        val embedHeaders = headers.newBuilder()
-            .set("Referer", "$baseUrl/")
-            .build()
-        val embedHtml = client.newCall(GET(embedUrl, embedHeaders)).awaitSuccess()
-            .use { it.body.string() }
-
-        // Parse SvelteKit data
-        val dataJson = SVELTEKIT_DATA_REGEX.find(embedHtml)?.groupValues?.get(1) ?: return null
-        val pageDataMap = parseFlatData(dataJson)
-        val seed = pageDataMap["obfuscation_seed"] ?: return null
-        val cryptoDataStr = extractJsonObject(dataJson, "obfuscated_crypto_data") ?: return null
-        val cryptoData = json.parseToJsonElement(cryptoDataStr).jsonObject
-
-        // Get token ref → call flixcloud API
-        val mapping = FlixcloudDecryptor.resolveFieldMapping(seed)
-        val tokenRef = pageDataMap[mapping.tokenField] ?: return null
-
-        val apiUrl = "$flixcloudBase/api/m3u8/$tokenRef"
-        val apiHeaders = headers.newBuilder()
-            .set("Referer", embedUrl)
-            .build()
-        val apiBody = client.newCall(GET(apiUrl, apiHeaders)).awaitSuccess()
-            .use { it.body.string() }
-        val apiResponse = json.parseToJsonElement(apiBody).jsonObject
-
-        // Decrypt → m3u8 URL
-        return FlixcloudDecryptor.decrypt(seed, cryptoData, pageDataMap, apiResponse)
-    }
-
     // ======================== Helpers ========================
 
-    private fun parseFlatData(dataJson: String): Map<String, String> {
-        val result = mutableMapOf<String, String>()
-        val regex = Regex(""""([a-zA-Z0-9_]+)"\s*:\s*"([^"]*?)"""")
-        for (match in regex.findAll(dataJson)) {
-            val key = match.groupValues[1]
-            val value = match.groupValues[2]
-            if (value.isNotEmpty() && !value.startsWith("{") && !value.startsWith("[")) {
-                result[key] = value
-            }
-        }
-        return result
-    }
-
-    private fun extractJsonObject(dataStr: String, key: String): String? {
-        val idx = dataStr.indexOf("\"$key\"")
-        if (idx == -1) return null
-        val colonIdx = dataStr.indexOf(':', idx + key.length + 2)
-        if (colonIdx == -1) return null
-        var depth = 0
-        var start = -1
-        for (i in colonIdx + 1 until dataStr.length) {
-            when (dataStr[i]) {
-                '{' -> { if (depth == 0) start = i; depth++ }
-                '}' -> {
-                    depth--
-                    if (depth == 0 && start != -1) return dataStr.substring(start, i + 1)
-                }
-            }
-        }
-        return null
-    }
+    private fun dbg(msg: String): List<Video> =
+        listOf(Video("debug://x", msg.take(120), "debug://x"))
 
     companion object {
-        private val FLIXCLOUD_EMBED_REGEX =
-            Regex("""https://flixcloud\.cc/e/[a-zA-Z0-9]+[^"'\s]*""")
-
         private val SVELTEKIT_DATA_REGEX =
             Regex("""data:\s*(\[.+?\]),\s*form:""", RegexOption.DOT_MATCHES_ALL)
     }
