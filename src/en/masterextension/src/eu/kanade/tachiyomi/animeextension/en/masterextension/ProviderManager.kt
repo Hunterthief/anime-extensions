@@ -9,7 +9,6 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.Anikag
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniNekoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeKizzProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimeOnsenProvider
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AllAnimeProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniZoneProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.SubspleaseProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.TorrentioProvider
