@@ -2,7 +2,9 @@ package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.reanime.FlixcloudDecryptor
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.reanime.ReAnimeSearchResponse
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.reanime.ReAnimeWatchResponse
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -10,6 +12,7 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -22,119 +25,149 @@ class ReAnimeProvider(
 
     override val name = "ReAnime"
     override val baseUrl = "https://reanime.to"
-
+    private val flixcloudBase = "https://flixcloud.cc"
     private val json = Json { ignoreUnknownKeys = true }
 
     private val reHeaders: Headers
-        get() = headers.newBuilder()
-            .set("Referer", "$baseUrl/")
-            .build()
+        get() = headers.newBuilder().set("Referer", "$baseUrl/").build()
 
     private data class AnimeInfo(val slug: String, val title: String)
     private val animeCache = ConcurrentHashMap<Int, AnimeInfo>()
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
-        val meta = EpisodeMeta.from(episode)
-
-        // Step 1: Search
-        val info = try {
-            findAnime(meta.anilistId, anime.title)
-        } catch (e: Exception) {
-            return dbg("FAIL search: ${e.message?.take(80)}")
+        return try {
+            val meta = EpisodeMeta.from(episode)
+            val info = findAnime(meta.anilistId, anime.title) ?: return emptyList()
+            val m3u8 = extractVideoUrl(info.slug, meta.epNum) ?: return emptyList()
+            listOf(
+                Video(
+                    url = m3u8,
+                    quality = "$name - Auto",
+                    videoUrl = m3u8,
+                    headers = Headers.Builder()
+                        .set("Referer", "$flixcloudBase/")
+                        .set("Origin", flixcloudBase)
+                        .build(),
+                ),
+            )
+        } catch (_: Exception) {
+            emptyList()
         }
-        if (info == null) return dbg("FAIL: 0 results for '${anime.title}'")
-
-        // Step 2: Fetch watch page HTML → extract JS module URLs
-        val watchUrl = "$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2"
-        val watchHtml = try {
-            client.newCall(GET(watchUrl, reHeaders)).awaitSuccess()
-                .use { it.body.string() }
-        } catch (e: Exception) {
-            return dbg("FAIL watch HTML: ${e.message?.take(60)}")
-        }
-
-        // Find all JS module URLs (modulepreload + script src)
-        val moduleUrls = mutableSetOf<String>()
-        for (m in Regex("""(?:src|href)="([^"]*(?:nodes|chunks)[^"]*\.js)"""").findAll(watchHtml)) {
-            moduleUrls.add(m.groupValues[1])
-        }
-        // Also match relative paths like ../assets/immutable/...
-        for (m in Regex("""(?:src|href)="(\.\./[^"]*\.js)"""").findAll(watchHtml)) {
-            moduleUrls.add(m.groupValues[1])
-        }
-
-        if (moduleUrls.isEmpty()) {
-            return dbg("NO MODULES in HTML (${watchHtml.length}ch)")
-        }
-
-        // Step 3: Fetch each module, search for flixcloud embed construction
-        val results = StringBuilder()
-        for ((i, modulePath) in moduleUrls.withIndex()) {
-            val fullUrl = when {
-                modulePath.startsWith("http") -> modulePath
-                modulePath.startsWith("../") -> "$baseUrl/${modulePath.removePrefix("../")}"
-                modulePath.startsWith("/") -> "$baseUrl$modulePath"
-                else -> "$baseUrl/$modulePath"
-            }
-
-            try {
-                val moduleBody = client.newCall(GET(fullUrl, reHeaders)).awaitSuccess()
-                    .use { it.body.string() }
-
-                val mLower = moduleBody.lowercase()
-                for (kw in listOf("flixcloud", "embed_url", "iframe_src", "/e/", "access_id", "\"aid\"", "kuudere")) {
-                    val idx = mLower.indexOf(kw)
-                    if (idx != -1) {
-                        val ctx = moduleBody
-                            .substring(maxOf(0, idx - 60), minOf(moduleBody.length, idx + 180))
-                            .replace("\n", " ").replace("\t", " ")
-                        return dbg("MOD[$i] '$kw': $ctx")
-                    }
-                }
-                results.append("[$i]✓ ")
-            } catch (e: Exception) {
-                results.append("[$i]✗ ")
-            }
-
-            // Limit to 15 modules to avoid timeout
-            if (i >= 14) break
-        }
-
-        return dbg("SCANNED ${moduleUrls.size} modules, no flixcloud. ${results}")
     }
+
+    // ======================== Step 1: Search ========================
 
     private suspend fun findAnime(anilistId: Int, title: String): AnimeInfo? {
         animeCache[anilistId]?.let { return it }
-
         val url = baseUrl.toHttpUrl().newBuilder().apply {
             addPathSegments("api/v1/search")
             addQueryParameter("limit", "36")
             addQueryParameter("q", title)
         }.build()
+        val resp = client.newCall(GET(url, reHeaders)).awaitSuccess()
+        val results = resp.parseAs<ReAnimeSearchResponse>()
+        if (results.results.isEmpty()) return null
 
-        val response = client.newCall(GET(url, reHeaders)).awaitSuccess()
-        val searchResults = response.parseAs<ReAnimeSearchResponse>()
-        if (searchResults.results.isEmpty()) return null
-
-        val titleLower = title.lowercase().trim()
-        val best = searchResults.results.firstOrNull {
-            it.title.english.equals(title, ignoreCase = true) ||
-                it.title.romaji.equals(title, ignoreCase = true)
-        } ?: searchResults.results.minByOrNull {
+        val tl = title.lowercase().trim()
+        val best = results.results.firstOrNull {
+            it.title.english.equals(title, true) || it.title.romaji.equals(title, true)
+        } ?: results.results.minByOrNull {
             val n = it.title.english.lowercase().trim()
             when {
-                n.startsWith(titleLower) -> n.length
-                titleLower.startsWith(n) -> n.length + 1000
-                n.contains(titleLower) -> n.length + 2000
+                n.startsWith(tl) -> n.length
+                tl.startsWith(n) -> n.length + 1000
+                n.contains(tl) -> n.length + 2000
                 else -> Int.MAX_VALUE
             }
         } ?: return null
 
-        val info = AnimeInfo(best.animeId, best.title.english)
-        animeCache[anilistId] = info
-        return info
+        return AnimeInfo(best.animeId, best.title.english).also { animeCache[anilistId] = it }
     }
 
-    private fun dbg(msg: String): List<Video> =
-        listOf(Video("debug://x", msg.take(120), "debug://x"))
+    // ======================== Step 2: Get flixcloud embed URL ========================
+
+    private suspend fun extractVideoUrl(slug: String, epNum: Int): String? {
+        // Call the watch API → returns episode_links with dataLink (flixcloud URL)
+        val watchUrl = baseUrl.toHttpUrl().newBuilder().apply {
+            addPathSegments("api/v1/watch/$slug")
+            addQueryParameter("ep", epNum.toString())
+            addQueryParameter("tz", "UTC")
+        }.build()
+
+        val watchResp = client.newCall(GET(watchUrl, reHeaders)).awaitSuccess()
+        val watchData = watchResp.parseAs<ReAnimeWatchResponse>()
+
+        // Prefer HD-2 sub, fallback to any sub, then any server
+        val link = watchData.episodeLinks
+            .filter { it.dataType.contains("sub", true) }
+            .let { subs ->
+                subs.find { it.serverName == "HD-2" }
+                    ?: subs.find { it.serverName == "HD-1" }
+                    ?: subs.firstOrNull()
+            }
+            ?: watchData.episodeLinks.firstOrNull()
+            ?: return null
+
+        val embedUrl = link.dataLink
+        if (!embedUrl.contains("flixcloud")) return null
+
+        // Fetch flixcloud embed page
+        val embedHeaders = headers.newBuilder().set("Referer", "$baseUrl/").build()
+        val embedHtml = client.newCall(GET(embedUrl, embedHeaders)).awaitSuccess()
+            .use { it.body.string() }
+
+        // Parse SvelteKit data
+        val dataJson = SVELTEKIT_DATA_REGEX.find(embedHtml)?.groupValues?.get(1) ?: return null
+        val pageData = parseFlatData(dataJson)
+        val seed = pageData["obfuscation_seed"] ?: return null
+        val cryptoStr = extractJsonObject(dataJson, "obfuscated_crypto_data") ?: return null
+        val cryptoData = json.parseToJsonElement(cryptoStr).jsonObject
+
+        // Get token ref → call flixcloud API
+        val mapping = FlixcloudDecryptor.resolveFieldMapping(seed)
+        val tokenRef = pageData[mapping.tokenField] ?: return null
+
+        val apiUrl = "$flixcloudBase/api/m3u8/$tokenRef"
+        val apiHeaders = headers.newBuilder().set("Referer", embedUrl).build()
+        val apiBody = client.newCall(GET(apiUrl, apiHeaders)).awaitSuccess()
+            .use { it.body.string() }
+        val apiResponse = json.parseToJsonElement(apiBody).jsonObject
+
+        // Decrypt → m3u8 URL
+        return FlixcloudDecryptor.decrypt(seed, cryptoData, pageData, apiResponse)
+    }
+
+    // ======================== Helpers ========================
+
+    private fun parseFlatData(dataJson: String): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+        val regex = Regex(""""([a-zA-Z0-9_]+)"\s*:\s*"([^"]*?)"""")
+        for (m in regex.findAll(dataJson)) {
+            val v = m.groupValues[2]
+            if (v.isNotEmpty() && !v.startsWith("{") && !v.startsWith("[")) {
+                result[m.groupValues[1]] = v
+            }
+        }
+        return result
+    }
+
+    private fun extractJsonObject(dataStr: String, key: String): String? {
+        val idx = dataStr.indexOf("\"$key\"")
+        if (idx == -1) return null
+        val colon = dataStr.indexOf(':', idx + key.length + 2)
+        if (colon == -1) return null
+        var depth = 0; var start = -1
+        for (i in colon + 1 until dataStr.length) {
+            when (dataStr[i]) {
+                '{' -> { if (depth == 0) start = i; depth++ }
+                '}' -> { depth--; if (depth == 0 && start != -1) return dataStr.substring(start, i + 1) }
+            }
+        }
+        return null
+    }
+
+    companion object {
+        private val SVELTEKIT_DATA_REGEX =
+            Regex("""data:\s*(\[.+?\]),\s*form:""", RegexOption.DOT_MATCHES_ALL)
+    }
 }
