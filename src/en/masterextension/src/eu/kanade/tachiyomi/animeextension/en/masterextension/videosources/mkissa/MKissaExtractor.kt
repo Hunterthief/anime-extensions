@@ -1,4 +1,4 @@
-package eu.kanade.tachiyomi.animeextension.en.masterextension.mkissa
+package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa
 
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.model.Track
