@@ -24,13 +24,46 @@ class AnikotoProvider :
     ),
     VideoProvider {
 
-    override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
-        return listOf(
-            Video(
-                "https://anikototv.to",
-                "Anikoto IS being called",
-                "https://anikototv.to",
-            ),
-        )
+        override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
+        return try {
+            val searchRequest = searchAnimeRequest(1, anime.title, getFilterList())
+            val searchResponse = client.newCall(searchRequest).awaitSuccess()
+            val searchResults = searchAnimeParse(searchResponse)
+
+            if (searchResults.animes.isEmpty()) {
+                return listOf(Video("debug://x", "0 results for '${anime.title}'", "debug://x"))
+            }
+
+            val titleLower = anime.title.lowercase().trim()
+            val matchedAnime = searchResults.animes.firstOrNull {
+                it.title.lowercase().trim() == titleLower
+            } ?: searchResults.animes.first()
+
+            val episodes = getEpisodeList(matchedAnime)
+            if (episodes.isEmpty()) {
+                return listOf(Video("debug://x", "0 eps for '${matchedAnime.title}'", "debug://x"))
+            }
+
+            val meta = EpisodeMeta.from(episode)
+            val matchedEpisode = episodes.firstOrNull {
+                it.episode_number.toInt() == meta.epNum
+            } ?: episodes.getOrNull(meta.epNum - 1) ?: return listOf(
+                Video("debug://x", "ep${meta.epNum} not in ${episodes.size}", "debug://x"),
+            )
+
+            val videos = getVideoList(matchedEpisode)
+            if (videos.isEmpty()) {
+                return listOf(Video("debug://x", "0 videos from player", "debug://x"))
+            }
+            videos
+        } catch (t: Throwable) {
+            listOf(
+                Video(
+                    "debug://x",
+                    "${t::class.simpleName}: ${t.message?.take(120)}",
+                    "debug://x",
+                ),
+            )
+        }
     }
 }
