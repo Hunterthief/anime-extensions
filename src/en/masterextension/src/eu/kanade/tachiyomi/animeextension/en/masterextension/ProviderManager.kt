@@ -51,6 +51,11 @@ class ProviderManager(
         allProviders.mapValues { it.value.name }
     }
 
+    // ── NEW: base URLs for the verification-site picker ──
+    val providerBaseUrls: Map<String, String> by lazy {
+        allProviders.mapValues { it.value.baseUrl }
+    }
+    
     val defaultProviderKeys: Set<String> by lazy {
         allProviders.keys.toSet()
     }
