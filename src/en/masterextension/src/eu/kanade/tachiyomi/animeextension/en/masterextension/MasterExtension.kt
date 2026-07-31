@@ -380,7 +380,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         setDefaultValue("720")
     }.also { screen.addPreference(it) }
 
-    // --- Default Verification Site (NEW) ---
+    // --- Default Verification Site ---
     val verificationNames = providerManager.providerDisplayNames.values.toList()
     val verificationUrls = providerManager.providerBaseUrls.values.toList()
     val defaultVerificationUrl = verificationUrls.firstOrNull() ?: "https://anidb.app"
@@ -388,10 +388,10 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     ListPreference(screen.context).apply {
         key = "verification_site_url"
         title = "Default Verification Site"
-        entries = verificationEntries.toTypedArray()
-        entryValues = verificationValues.toTypedArray()
+        entries = verificationNames.toTypedArray()
+        entryValues = verificationUrls.toTypedArray()
         summary = "Choose which provider opens when using \"Open Verification WebView\".\n%s"
-        setDefaultValue(verificationValues.firstOrNull() ?: "")
+        setDefaultValue(defaultVerificationUrl)
     }.also { screen.addPreference(it) }
 }
 
