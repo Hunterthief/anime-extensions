@@ -17,6 +17,9 @@ interface VideoProvider {
     /** Shown in video quality labels, e.g. "Anikoto - 1080p" */
     val name: String
 
+    /** Root URL of the provider site, e.g. "https://anidb.app" */
+    val baseUrl: String
+
     /**
      * Return all playable [Video]s for this episode.
      * Return emptyList() on failure — never throw.
