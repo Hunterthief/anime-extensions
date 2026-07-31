@@ -41,25 +41,98 @@ class ReAnimeProvider(
     // ======================== VideoProvider ========================
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
-        return try {
-            val meta = EpisodeMeta.from(episode)
-            val info = findAnime(meta.anilistId, anime.title) ?: return emptyList()
-            val m3u8Url = extractVideoUrl(info.slug, meta.epNum) ?: return emptyList()
+        val meta = EpisodeMeta.from(episode)
 
-            listOf(
-                Video(
-                    url = m3u8Url,
-                    quality = "$name - Auto",
-                    videoUrl = m3u8Url,
-                    headers = Headers.Builder()
-                        .set("Referer", "$flixcloudBase/")
-                        .set("Origin", flixcloudBase)
-                        .build(),
-                ),
-            )
-        } catch (_: Exception) {
-            emptyList()
+        // Step 1: Search
+        val info = try {
+            findAnime(meta.anilistId, anime.title)
+        } catch (e: Exception) {
+            return listOf(Video("debug://x", "FAIL search: ${e.message?.take(80)}", "debug://x"))
         }
+        if (info == null) {
+            return listOf(Video("debug://x", "FAIL: 0 results for '${anime.title}'", "debug://x"))
+        }
+
+        // Step 2: Fetch watch page
+        val watchUrl = "$baseUrl/watch/${info.slug}?ep=${meta.epNum}&lang=sub&server=HD-2"
+        val watchHtml = try {
+            client.newCall(GET(watchUrl, reHeaders)).awaitSuccess()
+                .use { it.body.string() }
+        } catch (e: Exception) {
+            return listOf(Video("debug://x", "FAIL watch page: ${e.message?.take(80)}", "debug://x"))
+        }
+
+        // Step 3: Find flixcloud embed URL
+        val embedUrl = FLIXCLOUD_EMBED_REGEX.find(watchHtml)?.value
+        if (embedUrl == null) {
+            val snippet = watchHtml.take(200).replace("\n", " ")
+            return listOf(Video("debug://x", "FAIL: no flixcloud URL in watch page. HTML starts: $snippet", "debug://x"))
+        }
+
+        // Step 4: Fetch flixcloud embed page
+        val embedHtml = try {
+            val embedHeaders = headers.newBuilder().set("Referer", "$baseUrl/").build()
+            client.newCall(GET(embedUrl, embedHeaders)).awaitSuccess()
+                .use { it.body.string() }
+        } catch (e: Exception) {
+            return listOf(Video("debug://x", "FAIL embed fetch: ${e.message?.take(80)}", "debug://x"))
+        }
+
+        // Step 5: Parse SvelteKit data
+        val dataJson = SVELTEKIT_DATA_REGEX.find(embedHtml)?.groupValues?.get(1)
+        if (dataJson == null) {
+            val snippet = embedHtml.take(200).replace("\n", " ")
+            return listOf(Video("debug://x", "FAIL: no SvelteKit data. HTML starts: $snippet", "debug://x"))
+        }
+
+        // Step 6: Extract seed + crypto data
+        val pageDataMap = parseFlatData(dataJson)
+        val seed = pageDataMap["obfuscation_seed"]
+        if (seed == null) {
+            return listOf(Video("debug://x", "FAIL: no obfuscation_seed in data", "debug://x"))
+        }
+
+        val cryptoDataStr = extractJsonObject(dataJson, "obfuscated_crypto_data")
+        if (cryptoDataStr == null) {
+            return listOf(Video("debug://x", "FAIL: no obfuscated_crypto_data", "debug://x"))
+        }
+
+        // Step 7: Get token ref + call API
+        val mapping = FlixcloudDecryptor.resolveFieldMapping(seed)
+        val tokenRef = pageDataMap[mapping.tokenField]
+        if (tokenRef == null) {
+            return listOf(Video("debug://x", "FAIL: no tokenRef (field=${mapping.tokenField})", "debug://x"))
+        }
+
+        val apiBody = try {
+            val apiUrl = "$flixcloudBase/api/m3u8/$tokenRef"
+            val apiHeaders = headers.newBuilder().set("Referer", embedUrl).build()
+            client.newCall(GET(apiUrl, apiHeaders)).awaitSuccess()
+                .use { it.body.string() }
+        } catch (e: Exception) {
+            return listOf(Video("debug://x", "FAIL API call: ${e.message?.take(80)}", "debug://x"))
+        }
+
+        // Step 8: Decrypt
+        val m3u8Url = try {
+            val cryptoData = json.parseToJsonElement(cryptoDataStr).jsonObject
+            val apiResponse = json.parseToJsonElement(apiBody).jsonObject
+            FlixcloudDecryptor.decrypt(seed, cryptoData, pageDataMap, apiResponse)
+        } catch (e: Exception) {
+            return listOf(Video("debug://x", "FAIL decrypt: ${e.message?.take(80)}", "debug://x"))
+        }
+
+        return listOf(
+            Video(
+                url = m3u8Url,
+                quality = "$name - Auto",
+                videoUrl = m3u8Url,
+                headers = Headers.Builder()
+                    .set("Referer", "$flixcloudBase/")
+                    .set("Origin", flixcloudBase)
+                    .build(),
+            ),
+        )
     }
 
     // ======================== Step 1: Search ========================
