@@ -33,6 +33,12 @@ class MeguAnimeProvider(
 
         val videos = mutableListOf<Video>()
         
+        // FIX: Add required headers to bypass CDN/Cloudflare restrictions on the video URLs
+        val videoHeaders = headers.newBuilder()
+            .set("Referer", "$baseUrl/")
+            .set("Origin", baseUrl)
+            .build()
+
         // 1. Try to fetch SUB version
         try {
             val subUrl = "$baseUrl/api/vidnest?al=$anilistId&ep=$epNum&lang=sub"
@@ -41,7 +47,13 @@ class MeguAnimeProvider(
             val subSource = subData["source"]?.jsonPrimitive?.content
             
             if (!subSource.isNullOrBlank()) {
-                videos.add(Video(subSource, "$name - Sub", subSource))
+                // Diagnostic: Check if it looks like a real video URL
+                val qualityName = if (subSource.contains(".m3u8") || subSource.contains(".mp4") || subSource.contains("workers.dev")) {
+                    "$name - Sub"
+                } else {
+                    "$name - Sub (Invalid: ${subSource.take(40)}...)"
+                }
+                videos.add(Video(subSource, qualityName, subSource, videoHeaders))
             }
         } catch (e: Exception) {
             // Ignore sub error, we will try dub next
@@ -55,7 +67,12 @@ class MeguAnimeProvider(
             val dubSource = dubData["source"]?.jsonPrimitive?.content
             
             if (!dubSource.isNullOrBlank()) {
-                videos.add(Video(dubSource, "$name - Dub", dubSource))
+                val qualityName = if (dubSource.contains(".m3u8") || dubSource.contains(".mp4") || dubSource.contains("workers.dev")) {
+                    "$name - Dub"
+                } else {
+                    "$name - Dub (Invalid: ${dubSource.take(40)}...)"
+                }
+                videos.add(Video(dubSource, qualityName, dubSource, videoHeaders))
             }
         } catch (e: Exception) {
             // Ignore dub error
