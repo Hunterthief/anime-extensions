@@ -18,7 +18,6 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.MKissa
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimePaheProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnikotoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.KickAssAnimeProvider
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.MeguAnimeProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -42,7 +41,6 @@ class ProviderManager(
             "mkissa"     to MKissaProvider(client, headers, preferences),
             "kickassanime"to KickAssAnimeProvider(client, headers, preferences),
             "animeonsen" to AnimeOnsenProvider(client, headers),
-            "meguanime"  to MeguAnimeProvider(client, headers),
             "anizone"    to AniZoneProvider(client, headers),
             "anikoto"    to AnikotoProvider(),
             "animegg"    to AnimeGGProvider(client, headers),
