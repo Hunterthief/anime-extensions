@@ -17,6 +17,7 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AniDBP
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.MKissaProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnimePaheProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.AnikotoProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.KickAssAnimeProvider
 import keiyoushi.utils.parallelCatchingFlatMap
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -38,6 +39,7 @@ class ProviderManager(
             "anidb"      to AniDBProvider(client, headers),
             "animepahe"  to AnimePaheProvider(client, headers, preferences),
             "mkissa"     to MKissaProvider(client, headers, preferences),
+            "kickassanime"to KickAssAnimeProvider(client, headers, preferences),
             "animeonsen" to AnimeOnsenProvider(client, headers),
             "anizone"    to AniZoneProvider(client, headers),
             "anikoto"    to AnikotoProvider(),
