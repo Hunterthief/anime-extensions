@@ -298,7 +298,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         var malEpisodes: List<MalEpisode> = emptyList()
         try {
             if (malId != null) {
-                val (mList, _, _) = providerManager.fetchMalEpisodes(malId)
+                val (mList, _, _) = providerManager.fetchMalEpisodes(malId, latestAired)
                 malEpisodes = mList
             }
         } catch (_: Exception) {
