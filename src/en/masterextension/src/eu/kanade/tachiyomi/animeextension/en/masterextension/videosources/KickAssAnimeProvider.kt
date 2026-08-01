@@ -3,10 +3,10 @@ package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 import android.content.SharedPreferences
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.kickassanime.EpisodeResponseDto
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.kickassanime.KickAssAnimeExtractor
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.kickassanime.dto.EpisodeResponseDto
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.kickassanime.dto.SearchResponseDto
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.kickassanime.dto.ServersDto
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.kickassanime.SearchResponseDto
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.kickassanime.ServersDto
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
