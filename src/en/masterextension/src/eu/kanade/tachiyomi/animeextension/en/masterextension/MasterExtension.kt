@@ -100,6 +100,18 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     }
 
     // =================================================================
+    // TITLE HELPER (Separates Display from Provider Logic)
+    // =================================================================
+
+    private fun getDisplayedTitle(media: AniListMedia?): String {
+        val lang = preferences.getString("preferred_title_lang", "english")
+        return when (lang) {
+            "romaji" -> media?.title?.romaji ?: media?.title?.english ?: "Unknown"
+            else -> media?.title?.english ?: media?.title?.romaji ?: "Unknown"
+        }
+    }
+
+    // =================================================================
     // POPULAR
     // =================================================================
 
@@ -120,7 +132,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val animes = data.map { media ->
             SAnime.create().apply {
                 url = media.id.toString()
-                title = media.title?.english ?: media.title?.romaji ?: "Unknown"
+                title = getDisplayedTitle(media) // Uses preference
                 thumbnail_url = media.coverImage?.large ?: ""
                 initialized = true
             }
@@ -186,7 +198,7 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     override fun animeDetailsParse(response: Response): SAnime {
         val media = response.parseGraphQLAs<AniListMediaData>().Media
         return SAnime.create().apply {
-            title = media?.title?.english ?: media?.title?.romaji ?: "Unknown"
+            title = getDisplayedTitle(media) // Uses preference
 
             val studio = media?.studios?.nodes?.firstOrNull { it.isAnimationStudio == true }?.name ?: "Unknown"
             val producers = media?.studios?.nodes?.filter { it.isAnimationStudio == false }?.joinToString(", ") { it.name ?: "" }?.takeIf { it.isNotBlank() } ?: "Unknown"
@@ -265,6 +277,8 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         val anilistId = media.id
         val malId = media.idMal
 
+        // ALWAYS prioritize English for provider searching/streaming. 
+        // Providers need this to match their databases correctly.
         val englishTitle = media.title?.english
         val romajiTitle = media.title?.romaji
         val titleToEncode = englishTitle ?: romajiTitle ?: ""
@@ -339,6 +353,16 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
     // =================================================================
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        // --- Title Language ---
+        ListPreference(screen.context).apply {
+            key = "preferred_title_lang"
+            title = "Preferred Title Language"
+            entries = arrayOf("English", "Romaji")
+            entryValues = arrayOf("english", "romaji")
+            summary = "Choose the language for displayed anime titles.\n%s"
+            setDefaultValue("english")
+        }.also { screen.addPreference(it) }
+
         // --- Streaming Source Switcher ---
         val providerKeys = providerManager.providerDisplayNames.keys.toTypedArray()
         val providerNames = providerManager.providerDisplayNames.values.toTypedArray()
