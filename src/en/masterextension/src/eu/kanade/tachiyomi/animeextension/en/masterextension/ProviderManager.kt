@@ -161,41 +161,53 @@ class ProviderManager(
         }
     }
 
-    fun fetchMalEpisodes(malId: Int): Triple<List<MalEpisode>, String, String> {
+    fun fetchMalEpisodes(malId: Int, latestAired: Int): Triple<List<MalEpisode>, String, String> {
         return try {
-            val request = Request.Builder()
-                .url("https://myanimelist.net/anime/$malId/_/episode")
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                .header("Referer", "https://myanimelist.net/")
-                .get()
-                .build()
+            val safeLatestAired = maxOf(1, latestAired)
+            val maxOffset = ((safeLatestAired - 1) / 100) * 100
+            val allEpisodes = mutableListOf<MalEpisode>()
+            val dateFormatter = SimpleDateFormat("MMM d, yyyy", Locale.ENGLISH)
 
-            client.newCall(request).execute().use { res ->
-                val bodyStr = res.body.string()
-                if (!res.isSuccessful) return Triple(emptyList(), "M0", "ERR:${res.code}")
-
-                val document = Jsoup.parse(bodyStr)
-                val episodeRows = document.select("tr.episode-list-data")
-                if (episodeRows.isEmpty()) return Triple(emptyList(), "M0", "Empty")
-
-                val dateFormatter = SimpleDateFormat("MMM d, yyyy", Locale.ENGLISH)
-
-                val episodes = episodeRows.mapNotNull { row ->
-                    val numberStr = row.selectFirst("td.episode-number")?.attr("data-raw")?.trim()
-                        ?: row.selectFirst("td.episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
-                    val title = row.selectFirst("a.fl-l.fw-b")?.text()?.trim() ?: ""
-                    val dateStr = row.selectFirst("td.episode-aired")?.text()?.trim()
-                    val dateMillis = try { dateFormatter.parse(dateStr)?.time ?: 0L } catch (_: Exception) { 0L }
-
-                    if (!numberStr.isNullOrBlank() && title.isNotEmpty()) {
-                        MalEpisode(numberStr, title, dateMillis)
-                    } else null
+            for (offset in 0..maxOffset step 100) {
+                val url = if (offset == 0) {
+                    "https://myanimelist.net/anime/$malId/_/episode"
+                } else {
+                    "https://myanimelist.net/anime/$malId/_/episode?offset=$offset"
                 }
 
-                if (episodes.isNotEmpty()) Triple(episodes, "M1", "")
-                else Triple(emptyList(), "M0", "ParseFail")
+                val request = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    .header("Referer", "https://myanimelist.net/")
+                    .get()
+                    .build()
+
+                client.newCall(request).execute().use { res ->
+                    val bodyStr = res.body.string()
+                    if (!res.isSuccessful) return@use
+
+                    val document = Jsoup.parse(bodyStr)
+                    val episodeRows = document.select("tr.episode-list-data")
+                    if (episodeRows.isEmpty()) return@use
+
+                    val episodes = episodeRows.mapNotNull { row ->
+                        val numberStr = row.selectFirst("td.episode-number")?.attr("data-raw")?.trim()
+                            ?: row.selectFirst("td.episode-number")?.text()?.trim()?.replace(Regex("[^0-9]"), "")
+                        val title = row.selectFirst("a.fl-l.fw-b")?.text()?.trim() ?: ""
+                        val dateStr = row.selectFirst("td.episode-aired")?.text()?.trim()
+                        val dateMillis = try { dateFormatter.parse(dateStr)?.time ?: 0L } catch (_: Exception) { 0L }
+
+                        if (!numberStr.isNullOrBlank() && title.isNotEmpty()) {
+                            MalEpisode(numberStr, title, dateMillis)
+                        } else null
+                    }
+                    allEpisodes.addAll(episodes)
+                }
             }
+
+            if (allEpisodes.isNotEmpty()) Triple(allEpisodes, "M1", "")
+            else Triple(emptyList(), "M0", "Empty")
         } catch (_: Exception) {
             Triple(emptyList(), "M0", "EXC")
         }
