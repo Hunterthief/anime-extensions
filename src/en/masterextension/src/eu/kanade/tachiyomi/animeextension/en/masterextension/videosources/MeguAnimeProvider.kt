@@ -36,16 +36,14 @@ class MeguAnimeProvider(
 
         val videos = mutableListOf<Video>()
         
-        // FIX: Use the generic base URL as Referer and add Accept header. 
-        // CDNs/Workers often reject specific page URLs for video segments.
-        val videoHeaders = Headers.Builder()
+        // Base headers for fetching the master playlist and API
+        val baseHeaders = Headers.Builder()
             .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .set("Referer", "$baseUrl/")
             .set("Origin", baseUrl)
-            .set("Accept", "*/*")
             .build()
 
-        val playlistUtils = PlaylistUtils(client, videoHeaders)
+        val playlistUtils = PlaylistUtils(client, baseHeaders)
 
         // 1. Try to fetch SUB version
         try {
@@ -68,18 +66,34 @@ class MeguAnimeProvider(
                     }
                 }
                 
+                // FIX 1: CDNs/Workers require the Referer to be the exact m3u8 URL for segments
+                // FIX 2: Add Sec-Fetch headers to bypass Cloudflare bot protection
+                val segmentHeaders = Headers.Builder()
+                    .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .set("Referer", subSource) 
+                    .set("Origin", baseUrl)
+                    .set("Accept", "*/*")
+                    .set("Sec-Fetch-Dest", "video")
+                    .set("Sec-Fetch-Mode", "no-cors")
+                    .set("Sec-Fetch-Site", "cross-site")
+                    .build()
+
+                // Diagnostic: Extract the domain to show in the quality label
+                val domainSnippet = subSource.substringAfter("://").takeBefore("/").take(35)
+                
                 val subVideos = playlistUtils.extractFromHls(
                     subSource,
-                    videoNameGen = { "$name - Sub - $it" },
+                    videoNameGen = { "$name - Sub [$domainSnippet] - $it" },
                     subtitleList = subtitles,
-                    masterHeaders = videoHeaders,
-                    videoHeaders = videoHeaders
+                    masterHeaders = baseHeaders,
+                    videoHeaders = segmentHeaders
                 )
                 
                 if (subVideos.isNotEmpty()) {
                     videos.addAll(subVideos)
                 } else {
-                    videos.add(Video(subSource, "$name - Sub (Direct)", subSource, videoHeaders, subtitles))
+                    // Fallback if it's not an HLS stream
+                    videos.add(Video(subSource, "$name - Sub (Direct) [$domainSnippet]", subSource, segmentHeaders, subtitles))
                 }
             }
         } catch (e: Exception) {
@@ -94,17 +108,29 @@ class MeguAnimeProvider(
             val dubSource = dubData["source"]?.jsonPrimitive?.content
             
             if (!dubSource.isNullOrBlank()) {
+                val segmentHeaders = Headers.Builder()
+                    .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .set("Referer", dubSource)
+                    .set("Origin", baseUrl)
+                    .set("Accept", "*/*")
+                    .set("Sec-Fetch-Dest", "video")
+                    .set("Sec-Fetch-Mode", "no-cors")
+                    .set("Sec-Fetch-Site", "cross-site")
+                    .build()
+
+                val domainSnippet = dubSource.substringAfter("://").takeBefore("/").take(35)
+
                 val dubVideos = playlistUtils.extractFromHls(
                     dubSource,
-                    videoNameGen = { "$name - Dub - $it" },
-                    masterHeaders = videoHeaders,
-                    videoHeaders = videoHeaders
+                    videoNameGen = { "$name - Dub [$domainSnippet] - $it" },
+                    masterHeaders = baseHeaders,
+                    videoHeaders = segmentHeaders
                 )
                 
                 if (dubVideos.isNotEmpty()) {
                     videos.addAll(dubVideos)
                 } else {
-                    videos.add(Video(dubSource, "$name - Dub (Direct)", dubSource, videoHeaders))
+                    videos.add(Video(dubSource, "$name - Dub (Direct) [$domainSnippet]", dubSource, segmentHeaders))
                 }
             }
         } catch (e: Exception) {
@@ -116,6 +142,11 @@ class MeguAnimeProvider(
         }
 
         return videos
+    }
+
+    private fun String.takeBefore(delimiter: String): String {
+        val index = this.indexOf(delimiter)
+        return if (index == -1) this else this.substring(0, index)
     }
 
     private fun dbg(msg: String): List<Video> =
