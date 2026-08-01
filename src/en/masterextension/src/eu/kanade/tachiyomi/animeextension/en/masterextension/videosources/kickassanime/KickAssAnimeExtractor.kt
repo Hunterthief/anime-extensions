@@ -8,7 +8,6 @@ import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.lib.cryptoaes.CryptoAES
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.decodeHex
-import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -117,7 +116,7 @@ class KickAssAnimeExtractor(
 
         val videoObject = try {
             val decrypted = CryptoAES.decrypt(encryptedData, key, iv)
-            json.parseAs<VideoDto>(decrypted)
+            json.decodeFromString<VideoDto>(decrypted) // FIXED: Reverted back to decodeFromString
         } catch (e: Exception) {
             return emptyList()
         }
