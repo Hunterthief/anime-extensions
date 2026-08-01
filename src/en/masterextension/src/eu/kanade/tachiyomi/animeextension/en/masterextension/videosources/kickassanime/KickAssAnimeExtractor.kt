@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.kickassanime
 
 import aniyomi.lib.playlistutils.PlaylistUtils
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.kickassanime.dto.VideoDto
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
