@@ -40,22 +40,48 @@ class KickAssAnimeProvider(
     private val animeCache = ConcurrentHashMap<Int, String>()
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
-        return try {
-            val meta = EpisodeMeta.from(episode)
-            val slug = findAnimeSlug(meta.anilistId, anime.title) ?: return emptyList()
-            val epUrl = findEpisodeUrl(slug, meta.epNum) ?: return emptyList()
-            
-            val videoResp = client.newCall(GET("$apiUrl$epUrl", kaaHeaders)).awaitSuccess()
-            val servers = videoResp.parseAs<ServersDto>()
-            val hosterExclusion = preferences.getStringSet("kaa_hoster_exclusion", emptySet()) ?: emptySet()
-            
-            servers.servers.parallelCatchingFlatMap { server ->
-                if (hosterExclusion.contains(server.name)) return@parallelCatchingFlatMap emptyList()
-                extractor.videosFromUrl(server.src, server.name)
-            }
-        } catch (_: Exception) {
-            emptyList()
+        val meta = try {
+            EpisodeMeta.from(episode)
+        } catch (e: Exception) {
+            return dbg("META ERR: ${e.message?.take(60)}")
         }
+        
+        val slug = try {
+            findAnimeSlug(meta.anilistId, anime.title)
+        } catch (e: Exception) {
+            return dbg("SEARCH ERR: ${e.message?.take(60)}")
+        } ?: return dbg("0 results for '${anime.title.take(30)}'")
+        
+        val epUrl = try {
+            findEpisodeUrl(slug, meta.epNum)
+        } catch (e: Exception) {
+            return dbg("EPISODE ERR: ${e.message?.take(60)}")
+        } ?: return dbg("0 episodes found for ep ${meta.epNum}")
+        
+        val videoResp = try {
+            client.newCall(GET("$apiUrl$epUrl", kaaHeaders)).awaitSuccess()
+        } catch (e: Exception) {
+            return dbg("VIDEO RESP ERR: ${e.message?.take(60)}")
+        }
+        
+        val servers = try {
+            videoResp.parseAs<ServersDto>()
+        } catch (e: Exception) {
+            return dbg("PARSE ERR: ${e.message?.take(60)}")
+        }
+        
+        if (servers.servers.isEmpty()) return dbg("0 servers found in response")
+
+        val hosterExclusion = preferences.getStringSet("kaa_hoster_exclusion", emptySet()) ?: emptySet()
+        
+        val videos = servers.servers.parallelCatchingFlatMap { server ->
+            if (hosterExclusion.contains(server.name)) return@parallelCatchingFlatMap emptyList()
+            extractor.videosFromUrl(server.src, server.name)
+        }
+        
+        if (videos.isEmpty()) return dbg("Extractor returned 0 videos")
+        
+        return videos
     }
 
     private suspend fun findAnimeSlug(anilistId: Int, title: String): String? {
@@ -113,4 +139,7 @@ class KickAssAnimeProvider(
         }
         return null
     }
+
+    private fun dbg(msg: String): List<Video> =
+        listOf(Video("debug://x", msg.take(120), "debug://x"))
 }
