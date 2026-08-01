@@ -133,7 +133,8 @@ class KickAssAnimeProvider(
             }
             
             if (ep != null) {
-                return "/$slug/ep-${ep.episode_string}-${ep.slug}"
+                // FIX: Added "/episode/" to match the original extension's URL structure
+                return "/$slug/episode/ep-${ep.episode_string}-${ep.slug}"
             }
             if (epData.result.isEmpty()) break
         }
