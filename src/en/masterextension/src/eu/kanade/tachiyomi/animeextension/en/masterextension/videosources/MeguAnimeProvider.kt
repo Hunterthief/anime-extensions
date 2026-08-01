@@ -4,10 +4,12 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
+import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Headers
@@ -33,8 +35,9 @@ class MeguAnimeProvider(
 
         val videos = mutableListOf<Video>()
         
-        // FIX: Add required headers to bypass CDN/Cloudflare restrictions on the video URLs
-        val videoHeaders = headers.newBuilder()
+        // FIX: Use explicit, strong browser headers to prevent CDN/Cloudflare blocking during playback
+        val videoHeaders = Headers.Builder()
+            .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .set("Referer", "$baseUrl/")
             .set("Origin", baseUrl)
             .build()
@@ -47,13 +50,28 @@ class MeguAnimeProvider(
             val subSource = subData["source"]?.jsonPrimitive?.content
             
             if (!subSource.isNullOrBlank()) {
-                // Diagnostic: Check if it looks like a real video URL
-                val qualityName = if (subSource.contains(".m3u8") || subSource.contains(".mp4") || subSource.contains("workers.dev")) {
-                    "$name - Sub"
-                } else {
-                    "$name - Sub (Invalid: ${subSource.take(40)}...)"
+                val subtitles = mutableListOf<Track>()
+                val tracks = subData["tracks"]?.jsonArray
+                if (tracks != null) {
+                    for (track in tracks) {
+                        val trackObj = track.jsonObject
+                        val file = trackObj["file"]?.jsonPrimitive?.content
+                        val label = trackObj["label"]?.jsonPrimitive?.content ?: "Unknown"
+                        if (!file.isNullOrBlank()) {
+                            subtitles.add(Track(file, label))
+                        }
+                    }
                 }
-                videos.add(Video(subSource, qualityName, subSource, videoHeaders))
+                
+                videos.add(
+                    Video(
+                        url = subSource,
+                        quality = "$name - Sub",
+                        videoUrl = subSource,
+                        headers = videoHeaders,
+                        subtitleTracks = subtitles
+                    )
+                )
             }
         } catch (e: Exception) {
             // Ignore sub error, we will try dub next
@@ -67,19 +85,21 @@ class MeguAnimeProvider(
             val dubSource = dubData["source"]?.jsonPrimitive?.content
             
             if (!dubSource.isNullOrBlank()) {
-                val qualityName = if (dubSource.contains(".m3u8") || dubSource.contains(".mp4") || dubSource.contains("workers.dev")) {
-                    "$name - Dub"
-                } else {
-                    "$name - Dub (Invalid: ${dubSource.take(40)}...)"
-                }
-                videos.add(Video(dubSource, qualityName, dubSource, videoHeaders))
+                videos.add(
+                    Video(
+                        url = dubSource,
+                        quality = "$name - Dub",
+                        videoUrl = dubSource,
+                        headers = videoHeaders
+                    )
+                )
             }
         } catch (e: Exception) {
             // Ignore dub error
         }
 
         if (videos.isEmpty()) {
-            return dbg("0 VIDEOS FOUND. Ep $epNum may not be available.")
+            return dbg("0 VIDEOS FOUND. Ep $epNum may not be available or API changed.")
         }
 
         return videos
