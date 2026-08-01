@@ -36,15 +36,15 @@ class MeguAnimeProvider(
 
         val videos = mutableListOf<Video>()
         
-        // FIX 1: Use the exact anime page as Referer. CDNs often block the base URL for segments.
-        val refererUrl = "$baseUrl/anime/$anilistId"
+        // FIX: Use the generic base URL as Referer and add Accept header. 
+        // CDNs/Workers often reject specific page URLs for video segments.
         val videoHeaders = Headers.Builder()
             .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .set("Referer", refererUrl)
+            .set("Referer", "$baseUrl/")
             .set("Origin", baseUrl)
+            .set("Accept", "*/*")
             .build()
 
-        // FIX 2: Use PlaylistUtils to properly extract HLS streams and apply headers to all segments
         val playlistUtils = PlaylistUtils(client, videoHeaders)
 
         // 1. Try to fetch SUB version
@@ -79,12 +79,11 @@ class MeguAnimeProvider(
                 if (subVideos.isNotEmpty()) {
                     videos.addAll(subVideos)
                 } else {
-                    // Fallback if it's not an HLS stream
                     videos.add(Video(subSource, "$name - Sub (Direct)", subSource, videoHeaders, subtitles))
                 }
             }
         } catch (e: Exception) {
-            // Ignore sub error, we will try dub next
+            // Ignore sub error
         }
 
         // 2. Try to fetch DUB version
