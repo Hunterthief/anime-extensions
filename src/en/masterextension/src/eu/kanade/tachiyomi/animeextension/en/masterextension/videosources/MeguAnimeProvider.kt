@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
+import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
 import eu.kanade.tachiyomi.animesource.model.SAnime
@@ -35,12 +36,16 @@ class MeguAnimeProvider(
 
         val videos = mutableListOf<Video>()
         
-        // FIX: Use explicit, strong browser headers to prevent CDN/Cloudflare blocking during playback
+        // FIX 1: Use the exact anime page as Referer. CDNs often block the base URL for segments.
+        val refererUrl = "$baseUrl/anime/$anilistId"
         val videoHeaders = Headers.Builder()
             .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .set("Referer", "$baseUrl/")
+            .set("Referer", refererUrl)
             .set("Origin", baseUrl)
             .build()
+
+        // FIX 2: Use PlaylistUtils to properly extract HLS streams and apply headers to all segments
+        val playlistUtils = PlaylistUtils(client, videoHeaders)
 
         // 1. Try to fetch SUB version
         try {
@@ -63,15 +68,20 @@ class MeguAnimeProvider(
                     }
                 }
                 
-                videos.add(
-                    Video(
-                        url = subSource,
-                        quality = "$name - Sub",
-                        videoUrl = subSource,
-                        headers = videoHeaders,
-                        subtitleTracks = subtitles
-                    )
+                val subVideos = playlistUtils.extractFromHls(
+                    subSource,
+                    videoNameGen = { "$name - Sub - $it" },
+                    subtitleList = subtitles,
+                    masterHeaders = videoHeaders,
+                    videoHeaders = videoHeaders
                 )
+                
+                if (subVideos.isNotEmpty()) {
+                    videos.addAll(subVideos)
+                } else {
+                    // Fallback if it's not an HLS stream
+                    videos.add(Video(subSource, "$name - Sub (Direct)", subSource, videoHeaders, subtitles))
+                }
             }
         } catch (e: Exception) {
             // Ignore sub error, we will try dub next
@@ -85,14 +95,18 @@ class MeguAnimeProvider(
             val dubSource = dubData["source"]?.jsonPrimitive?.content
             
             if (!dubSource.isNullOrBlank()) {
-                videos.add(
-                    Video(
-                        url = dubSource,
-                        quality = "$name - Dub",
-                        videoUrl = dubSource,
-                        headers = videoHeaders
-                    )
+                val dubVideos = playlistUtils.extractFromHls(
+                    dubSource,
+                    videoNameGen = { "$name - Dub - $it" },
+                    masterHeaders = videoHeaders,
+                    videoHeaders = videoHeaders
                 )
+                
+                if (dubVideos.isNotEmpty()) {
+                    videos.addAll(dubVideos)
+                } else {
+                    videos.add(Video(dubSource, "$name - Dub (Direct)", dubSource, videoHeaders))
+                }
             }
         } catch (e: Exception) {
             // Ignore dub error
