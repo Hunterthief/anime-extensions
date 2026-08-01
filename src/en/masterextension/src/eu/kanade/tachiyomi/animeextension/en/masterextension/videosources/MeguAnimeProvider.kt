@@ -31,55 +31,80 @@ class MeguAnimeProvider(
     private var playerJsContent: String? = null
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
-        return try {
-            val meta = EpisodeMeta.from(episode)
-            val anilistId = meta.anilistId
-
-            val episodeDataUrl = "$baseUrl/lib/$anilistId.json"
-            val episodeResp = client.newCall(GET(episodeDataUrl, headers)).awaitSuccess()
-            val episodeData = json.parseToJsonElement(episodeResp.body.string()).jsonObject
-
-            val epKey = "ep${meta.epNum}"
-            val epObj = episodeData[epKey]?.jsonObject ?: return emptyList()
-
-            if (playerJsContent == null) {
-                val playerResp = client.newCall(GET(playerJsUrl, headers)).awaitSuccess()
-                playerJsContent = playerResp.body.string()
-            }
-
-            extractVideosFromEpisode(epObj, meta.epNum)
+        val meta = try {
+            EpisodeMeta.from(episode)
         } catch (e: Exception) {
-            emptyList()
+            return dbg("META ERR: ${e.message?.take(60)}")
         }
+        val anilistId = meta.anilistId
+
+        val episodeDataUrl = "$baseUrl/lib/$anilistId.json"
+        val episodeResp = try {
+            client.newCall(GET(episodeDataUrl, headers)).awaitSuccess()
+        } catch (e: Exception) {
+            return dbg("EPISODE JSON ERR: ${e.message?.take(60)}")
+        }
+        
+        val episodeData = try {
+            json.parseToJsonElement(episodeResp.body.string()).jsonObject
+        } catch (e: Exception) {
+            return dbg("PARSE JSON ERR: ${e.message?.take(60)}")
+        }
+
+        val epKey = "ep${meta.epNum}"
+        val epObj = episodeData[epKey]?.jsonObject
+        if (epObj == null) {
+            return dbg("NO EP KEY: '$epKey'. Available keys: ${episodeData.keys.take(5)}")
+        }
+
+        if (playerJsContent == null) {
+            val playerResp = try {
+                client.newCall(GET(playerJsUrl, headers)).awaitSuccess()
+            } catch (e: Exception) {
+                return dbg("PLAYER JS ERR: ${e.message?.take(60)}")
+            }
+            playerJsContent = playerResp.body.string()
+        }
+
+        return extractVideosFromEpisode(epObj, meta.epNum)
     }
 
     private fun extractVideosFromEpisode(epObj: JsonObject, epNum: Int): List<Video> {
         val videos = mutableListOf<Video>()
-        val playerJs = playerJsContent ?: return emptyList()
+        val playerJs = playerJsContent ?: return dbg("NO PLAYER JS CACHED")
 
         val base64Regex = Regex("""eval\(atob\(['"]([^'"]+)['"]\)""")
-        val base64Match = base64Regex.find(playerJs) ?: return emptyList()
+        val base64Match = base64Regex.find(playerJs)
+        if (base64Match == null) {
+            return dbg("NO BASE64 MATCH IN player.js. Snippet: ${playerJs.take(150)}")
+        }
 
-        // FIX 1: Use Android's Base64.decode instead of java.util.Base64.getDecoder()
-        val decodedBlob = String(Base64.decode(base64Match.groupValues[1], Base64.DEFAULT))
+        val decodedBlob = try {
+            String(Base64.decode(base64Match.groupValues[1], Base64.DEFAULT))
+        } catch (e: Exception) {
+            return dbg("BASE64 DECODE ERR: ${e.message?.take(60)}")
+        }
         
         val serversRegex = Regex("""var\s+servers\s*=\s*(\{[^}]+\})""")
-        val serversMatch = serversRegex.find(decodedBlob) ?: return emptyList()
+        val serversMatch = serversRegex.find(decodedBlob)
+        if (serversMatch == null) {
+            return dbg("NO SERVERS MATCH. Blob snippet: ${decodedBlob.take(150)}")
+        }
 
         val serversStr = serversMatch.groupValues[1]
         val serverConfigs = parseServerConfig(serversStr)
+        if (serverConfigs.isEmpty()) {
+            return dbg("NO SERVER CONFIGS PARSED. Str: $serversStr")
+        }
 
         for ((serverName, srcElement) in epObj) {
             if (serverName == "filler") continue
-            
-            // FIX 2: Use .content instead of .contentOrNull
             val srcUrl = srcElement.jsonPrimitive.content
             val config = serverConfigs[serverName] ?: continue
 
             try {
                 val videoUrl = decryptStreamUrl(srcUrl, config.key, config.iv)
                 if (videoUrl.isNotBlank()) {
-                    // FIX 3: Provide all required parameters to the Video constructor
                     videos.add(
                         Video(
                             url = videoUrl,
@@ -89,8 +114,12 @@ class MeguAnimeProvider(
                     )
                 }
             } catch (e: Exception) {
-                continue
+                return dbg("DECRYPT ERR ($serverName): ${e.message?.take(60)}")
             }
+        }
+
+        if (videos.isEmpty()) {
+            return dbg("0 VIDEOS EXTRACTED. EpObj keys: ${epObj.keys}")
         }
 
         return videos
@@ -117,9 +146,11 @@ class MeguAnimeProvider(
         val ivSpec = IvParameterSpec(iv.toByteArray(StandardCharsets.UTF_8))
         cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
 
-        // FIX 4: Use Android's Base64.decode here as well
         val encryptedBytes = Base64.decode(encryptedUrl, Base64.DEFAULT)
         val decryptedBytes = cipher.doFinal(encryptedBytes)
         return String(decryptedBytes, StandardCharsets.UTF_8)
     }
+
+    private fun dbg(msg: String): List<Video> =
+        listOf(Video("debug://x", msg.take(120), "debug://x"))
 }
