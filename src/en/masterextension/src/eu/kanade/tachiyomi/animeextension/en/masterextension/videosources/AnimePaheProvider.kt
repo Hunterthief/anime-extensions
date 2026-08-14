@@ -73,13 +73,14 @@ class AnimePaheProvider(
 
     // ==================== Search & Matching Logic ====================
 
-    private val SEASON_NUMBER_REGEX = Regex(
+    // FIX: Changed to camelCase to satisfy ktlint
+    private val seasonNumberRegex = Regex(
         """(?:season|part)\s*(\d+)|(\d+)(?:st|nd|rd|th)\s*(?:season|part)""",
         RegexOption.IGNORE_CASE
     )
 
     private fun extractSeasonNumber(text: String): Int? {
-        val match = SEASON_NUMBER_REGEX.find(text) ?: return null
+        val match = seasonNumberRegex.find(text) ?: return null
         val numStr = match.groupValues[1].ifEmpty { match.groupValues[2] }
         return numStr.toIntOrNull()
     }
