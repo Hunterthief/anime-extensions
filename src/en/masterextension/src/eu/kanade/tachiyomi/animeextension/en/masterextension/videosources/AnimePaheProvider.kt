@@ -14,6 +14,7 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
@@ -82,7 +83,7 @@ class AnimePaheProvider(
             findAnimeSession(meta.anilistId, anime.title)
         } catch (e: Exception) {
             return dbg("SEARCH ERR: ${e.message?.take(60)}")
-        } ?: return dbg("0 results for '${anime.title.take(30)}'")
+        } ?: return dbg("0 results for '${anime.title.take(30)}' on $baseUrl")
 
         val episodeSession = try {
             fetchEpisodeSession(animeSession, meta.epNum)
@@ -114,7 +115,8 @@ class AnimePaheProvider(
             return result
         }
 
-        for (len in listOf(4, 3)) {
+        // Fallback: try trailing words (e.g. "Dungeon IV Part 2" -> "IV Part 2" -> "Part 2")
+        for (len in listOf(4, 3, 2)) {
             if (words.size > len) {
                 val shortQuery = words.takeLast(len).joinToString(" ")
                 result = searchApiForSession(normalizedTitle, shortQuery)
@@ -134,18 +136,20 @@ class AnimePaheProvider(
             addQueryParameter("q", query)
         }.build()
 
-        return try {
-            val result = paheClient.newCall(GET(searchUrl, paheHeaders))
-                .awaitSuccess()
-                .parseAs<PaheResponseDto<PaheSearchResultDto>>()
-
-            val matched = result.items.firstOrNull { normalizeTitle(it.title) == normalizedTitle }
-                ?: result.items.firstOrNull()
-            
-            matched?.session
-        } catch (_: Exception) {
-            null
+        // Use await() instead of awaitSuccess() to catch the exact HTTP status code
+        val response = paheClient.newCall(GET(searchUrl, paheHeaders)).await()
+        if (!response.isSuccessful) {
+            response.close()
+            throw Exception("HTTP ${response.code} from search API")
         }
+
+        val result = response.parseAs<PaheResponseDto<PaheSearchResultDto>>()
+        if (result.items.isEmpty()) return null
+
+        val matched = result.items.firstOrNull { normalizeTitle(it.title) == normalizedTitle }
+            ?: result.items.firstOrNull()
+        
+        return matched?.session
     }
 
     private fun normalizeSearchQuery(raw: String): String = raw
@@ -169,9 +173,13 @@ class AnimePaheProvider(
                 addQueryParameter("page", page.toString())
             }.build()
 
-            val episodesData = paheClient.newCall(GET(url, paheHeaders))
-                .awaitSuccess()
-                .parseAs<PaheResponseDto<PaheEpisodeDto>>()
+            val response = paheClient.newCall(GET(url, paheHeaders)).await()
+            if (!response.isSuccessful) {
+                response.close()
+                throw Exception("HTTP ${response.code} from episode API")
+            }
+
+            val episodesData = response.parseAs<PaheResponseDto<PaheEpisodeDto>>()
 
             episodesData.items
                 .firstOrNull { abs(it.episodeNumber - epNum.toFloat()) < 0.001f }
@@ -198,7 +206,7 @@ class AnimePaheProvider(
             Triple(kwikLink, paheWinLink, quality)
         }
 
-        if (links.isEmpty()) return dbg("NO LINKS FOUND ON PLAY PAGE")
+        if (links.isEmpty()) return emptyList()
 
         val useHLS = preferences.getBoolean(PREF_LINK_TYPE_KEY, PREF_LINK_TYPE_DEFAULT)
 
@@ -229,8 +237,6 @@ class AnimePaheProvider(
             AnimePaheHlsServer.processVideoList(kwikClient, hlsVideos)
         }
         
-        if (finalVideos.isEmpty()) return dbg("KWIK EXTRACT FAILED FOR ALL LINKS")
-
         return finalVideos
     }
 
