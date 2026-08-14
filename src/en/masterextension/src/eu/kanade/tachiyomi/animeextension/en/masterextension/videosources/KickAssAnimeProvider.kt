@@ -12,6 +12,7 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.graphQLPost
 import keiyoushi.utils.parallelCatchingFlatMap
@@ -42,7 +43,6 @@ class KickAssAnimeProvider(
 
     // ==================== Search & Matching Logic ====================
 
-    // FIX: Changed to camelCase to satisfy ktlint
     private val seasonNumberRegex = Regex(
         """(?:season|part)\s*(\d+)|(\d+)(?:st|nd|rd|th)\s*(?:season|part)""",
         RegexOption.IGNORE_CASE
@@ -74,31 +74,19 @@ class KickAssAnimeProvider(
         val querySeasonNumber = extractSeasonNumber(cleanTitle)
         val baseTitle = stripSeasonInfo(title)
 
-        // Strategy 1: Full title
         var slug = searchApiForSlug(normalizeTitle(title), querySeasonNumber, title)
-        if (slug != null) {
-            animeCache[anilistId] = slug
-            return slug
-        }
+        if (slug != null) { animeCache[anilistId] = slug; return slug }
 
-        // Strategy 2: Base title
         if (querySeasonNumber != null && baseTitle != title) {
             slug = searchApiForSlug(normalizeTitle(baseTitle), querySeasonNumber, baseTitle)
-            if (slug != null) {
-                animeCache[anilistId] = slug
-                return slug
-            }
+            if (slug != null) { animeCache[anilistId] = slug; return slug }
         }
 
-        // Strategy 3: Romaji
         val romajiTitle = fetchTitleFromAniList(anilistId, preferRomaji = true)
         if (romajiTitle != null && romajiTitle.lowercase() != cleanTitle) {
             val romajiSeason = extractSeasonNumber(romajiTitle.lowercase())
             slug = searchApiForSlug(normalizeTitle(romajiTitle), romajiSeason, romajiTitle)
-            if (slug != null) {
-                animeCache[anilistId] = slug
-                return slug
-            }
+            if (slug != null) { animeCache[anilistId] = slug; return slug }
         }
 
         return null
@@ -122,13 +110,11 @@ class KickAssAnimeProvider(
         
         if (results.result.isEmpty()) return null
 
-        // 1. Exact match
         var best = results.result.firstOrNull {
             normalizeTitle(it.title) == normalizedTitle || 
             normalizeTitle(it.title_en ?: "") == normalizedTitle
         }
 
-        // 2. Season match
         if (best == null && querySeasonNumber != null) {
             best = results.result.firstOrNull {
                 extractSeasonNumber(it.title) == querySeasonNumber ||
@@ -136,7 +122,6 @@ class KickAssAnimeProvider(
             }
         }
 
-        // 3. Base show match
         if (best == null && querySeasonNumber == null) {
             best = results.result.firstOrNull {
                 extractSeasonNumber(it.title) == null &&
@@ -144,7 +129,6 @@ class KickAssAnimeProvider(
             }
         }
 
-        // 4. Fallback: shortest contains match
         if (best == null) {
             best = results.result.minByOrNull {
                 val n = it.title.lowercase().trim()
@@ -191,7 +175,21 @@ class KickAssAnimeProvider(
             findEpisodeUrl(slug, meta.epNum)
         } catch (e: Exception) {
             return dbg("EPISODE ERR: ${e.message?.take(60)}")
-        } ?: return dbg("0 episodes found for ep ${meta.epNum}")
+        }
+        
+        // DIAGNOSTIC: If no episode is found, fetch the raw API response to see what KAA is actually returning
+        if (epUrl == null) {
+            val debugText = try {
+                val lang = "en-US"
+                val resp = client.newCall(GET("$apiUrl/$slug/episodes?page=1&lang=$lang", kaaHeaders)).await()
+                val code = resp.code
+                val body = resp.body?.string() ?: "empty"
+                "Slug: $slug\nHTTP $code\n${body.take(120)}"
+            } catch (e: Exception) {
+                "Slug: $slug\nFetch failed: ${e.message?.take(60)}"
+            }
+            return dbg("0 eps. $debugText")
+        }
         
         val videoResp = try {
             client.newCall(GET("$apiUrl$epUrl", kaaHeaders)).awaitSuccess()
@@ -221,13 +219,12 @@ class KickAssAnimeProvider(
 
     private suspend fun findEpisodeUrl(slug: String, epNum: Int): String? {
         val lang = "en-US"
-        val allEpisodes = mutableListOf<Pair<String, String>>() // episode_string to slug
+        val allEpisodes = mutableListOf<Pair<String, String>>() 
         
         for (page in 1..3) {
             val epResp = client.newCall(GET("$apiUrl/$slug/episodes?page=$page&lang=$lang", kaaHeaders)).awaitSuccess()
             val epData = epResp.parseAs<EpisodeResponseDto>()
             
-            // 1. Try exact match first
             val ep = epData.result.firstOrNull { 
                 it.episode_string.toFloatOrNull()?.toInt() == epNum 
             } ?: epData.result.firstOrNull {
@@ -236,13 +233,12 @@ class KickAssAnimeProvider(
             
             if (ep != null) return "/$slug/episode/ep-${ep.episode_string}-${ep.slug}"
             
-            // Collect for fallback
             epData.result.forEach { allEpisodes.add(it.episode_string to it.slug) }
             
             if (epData.result.isEmpty()) break
         }
         
-        // 2. FALLBACK: Absolute vs Relative numbering mismatch
+        // FALLBACK: Absolute vs Relative numbering mismatch
         if (epNum > 0 && epNum <= allEpisodes.size) {
             val sorted = allEpisodes.sortedBy { it.first.toFloatOrNull() ?: 0f }
             val (epStr, epSlug) = sorted[epNum - 1]
