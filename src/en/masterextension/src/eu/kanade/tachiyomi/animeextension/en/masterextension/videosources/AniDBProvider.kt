@@ -64,6 +64,15 @@ class AniDBProvider(
         return numStr.toIntOrNull()
     }
 
+    // Remove season/part info from a title to get the base title
+    private fun stripSeasonInfo(title: String): String {
+        return title
+            .replace(Regex("""\s*[-:]\s*(?:season|part)\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*(?:season|part)\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*\d+(?:st|nd|rd|th)\s*(?:season|part).*$""", RegexOption.IGNORE_CASE), "")
+            .trim()
+    }
+
     // ==================== DTOs ====================
 
     @Serializable
@@ -96,33 +105,67 @@ class AniDBProvider(
         val romaji: String? = null,
     )
 
-    // ==================== Step 1: Search by title → extract anime ID ====================
+    // ==================== Search anidb.app and return all anime links ====================
 
-    private suspend fun searchForAnimeId(title: String): String? {
-        val encodedTitle = URLEncoder.encode(title, "UTF-8")
-        val url = "$BASE/browse?q=$encodedTitle"
+    private suspend fun searchAniDB(query: String): List<Element> {
+        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        val url = "$BASE/browse?q=$encodedQuery"
 
         val html = try {
             client.newCall(GET(url, siteHeaders())).awaitSuccess().bodyString()
         } catch (_: Exception) {
-            return null
+            return emptyList()
         }
 
         val doc = Jsoup.parse(html)
-        val links = doc.select("a[href*=/anime/]")
-        if (links.isEmpty()) return null
+        return doc.select("a[href*=/anime/]")
+    }
+
+    // ==================== Step 1: Find anime ID with smart matching ====================
+
+    private suspend fun findAnimeId(title: String, anilistId: Int): String? {
+        val cacheKey = "$anilistId:$title"
+        animeIdCache[cacheKey]?.let { return it }
 
         val cleanTitle = title.trim().lowercase()
         val querySeasonNumber = extractSeasonNumber(cleanTitle)
+        val baseTitle = stripSeasonInfo(title)
 
-        // 1. Try exact match first
-        var animeLink: Element? = links.firstOrNull { link ->
+        // Strategy 1: Search with full title, try exact match
+        val fullResults = searchAniDB(title)
+        var animeLink: Element? = fullResults.firstOrNull { link ->
             link.text().trim().lowercase() == cleanTitle
         }
 
-        // 2. Fallback matching
+        // Strategy 2: If no exact match and we have a season number,
+        // search with BASE title to get ALL entries, then filter for correct season
+        if (animeLink == null && querySeasonNumber != null && baseTitle != title) {
+            val baseResults = searchAniDB(baseTitle)
+
+            // Look for the specific season in the base results
+            animeLink = baseResults.firstOrNull { link ->
+                val linkSeason = extractSeasonNumber(link.text().lowercase())
+                linkSeason == querySeasonNumber
+            }
+
+            // Also check full results for season match
+            if (animeLink == null) {
+                animeLink = fullResults.firstOrNull { link ->
+                    val linkSeason = extractSeasonNumber(link.text().lowercase())
+                    linkSeason == querySeasonNumber
+                }
+            }
+        }
+
+        // Strategy 3: Contains matching with season awareness
         if (animeLink == null) {
-            val candidates = links.filter { link ->
+            val allResults = if (baseTitle != title) {
+                (fullResults + searchAniDB(baseTitle)).distinctBy { it.attr("href") }
+            } else {
+                fullResults
+            }
+
+            val candidates = allResults.filter { link ->
                 val text = link.text().trim().lowercase()
                 text.contains(cleanTitle) || cleanTitle.contains(text)
             }
@@ -130,7 +173,10 @@ class AniDBProvider(
             animeLink = if (querySeasonNumber != null) {
                 candidates.firstOrNull { link ->
                     extractSeasonNumber(link.text().lowercase()) == querySeasonNumber
-                } ?: candidates.minByOrNull { it.text().length }
+                } ?: candidates.firstOrNull { link ->
+                    val linkText = link.text().lowercase()
+                    linkText.contains("season") || linkText.contains("part")
+                }
             } else {
                 candidates.firstOrNull { link ->
                     extractSeasonNumber(link.text().lowercase()) == null
@@ -138,43 +184,59 @@ class AniDBProvider(
             }
         }
 
-        // 3. BROADER fallback: partial word matching (at least 2 words must match)
+        // Strategy 4: Broader word matching with season awareness
         if (animeLink == null) {
             val titleWords = cleanTitle.split(Regex("[^a-z0-9]+")).filter { it.length > 2 }
             if (titleWords.size >= 2) {
-                animeLink = links.firstOrNull { link ->
+                val allResults = if (baseTitle != title) {
+                    (fullResults + searchAniDB(baseTitle)).distinctBy { it.attr("href") }
+                } else {
+                    fullResults
+                }
+
+                val matched = allResults.filter { link ->
                     val linkText = link.text().trim().lowercase()
                     val matchCount = titleWords.count { linkText.contains(it) }
                     matchCount >= 2
                 }
+
+                // If we have a season number, prefer results with matching season
+                animeLink = if (querySeasonNumber != null) {
+                    matched.firstOrNull { link ->
+                        extractSeasonNumber(link.text().lowercase()) == querySeasonNumber
+                    } ?: matched.firstOrNull()
+                } else {
+                    matched.firstOrNull { link ->
+                        extractSeasonNumber(link.text().lowercase()) == null
+                    } ?: matched.firstOrNull()
+                }
             }
         }
 
-        // CRITICAL: If still no match, return null instead of grabbing a random anime
+        // Strategy 5: Try romaji from AniList
+        if (animeLink == null) {
+            val romajiTitle = fetchTitleFromAniList(anilistId, preferRomaji = true)
+            if (romajiTitle != null && romajiTitle.lowercase() != cleanTitle) {
+                val romajiResults = searchAniDB(romajiTitle)
+                val romajiSeason = extractSeasonNumber(romajiTitle.lowercase())
+
+                animeLink = if (romajiSeason != null) {
+                    romajiResults.firstOrNull { link ->
+                        extractSeasonNumber(link.text().lowercase()) == romajiSeason
+                    } ?: romajiResults.firstOrNull()
+                } else {
+                    romajiResults.firstOrNull { link ->
+                        extractSeasonNumber(link.text().lowercase()) == null
+                    } ?: romajiResults.firstOrNull()
+                }
+            }
+        }
+
         val finalLink = animeLink ?: return null
-
         val href = finalLink.attr("abs:href")
-        return ANIME_ID_REGEX.find(href)?.groupValues?.get(1)
-    }
+        val animeId = ANIME_ID_REGEX.find(href)?.groupValues?.get(1) ?: return null
 
-    private suspend fun getAnimeId(title: String, anilistId: Int): String? {
-        val cacheKey = "$anilistId:$title"
-        animeIdCache[cacheKey]?.let { return it }
-
-        // Try English title first
-        var animeId = searchForAnimeId(title)
-
-        // If English title failed, try romaji from AniList
-        if (animeId == null) {
-            val romajiTitle = fetchRomajiFromAniList(anilistId)
-            if (romajiTitle != null && romajiTitle != title) {
-                animeId = searchForAnimeId(romajiTitle)
-            }
-        }
-
-        if (animeId != null) {
-            animeIdCache[cacheKey] = animeId
-        }
+        animeIdCache[cacheKey] = animeId
         return animeId
     }
 
@@ -196,9 +258,24 @@ class AniDBProvider(
 
         if (episodes.isEmpty()) return null
 
-        return episodes.firstOrNull { ep ->
+        // Try exact match first
+        val exactMatch = episodes.firstOrNull { ep ->
             ep.number.toFloat() == epNum.toFloat()
-        }?.id
+        }
+        if (exactMatch != null) return exactMatch.id
+
+        // Fallback: try number2 field (some entries use this for alternate numbering)
+        val number2Match = episodes.firstOrNull { ep ->
+            ep.number2?.toFloat() == epNum.toFloat()
+        }
+        if (number2Match != null) return number2Match.id
+
+        // Last resort: positional match (epNum-th episode in the list)
+        if (epNum > 0 && epNum <= episodes.size) {
+            return episodes[epNum - 1].id
+        }
+
+        return null
     }
 
     // ==================== Step 3 & 4: Languages API → embed URL → m3u8 ====================
@@ -252,7 +329,7 @@ class AniDBProvider(
         val title = anime.title.takeIf { it.isNotBlank() } ?: meta.title
 
         if (title.isBlank()) {
-            val anilistTitle = fetchRomajiFromAniList(meta.anilistId)
+            val anilistTitle = fetchTitleFromAniList(meta.anilistId, preferRomaji = false)
             if (anilistTitle.isNullOrBlank()) {
                 return debugVideo("title blank (AL: ${meta.anilistId})")
             }
@@ -266,16 +343,16 @@ class AniDBProvider(
         val epNum = if (meta.epNum > 0) meta.epNum else 1
 
         val animeId = try {
-            getAnimeId(title, meta.anilistId)
+            findAnimeId(title, meta.anilistId)
         } catch (e: Exception) {
-            return debugVideo("getAnimeId threw: ${e.message}")
-        } ?: return debugVideo("getAnimeId null for '$title'")
+            return debugVideo("findAnimeId threw: ${e.message}")
+        } ?: return debugVideo("findAnimeId null for '$title'")
 
         val episodeId = try {
             getEpisodeId(animeId, epNum)
         } catch (e: Exception) {
             return debugVideo("getEpisodeId threw: ${e.message}")
-        } ?: return debugVideo("getEpisodeId null ep$epNum (id:$animeId)")
+        } ?: return debugVideo("getEpId null ep$epNum id:$animeId")
 
         val videos = try {
             getVideos(episodeId)
@@ -284,15 +361,15 @@ class AniDBProvider(
         }
 
         if (videos.isEmpty()) {
-            return debugVideo("0 videos for ep $epNum (id:$animeId)")
+            return debugVideo("0 videos ep$epNum id:$animeId")
         }
 
         return videos
     }
 
-    // ==================== AniList Fallback ====================
+    // ==================== AniList Title Fetcher ====================
 
-    private suspend fun fetchRomajiFromAniList(anilistId: Int): String? {
+    private suspend fun fetchTitleFromAniList(anilistId: Int, preferRomaji: Boolean): String? {
         val query = """
             query(${'$'}id: Int) {
                 Media(id: ${'$'}id, type: ANIME) {
@@ -309,7 +386,11 @@ class AniDBProvider(
             val request = graphQLPost(ANILIST_API_URL, siteHeaders(), query, variables = variables)
             val response = client.newCall(request).awaitSuccess()
             val data = response.parseGraphQLAs<AniListMediaResponse>()
-            data.Media?.title?.romaji ?: data.Media?.title?.english
+            if (preferRomaji) {
+                data.Media?.title?.romaji ?: data.Media?.title?.english
+            } else {
+                data.Media?.title?.english ?: data.Media?.title?.romaji
+            }
         } catch (_: Exception) {
             null
         }
