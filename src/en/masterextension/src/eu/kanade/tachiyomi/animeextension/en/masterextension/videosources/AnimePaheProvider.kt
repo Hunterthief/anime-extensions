@@ -73,33 +73,24 @@ class AnimePaheProvider(
     private val sessionCache = ConcurrentHashMap<Int, String>()
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
-        val meta = try {
-            EpisodeMeta.from(episode)
-        } catch (e: Exception) {
-            return dbg("META ERR: ${e.message?.take(60)}")
+        // CATCHING THROWABLE ENSURES WE CATCH FATAL ERRORS LIKE NoClassDefFoundError
+        return try {
+            val meta = EpisodeMeta.from(episode)
+
+            val animeSession = findAnimeSession(meta.anilistId, anime.title)
+                ?: return dbg("0 results for '${anime.title.take(30)}' on $baseUrl")
+
+            val episodeSession = fetchEpisodeSession(animeSession, meta.epNum)
+                ?: return dbg("0 episodes found for ep ${meta.epNum}")
+
+            val videos = extractVideos(animeSession, episodeSession)
+
+            if (videos.isEmpty()) return dbg("Extractor returned 0 videos")
+
+            videos
+        } catch (e: Throwable) {
+            dbg("FATAL: ${e::class.simpleName}: ${e.message?.take(60)}")
         }
-
-        val animeSession = try {
-            findAnimeSession(meta.anilistId, anime.title)
-        } catch (e: Exception) {
-            return dbg("SEARCH ERR: ${e.message?.take(60)}")
-        } ?: return dbg("0 results for '${anime.title.take(30)}' on $baseUrl")
-
-        val episodeSession = try {
-            fetchEpisodeSession(animeSession, meta.epNum)
-        } catch (e: Exception) {
-            return dbg("EPISODE ERR: ${e.message?.take(60)}")
-        } ?: return dbg("0 episodes found for ep ${meta.epNum}")
-
-        val videos = try {
-            extractVideos(animeSession, episodeSession)
-        } catch (e: Exception) {
-            return dbg("EXTRACT ERR: ${e.message?.take(60)}")
-        }
-
-        if (videos.isEmpty()) return dbg("Extractor returned 0 videos")
-
-        return videos
     }
 
     private suspend fun findAnimeSession(anilistId: Int, title: String): String? {
@@ -115,7 +106,6 @@ class AnimePaheProvider(
             return result
         }
 
-        // Fallback: try trailing words (e.g. "Dungeon IV Part 2" -> "IV Part 2" -> "Part 2")
         for (len in listOf(4, 3, 2)) {
             if (words.size > len) {
                 val shortQuery = words.takeLast(len).joinToString(" ")
@@ -136,7 +126,6 @@ class AnimePaheProvider(
             addQueryParameter("q", query)
         }.build()
 
-        // Use await() instead of awaitSuccess() to catch the exact HTTP status code
         val response = paheClient.newCall(GET(searchUrl, paheHeaders)).await()
         if (!response.isSuccessful) {
             response.close()
@@ -216,7 +205,7 @@ class AnimePaheProvider(
                 try {
                     KwikExtractor(paheClient, paheHeaders, cfBypassUserAgent)
                         .getStreamVideo(paheWinLink, quality)
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     null
                 }
             }
@@ -230,7 +219,7 @@ class AnimePaheProvider(
                 try {
                     KwikExtractor(kwikClient, paheHeaders, cfBypassUserAgent)
                         .getHlsVideo(kwikLink, referer = "$baseUrl/", quality = "$quality (HLS)")
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     null
                 }
             }
