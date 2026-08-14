@@ -218,33 +218,53 @@ class KickAssAnimeProvider(
     }
 
     private suspend fun findEpisodeUrl(slug: String, epNum: Int): String? {
-        val lang = "en-US"
-        val allEpisodes = mutableListOf<Pair<String, String>>() 
-        
-        for (page in 1..3) {
-            val epResp = client.newCall(GET("$apiUrl/$slug/episodes?page=$page&lang=$lang", kaaHeaders)).awaitSuccess()
-            val epData = epResp.parseAs<EpisodeResponseDto>()
-            
-            val ep = epData.result.firstOrNull { 
-                it.episode_string.toFloatOrNull()?.toInt() == epNum 
-            } ?: epData.result.firstOrNull {
-                it.episode_string == epNum.toString()
+        // 1. Fetch available languages for this anime
+        val languages = try {
+            val langResp = client.newCall(GET("$apiUrl/$slug/language", kaaHeaders)).awaitSuccess()
+            val body = langResp.body?.string() ?: return null
+            // Parse {"result":["en-US","ja-JP",...]}
+            val regex = Regex(""""([^"]+)"""")
+            regex.findAll(body).map { it.groupValues[1] }.toList()
+        } catch (e: Exception) {
+            listOf("en-US")
+        }
+
+        val langOrder = if (languages.isNotEmpty()) languages else listOf("en-US")
+
+        // 2. Try each language until we find episodes
+        for (lang in langOrder) {
+            val allEpisodes = mutableListOf<Pair<String, String>>()
+
+            for (page in 1..3) {
+                val epResp = try {
+                    client.newCall(GET("$apiUrl/$slug/episodes?page=$page&lang=$lang", kaaHeaders)).awaitSuccess()
+                } catch (e: Exception) { break }
+
+                val epData = try {
+                    epResp.parseAs<EpisodeResponseDto>()
+                } catch (e: Exception) { break }
+
+                val ep = epData.result.firstOrNull {
+                    it.episode_string.toFloatOrNull()?.toInt() == epNum
+                } ?: epData.result.firstOrNull {
+                    it.episode_string == epNum.toString()
+                }
+
+                if (ep != null) return "/$slug/episode/ep-${ep.episode_string}-${ep.slug}"
+
+                epData.result.forEach { allEpisodes.add(it.episode_string to it.slug) }
+
+                if (epData.result.isEmpty()) break
             }
-            
-            if (ep != null) return "/$slug/episode/ep-${ep.episode_string}-${ep.slug}"
-            
-            epData.result.forEach { allEpisodes.add(it.episode_string to it.slug) }
-            
-            if (epData.result.isEmpty()) break
+
+            // Fallback: Absolute vs Relative numbering mismatch
+            if (epNum > 0 && epNum <= allEpisodes.size) {
+                val sorted = allEpisodes.sortedBy { it.first.toFloatOrNull() ?: 0f }
+                val (epStr, epSlug) = sorted[epNum - 1]
+                return "/$slug/episode/ep-$epStr-$epSlug"
+            }
         }
-        
-        // FALLBACK: Absolute vs Relative numbering mismatch
-        if (epNum > 0 && epNum <= allEpisodes.size) {
-            val sorted = allEpisodes.sortedBy { it.first.toFloatOrNull() ?: 0f }
-            val (epStr, epSlug) = sorted[epNum - 1]
-            return "/$slug/episode/ep-$epStr-$epSlug"
-        }
-        
+
         return null
     }
 
