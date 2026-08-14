@@ -17,9 +17,10 @@ data class PaheResponseDto<T>(
 
 @Serializable
 data class PaheSearchResultDto(
+    val id: Int,
     val title: String,
     val poster: String,
-    val id: Int,
+    val session: String, // Added: Allows us to skip the dead /a/$id redirect
 )
 
 @Serializable
@@ -29,4 +30,6 @@ data class PaheEpisodeDto(
     val session: String,
     @SerialName("episode")
     val episodeNumber: Float,
+    @SerialName("anime_id")
+    val animeId: Int,
 )
