@@ -15,6 +15,7 @@ import kotlinx.serialization.Serializable
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 /**
@@ -110,10 +111,8 @@ class AniDBProvider(
         
         val cleanTitle = title.trim().lowercase()
         
-        // FIX: Smarter matching logic to avoid grabbing "Season 2" when searching for the base show
-        
         // 1. Try exact match first
-        var animeLink = links.firstOrNull { link ->
+        var animeLink: Element? = links.firstOrNull { link ->
             link.text().trim().lowercase() == cleanTitle
         }
         
@@ -133,12 +132,10 @@ class AniDBProvider(
             }.minByOrNull { it.text().length }
         }
         
-        // 4. Ultimate fallback
-        if (animeLink == null) {
-            animeLink = links.firstOrNull()
-        } ?: return null
+        // 4. Ultimate fallback (Fixes the 'if' expression and nullable receiver errors)
+        val finalLink = animeLink ?: links.firstOrNull() ?: return null
         
-        val href = animeLink.attr("abs:href")
+        val href = finalLink.attr("abs:href")
         val animeId = ANIME_ID_REGEX.find(href)?.groupValues?.get(1) ?: return null
         
         animeIdCache[title] = animeId
