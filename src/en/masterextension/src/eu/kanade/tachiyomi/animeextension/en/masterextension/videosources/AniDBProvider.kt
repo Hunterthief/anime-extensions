@@ -18,19 +18,6 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
-/**
- * AniDB video source (anidb.app).
- *
- * Clean REST pipeline: Title Search → Episodes API → Languages API → Embed Page Regex → HLS.
- * No encryption, no JS execution, no auth.
- *
- * Flow:
- *   1. GET /browse?q={title} → find anime URL → extract numeric ID via regex
- *   2. GET /api/frontend/anime/{id}/episodes → match epNum → get episode ID
- *   3. GET /api/frontend/episode/{id}/languages → get embed URLs per language
- *   4. GET {embed_url} → regex extract master.m3u8
- *   5. PlaylistUtils.extractFromHls → quality variants
- */
 class AniDBProvider(
     private val client: OkHttpClient,
     private val headers: Headers,
@@ -46,17 +33,12 @@ class AniDBProvider(
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
-
-    // Cache: title → numeric anime ID (avoids re-searching per episode)
     private val animeIdCache = mutableMapOf<String, String>()
 
     private fun siteHeaders() = headers.newBuilder()
         .set("Referer", "$BASE/")
         .build()
 
-    // =================================================================
-    // DEBUG HELPER
-    // =================================================================
     private fun debugVideo(msg: String): List<Video> {
         return listOf(
             Video(
@@ -67,9 +49,6 @@ class AniDBProvider(
         )
     }
 
-    // =================================================================
-    // DTOs
-    // =================================================================
     @Serializable
     private data class EpisodeResponseDto(val episodes: List<EpisodeDto>)
 
@@ -90,9 +69,6 @@ class AniDBProvider(
         val embed_url: String,
     )
 
-    // =================================================================
-    // STEP 1: Search by title → extract anime ID
-    // =================================================================
     private suspend fun getAnimeId(title: String): String? {
         animeIdCache[title]?.let { return it }
 
@@ -101,7 +77,7 @@ class AniDBProvider(
         
         val html = try {
             client.newCall(GET(url, siteHeaders())).awaitSuccess().bodyString()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             return null
         }
 
@@ -111,28 +87,31 @@ class AniDBProvider(
         
         val cleanTitle = title.trim().lowercase()
         
-        // 1. Try exact match first
+        // 1. Try exact match first (highest priority)
         var animeLink: Element? = links.firstOrNull { link ->
             link.text().trim().lowercase() == cleanTitle
         }
         
-        // 2. If no exact match, and query doesn't have "season" or "part", filter them out
-        if (animeLink == null && !cleanTitle.contains("season") && !cleanTitle.contains("part")) {
-            animeLink = links.firstOrNull { link ->
+        // 2. If no exact match, look for titles that contain the search query
+        // But prefer shorter titles (base show over "Season X Part Y")
+        if (animeLink == null) {
+            val candidates = links.filter { link ->
                 val text = link.text().trim().lowercase()
-                text.contains(cleanTitle) && !text.contains("season") && !text.contains("part")
+                text.contains(cleanTitle) || cleanTitle.contains(text)
+            }
+            
+            // If searching for "Season 2", prefer titles with "season 2"
+            val hasSeasonInQuery = cleanTitle.contains("season")
+            animeLink = if (hasSeasonInQuery) {
+                candidates.firstOrNull { it.text().lowercase().contains("season") }
+                    ?: candidates.minByOrNull { it.text().length }
+            } else {
+                // Otherwise prefer shorter titles (base show)
+                candidates.minByOrNull { it.text().length }
             }
         }
         
-        // 3. Fallback to shortest contains match (prefers base show over "Season X Part Y")
-        if (animeLink == null) {
-            animeLink = links.filter { link ->
-                val text = link.text().trim().lowercase()
-                text.contains(cleanTitle) || cleanTitle.contains(text)
-            }.minByOrNull { it.text().length }
-        }
-        
-        // 4. Ultimate fallback (Fixes the 'if' expression and nullable receiver errors)
+        // 3. Ultimate fallback
         val finalLink = animeLink ?: links.firstOrNull() ?: return null
         
         val href = finalLink.attr("abs:href")
@@ -142,43 +121,38 @@ class AniDBProvider(
         return animeId
     }
 
-    // =================================================================
-    // STEP 2: Episodes API → find episode ID
-    // =================================================================
     private suspend fun getEpisodeId(animeId: String, epNum: Int): Long? {
         val url = "$BASE/api/frontend/anime/$animeId/episodes"
         val body = try {
             client.newCall(GET(url, siteHeaders())).awaitSuccess().bodyString()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             return null
         }
 
         val episodes = try {
             body.parseAs<EpisodeResponseDto>().episodes
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             return null
         }
 
-        // Match by exact episode number
+        if (episodes.isEmpty()) return null
+
         return episodes.firstOrNull { ep ->
             ep.number.toFloat() == epNum.toFloat()
         }?.id
     }
 
-    // =================================================================
-    // STEP 3 & 4: Languages API → get embed URL → extract m3u8
-    // =================================================================
     private suspend fun getVideos(episodeId: Long): List<Video> {
         val url = "$BASE/api/frontend/episode/$episodeId/languages"
         val body = try {
             client.newCall(GET(url, siteHeaders())).awaitSuccess().bodyString()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             return emptyList()
         }
 
         val languages = try {
             body.parseAs<LanguageResponseDto>().languages
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             return emptyList()
         }
 
@@ -186,7 +160,7 @@ class AniDBProvider(
             val embedUrl = language.embed_url
             val embedHtml = try {
                 client.newCall(GET(embedUrl, siteHeaders())).awaitSuccess().bodyString()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 return@parallelCatchingFlatMap emptyList<Video>()
             }
 
@@ -203,31 +177,39 @@ class AniDBProvider(
         }
     }
 
-    // =================================================================
-    // ENTRY POINT
-    // =================================================================
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
-        val title = anime.title.ifBlank { meta.title }
-        if (title.isBlank()) return debugVideo("title is blank")
+        
+        // Use anime.title if available, otherwise fall back to meta.title
+        val title = anime.title.takeIf { it.isNotBlank() } ?: meta.title
+        
+        // If title is still blank, try to fetch it from AniList using the ID
+        if (title.isBlank()) {
+            val anilistTitle = fetchTitleFromAniList(meta.anilistId)
+            if (anilistTitle.isNullOrBlank()) {
+                return debugVideo("title is blank (AniList ID: ${meta.anilistId})")
+            }
+            return fetchVideosWithTitle(anilistTitle, meta)
+        }
+        
+        return fetchVideosWithTitle(title, meta)
+    }
 
+    private suspend fun fetchVideosWithTitle(title: String, meta: EpisodeMeta): List<Video> {
         val epNum = if (meta.epNum > 0) meta.epNum else 1
 
-        // Step 1: Get Anime ID
         val animeId = try {
             getAnimeId(title)
         } catch (e: Exception) {
             return debugVideo("getAnimeId threw: ${e.message}")
         } ?: return debugVideo("getAnimeId null for '$title'")
 
-        // Step 2: Get Episode ID
         val episodeId = try {
             getEpisodeId(animeId, epNum)
         } catch (e: Exception) {
             return debugVideo("getEpisodeId threw: ${e.message}")
         } ?: return debugVideo("getEpisodeId null for ep $epNum (animeId: $animeId)")
 
-        // Step 3 & 4: Get Videos
         val videos = try {
             getVideos(episodeId)
         } catch (e: Exception) {
@@ -239,5 +221,50 @@ class AniDBProvider(
         }
 
         return videos
+    }
+
+    // Fetch title from AniList API as fallback
+    private suspend fun fetchTitleFromAniList(anilistId: Int): String? {
+        val query = """
+            query {
+                Media(id: $anilistId, type: ANIME) {
+                    title { english romaji }
+                }
+            }
+        """.trimIndent()
+
+        val body = """{"query":"$query"}"""
+        
+        return try {
+            val request = eu.kanade.tachiyomi.network.POST(
+                "https://graphql.anilist.co",
+                headers = Headers.Builder()
+                    .set("Content-Type", "application/json")
+                    .build(),
+                body = okhttp3.RequestBody.create(
+                    okhttp3.MediaType.parse("application/json"),
+                    body
+                )
+            )
+            
+            val response = client.newCall(request).awaitSuccess().bodyString()
+            val json = kotlinx.serialization.json.Json.parseToJsonElement(response)
+                as kotlinx.serialization.json.JsonObject
+            
+            val media = json["data"]?.let { it as? kotlinx.serialization.json.JsonObject }
+                ?.get("Media") as? kotlinx.serialization.json.JsonObject
+            
+            val title = media?.get("title") as? kotlinx.serialization.json.JsonObject
+            val english = title?.get("english")?.let { 
+                (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull 
+            }
+            val romaji = title?.get("romaji")?.let { 
+                (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull 
+            }
+            
+            english ?: romaji
+        } catch (e: Exception) {
+            null
+        }
     }
 }
