@@ -221,10 +221,13 @@ class KickAssAnimeProvider(
 
     private suspend fun findEpisodeUrl(slug: String, epNum: Int): String? {
         val lang = "en-US"
+        val allEpisodes = mutableListOf<Pair<String, String>>() // episode_string to slug
+        
         for (page in 1..3) {
             val epResp = client.newCall(GET("$apiUrl/$slug/episodes?page=$page&lang=$lang", kaaHeaders)).awaitSuccess()
             val epData = epResp.parseAs<EpisodeResponseDto>()
             
+            // 1. Try exact match first
             val ep = epData.result.firstOrNull { 
                 it.episode_string.toFloatOrNull()?.toInt() == epNum 
             } ?: epData.result.firstOrNull {
@@ -232,8 +235,20 @@ class KickAssAnimeProvider(
             }
             
             if (ep != null) return "/$slug/episode/ep-${ep.episode_string}-${ep.slug}"
+            
+            // Collect for fallback
+            epData.result.forEach { allEpisodes.add(it.episode_string to it.slug) }
+            
             if (epData.result.isEmpty()) break
         }
+        
+        // 2. FALLBACK: Absolute vs Relative numbering mismatch
+        if (epNum > 0 && epNum <= allEpisodes.size) {
+            val sorted = allEpisodes.sortedBy { it.first.toFloatOrNull() ?: 0f }
+            val (epStr, epSlug) = sorted[epNum - 1]
+            return "/$slug/episode/ep-$epStr-$epSlug"
+        }
+        
         return null
     }
 
