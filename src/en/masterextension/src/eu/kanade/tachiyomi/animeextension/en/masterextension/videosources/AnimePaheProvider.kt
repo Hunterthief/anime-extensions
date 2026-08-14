@@ -15,7 +15,6 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
-import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
 import okhttp3.Headers
@@ -73,21 +72,34 @@ class AnimePaheProvider(
     private val sessionCache = ConcurrentHashMap<Int, String>()
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
-        return try {
-            val meta = EpisodeMeta.from(episode)
-
-            val animeSession = findAnimeSession(meta.anilistId, anime.title) ?: return emptyList()
-            val episodeSession = fetchEpisodeSession(animeSession, meta.epNum) ?: return emptyList()
-
-            extractVideos(animeSession, episodeSession)
-        } catch (_: Exception) {
-            emptyList()
+        val meta = try {
+            EpisodeMeta.from(episode)
+        } catch (e: Exception) {
+            return dbg("META ERR: ${e.message?.take(60)}")
         }
-    }
 
-    // =================================================================
-    // Step 1 — search AnimePahe by title and extract session directly
-    // =================================================================
+        val animeSession = try {
+            findAnimeSession(meta.anilistId, anime.title)
+        } catch (e: Exception) {
+            return dbg("SEARCH ERR: ${e.message?.take(60)}")
+        } ?: return dbg("0 results for '${anime.title.take(30)}'")
+
+        val episodeSession = try {
+            fetchEpisodeSession(animeSession, meta.epNum)
+        } catch (e: Exception) {
+            return dbg("EPISODE ERR: ${e.message?.take(60)}")
+        } ?: return dbg("0 episodes found for ep ${meta.epNum}")
+
+        val videos = try {
+            extractVideos(animeSession, episodeSession)
+        } catch (e: Exception) {
+            return dbg("EXTRACT ERR: ${e.message?.take(60)}")
+        }
+
+        if (videos.isEmpty()) return dbg("Extractor returned 0 videos")
+
+        return videos
+    }
 
     private suspend fun findAnimeSession(anilistId: Int, title: String): String? {
         sessionCache[anilistId]?.let { return it }
@@ -96,14 +108,12 @@ class AnimePaheProvider(
         val words = searchQuery.split(" ").filter { it.isNotBlank() }
         val normalizedTitle = normalizeTitle(title)
 
-        // Try full title first
         var result = searchApiForSession(normalizedTitle, searchQuery)
         if (result != null) {
             sessionCache[anilistId] = result
             return result
         }
 
-        // Fallback: try trailing words (e.g. "Dungeon IV Part 2" -> "IV Part 2")
         for (len in listOf(4, 3)) {
             if (words.size > len) {
                 val shortQuery = words.takeLast(len).joinToString(" ")
@@ -148,10 +158,6 @@ class AnimePaheProvider(
         .replace(Regex("[^a-z0-9]+"), "")
         .trim()
 
-    // =================================================================
-    // Step 2 — find the episode session by number
-    // =================================================================
-
     private suspend fun fetchEpisodeSession(animeSession: String, epNum: Int): String? {
         var page = 1
         while (true) {
@@ -177,10 +183,6 @@ class AnimePaheProvider(
         return null
     }
 
-    // =================================================================
-    // Step 3 — fetch the play page and extract Kwik videos
-    // =================================================================
-
     private suspend fun extractVideos(animeSession: String, episodeSession: String): List<Video> {
         val response = paheClient.newCall(
             GET("$baseUrl/play/$animeSession/$episodeSession", paheHeaders),
@@ -196,33 +198,44 @@ class AnimePaheProvider(
             Triple(kwikLink, paheWinLink, quality)
         }
 
-        if (links.isEmpty()) return emptyList()
+        if (links.isEmpty()) return dbg("NO LINKS FOUND ON PLAY PAGE")
 
         val useHLS = preferences.getBoolean(PREF_LINK_TYPE_KEY, PREF_LINK_TYPE_DEFAULT)
 
-        // If HLS is disabled in settings, try MP4 first. Otherwise go straight to HLS.
         val videos = if (!useHLS) {
-            val mp4Videos = links.parallelCatchingFlatMap { (_, paheWinLink, quality) ->
-                if (paheWinLink.isNullOrBlank()) return@parallelCatchingFlatMap emptyList<Video>()
-                KwikExtractor(paheClient, paheHeaders, cfBypassUserAgent)
-                    .getStreamVideo(paheWinLink, quality)
-                    .let(::listOf)
+            val mp4Videos = links.mapNotNull { (_, paheWinLink, quality) ->
+                if (paheWinLink.isNullOrBlank()) return@mapNotNull null
+                try {
+                    KwikExtractor(paheClient, paheHeaders, cfBypassUserAgent)
+                        .getStreamVideo(paheWinLink, quality)
+                } catch (e: Exception) {
+                    null
+                }
             }
             AnimePaheHlsServer.processMp4VideoList(paheClient, mp4Videos)
         } else {
             emptyList()
         }
 
-        // Fallback to HLS if MP4 failed or if HLS is preferred
-        return videos.ifEmpty {
-            val hlsVideos = links.parallelCatchingFlatMap { (kwikLink, _, quality) ->
-                KwikExtractor(kwikClient, paheHeaders, cfBypassUserAgent)
-                    .getHlsVideo(kwikLink, referer = "$baseUrl/", quality = "$quality (HLS)")
-                    .let(::listOf)
+        val finalVideos = videos.ifEmpty {
+            val hlsVideos = links.mapNotNull { (kwikLink, _, quality) ->
+                try {
+                    KwikExtractor(kwikClient, paheHeaders, cfBypassUserAgent)
+                        .getHlsVideo(kwikLink, referer = "$baseUrl/", quality = "$quality (HLS)")
+                } catch (e: Exception) {
+                    null
+                }
             }
             AnimePaheHlsServer.processVideoList(kwikClient, hlsVideos)
         }
+        
+        if (finalVideos.isEmpty()) return dbg("KWIK EXTRACT FAILED FOR ALL LINKS")
+
+        return finalVideos
     }
+
+    private fun dbg(msg: String): List<Video> =
+        listOf(Video("debug://x", msg.take(120), "debug://x"))
 
     companion object {
         private const val PREF_DOMAIN_KEY = "animepahe_preferred_domain"
