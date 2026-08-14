@@ -35,6 +35,12 @@ class AniDBProvider(
         private const val ANILIST_API_URL = "https://graphql.anilist.co"
         private val ANIME_ID_REGEX = Regex("-(\\d+)$")
         private val M3U8_REGEX = Regex("""file:\s*['"](https?://[^'"]+master\.m3u8)['"]""")
+        
+        // Upgraded to catch "Season 2", "Part 2", and "2nd Season"
+        private val SEASON_NUMBER_REGEX = Regex(
+            """(?:season|part)\s*(\d+)|(\d+)(?:st|nd|rd|th)\s*(?:season|part)""", 
+            RegexOption.IGNORE_CASE
+        )
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
@@ -52,6 +58,14 @@ class AniDBProvider(
                 videoUrl = "https://example.com/debug.m3u8",
             ),
         )
+    }
+
+    // Helper to extract the actual number from the regex match
+    private fun extractSeasonNumber(text: String): Int? {
+        val match = SEASON_NUMBER_REGEX.find(text) ?: return null
+        // Group 1 captures "season 2", Group 2 captures "2nd season"
+        val numStr = match.groupValues[1].ifEmpty { match.groupValues[2] }
+        return numStr.toIntOrNull()
     }
 
     @Serializable
@@ -74,7 +88,6 @@ class AniDBProvider(
         val embed_url: String,
     )
 
-    // DTOs for the AniList GraphQL fallback
     @Serializable
     private data class AniListTitleResponse(val Media: AniListMediaTitle? = null)
     @Serializable
@@ -99,28 +112,30 @@ class AniDBProvider(
         if (links.isEmpty()) return null
         
         val cleanTitle = title.trim().lowercase()
+        val querySeasonNumber = extractSeasonNumber(cleanTitle)
         
         // 1. Try exact match first (highest priority)
         var animeLink: Element? = links.firstOrNull { link ->
             link.text().trim().lowercase() == cleanTitle
         }
         
-        // 2. If no exact match, look for titles that contain the search query
-        // But prefer shorter titles (base show over "Season X Part Y")
+        // 2. Fallback matching logic
         if (animeLink == null) {
             val candidates = links.filter { link ->
                 val text = link.text().trim().lowercase()
                 text.contains(cleanTitle) || cleanTitle.contains(text)
             }
             
-            // If searching for "Season 2", prefer titles with "season 2"
-            val hasSeasonInQuery = cleanTitle.contains("season")
-            animeLink = if (hasSeasonInQuery) {
-                candidates.firstOrNull { it.text().lowercase().contains("season") }
-                    ?: candidates.minByOrNull { it.text().length }
+            animeLink = if (querySeasonNumber != null) {
+                // Searching for a specific season/part -> match the exact number
+                candidates.firstOrNull { link ->
+                    extractSeasonNumber(link.text().lowercase()) == querySeasonNumber
+                } ?: candidates.minByOrNull { it.text().length }
             } else {
-                // Otherwise prefer shorter titles (base show)
-                candidates.minByOrNull { it.text().length }
+                // No season in query (e.g. "Mob Psycho 100") -> prefer base show (no season number)
+                candidates.firstOrNull { link ->
+                    extractSeasonNumber(link.text().lowercase()) == null
+                } ?: candidates.minByOrNull { it.text().length }
             }
         }
         
@@ -180,12 +195,22 @@ class AniDBProvider(
             val m3u8Url = M3U8_REGEX.find(embedHtml)?.groupValues?.get(1)
                 ?: return@parallelCatchingFlatMap emptyList<Video>()
 
+            // Determine if this is Sub or Dub based on language name
+            val isDub = language.name.equals("English", ignoreCase = true) || 
+                       language.name.equals("Dub", ignoreCase = true) ||
+                       language.name.contains("Dub", ignoreCase = true)
+            
+            val audioLabel = if (isDub) "Dub" else "Sub"
+            val langPrefix = if (isDub) "English" else "Japanese"
+
             playlistUtils.extractFromHls(
                 playlistUrl = m3u8Url,
                 referer = "$BASE/",
                 masterHeaders = siteHeaders(),
                 videoHeaders = siteHeaders(),
-                videoNameGen = { quality -> "${language.name} - $quality" },
+                // Labels videos as "Japanese (Sub) - 720p" or "English (Dub) - 720p"
+                // so your Master Extension's Sub/Dub preferences can sort them correctly!
+                videoNameGen = { quality -> "$langPrefix ($audioLabel) - $quality" },
             )
         }
     }
@@ -193,10 +218,8 @@ class AniDBProvider(
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
         
-        // Use anime.title if available, otherwise fall back to meta.title
         val title = anime.title.takeIf { it.isNotBlank() } ?: meta.title
         
-        // If title is still blank, try to fetch it from AniList using the ID
         if (title.isBlank()) {
             val anilistTitle = fetchTitleFromAniList(meta.anilistId)
             if (anilistTitle.isNullOrBlank()) {
@@ -236,7 +259,6 @@ class AniDBProvider(
         return videos
     }
 
-    // Fetch title from AniList API as fallback using standard GraphQL utils
     private suspend fun fetchTitleFromAniList(anilistId: Int): String? {
         val query = """
             query(${'$'}id: Int) {
