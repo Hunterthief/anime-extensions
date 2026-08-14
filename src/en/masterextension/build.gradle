@@ -6,7 +6,7 @@ ext {
 
 apply plugin: "kei.plugins.extension.legacy"
 
-// 1. Handles duplicate META-INF files between the two JitPack forks
+// Handles duplicate META-INF text files (not classes)
 android {
     packaging {
         resources {
@@ -15,11 +15,13 @@ android {
     }
 }
 
-// 2. GLOBALLY EXCLUDE the Maven Central artifact.
-// This stops libraries from secretly pulling it in and causing the 
-// "Duplicate class fi.iki.elonen.NanoHTTPD" crash.
+// GLOBALLY EXCLUDE the fragmented core modules.
+// This forces Gradle to ONLY use the official "fat JAR" below, 
+// completely preventing the "Duplicate class" build error.
 configurations.all {
     exclude group: 'org.nanohttpd', module: 'nanohttpd'
+    exclude group: 'org.nanohttpd', module: 'nanohttpd-core'
+    exclude group: 'com.github.NanoHttpd.nanohttpd', module: 'nanohttpd'
 }
 
 dependencies {
@@ -40,9 +42,8 @@ dependencies {
     implementation(project(':lib:m3u8server'))
     implementation(project(':lib-multisrc:anikototheme'))
     
-    // 3. AnimePahe needs the 'fi.iki.elonen' package
-    implementation("com.github.NanoHttpd.nanohttpd:nanohttpd:nanohttpd-project-2.3.1")
-    
-    // 4. Anikoto / M3U8Server needs the newer 'org.nanohttpd' package
-    implementation("com.github.NanoHttpd.nanohttpd:nanohttpd:-SNAPSHOT")
+    // THE FIX: Use the official "jar-with-dependencies" from Maven Central.
+    // This single JAR contains BOTH 'fi.iki.elonen' (AnimePahe) AND 
+    // 'org.nanohttpd.protocols.http' (Anikoto/M3U8Server) without any conflicts.
+    implementation("org.nanohttpd:nanohttpd-webserver:2.3.1")
 }
