@@ -106,13 +106,37 @@ class AniDBProvider(
 
         val doc = Jsoup.parse(html)
         val links = doc.select("a[href*=/anime/]")
+        if (links.isEmpty()) return null
+        
         val cleanTitle = title.trim().lowercase()
         
-        // Try to match title intelligently, fallback to first result
-        val animeLink = links.firstOrNull { link ->
-            val linkText = link.text().trim().lowercase()
-            linkText == cleanTitle || linkText.contains(cleanTitle) || cleanTitle.contains(linkText)
-        } ?: links.firstOrNull() ?: return null
+        // FIX: Smarter matching logic to avoid grabbing "Season 2" when searching for the base show
+        
+        // 1. Try exact match first
+        var animeLink = links.firstOrNull { link ->
+            link.text().trim().lowercase() == cleanTitle
+        }
+        
+        // 2. If no exact match, and query doesn't have "season" or "part", filter them out
+        if (animeLink == null && !cleanTitle.contains("season") && !cleanTitle.contains("part")) {
+            animeLink = links.firstOrNull { link ->
+                val text = link.text().trim().lowercase()
+                text.contains(cleanTitle) && !text.contains("season") && !text.contains("part")
+            }
+        }
+        
+        // 3. Fallback to shortest contains match (prefers base show over "Season X Part Y")
+        if (animeLink == null) {
+            animeLink = links.filter { link ->
+                val text = link.text().trim().lowercase()
+                text.contains(cleanTitle) || cleanTitle.contains(text)
+            }.minByOrNull { it.text().length }
+        }
+        
+        // 4. Ultimate fallback
+        if (animeLink == null) {
+            animeLink = links.firstOrNull()
+        } ?: return null
         
         val href = animeLink.attr("abs:href")
         val animeId = ANIME_ID_REGEX.find(href)?.groupValues?.get(1) ?: return null
