@@ -9,9 +9,13 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
+import keiyoushi.utils.graphQLPost
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.parseGraphQLAs
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
@@ -28,6 +32,7 @@ class AniDBProvider(
 
     companion object {
         private const val BASE = "https://anidb.app"
+        private const val ANILIST_API_URL = "https://graphql.anilist.co"
         private val ANIME_ID_REGEX = Regex("-(\\d+)$")
         private val M3U8_REGEX = Regex("""file:\s*['"](https?://[^'"]+master\.m3u8)['"]""")
     }
@@ -68,6 +73,14 @@ class AniDBProvider(
         val name: String,
         val embed_url: String,
     )
+
+    // DTOs for the AniList GraphQL fallback
+    @Serializable
+    private data class AniListTitleResponse(val Media: AniListMediaTitle? = null)
+    @Serializable
+    private data class AniListMediaTitle(val title: AniListTitles? = null)
+    @Serializable
+    private data class AniListTitles(val english: String? = null, val romaji: String? = null)
 
     private suspend fun getAnimeId(title: String): String? {
         animeIdCache[title]?.let { return it }
@@ -223,46 +236,25 @@ class AniDBProvider(
         return videos
     }
 
-    // Fetch title from AniList API as fallback
+    // Fetch title from AniList API as fallback using standard GraphQL utils
     private suspend fun fetchTitleFromAniList(anilistId: Int): String? {
         val query = """
-            query {
-                Media(id: $anilistId, type: ANIME) {
+            query(${'$'}id: Int) {
+                Media(id: ${'$'}id, type: ANIME) {
                     title { english romaji }
                 }
             }
         """.trimIndent()
 
-        val body = """{"query":"$query"}"""
-        
+        val variables = buildJsonObject {
+            put("id", anilistId)
+        }
+
         return try {
-            val request = eu.kanade.tachiyomi.network.POST(
-                "https://graphql.anilist.co",
-                headers = Headers.Builder()
-                    .set("Content-Type", "application/json")
-                    .build(),
-                body = okhttp3.RequestBody.create(
-                    okhttp3.MediaType.parse("application/json"),
-                    body
-                )
-            )
-            
-            val response = client.newCall(request).awaitSuccess().bodyString()
-            val json = kotlinx.serialization.json.Json.parseToJsonElement(response)
-                as kotlinx.serialization.json.JsonObject
-            
-            val media = json["data"]?.let { it as? kotlinx.serialization.json.JsonObject }
-                ?.get("Media") as? kotlinx.serialization.json.JsonObject
-            
-            val title = media?.get("title") as? kotlinx.serialization.json.JsonObject
-            val english = title?.get("english")?.let { 
-                (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull 
-            }
-            val romaji = title?.get("romaji")?.let { 
-                (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull 
-            }
-            
-            english ?: romaji
+            val request = graphQLPost(ANILIST_API_URL, siteHeaders(), query, variables = variables)
+            val response = client.newCall(request).awaitSuccess()
+            val data = response.parseGraphQLAs<AniListTitleResponse>()
+            data.Media?.title?.english ?: data.Media?.title?.romaji
         } catch (e: Exception) {
             null
         }
