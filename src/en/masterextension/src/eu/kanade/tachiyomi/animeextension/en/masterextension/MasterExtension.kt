@@ -427,6 +427,24 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             summary = "Choose which provider opens when using \"Open Verification WebView\".\n%s"
             setDefaultValue(defaultVerificationUrl)
         }.also { screen.addPreference(it) }
+
+        // --- AnimePahe Domain ---
+        ListPreference(screen.context).apply {
+            key = "animepahe_preferred_domain"
+            title = "AnimePahe: Preferred Domain"
+            entries = arrayOf("animepahe.pw", "animepahe.com", "animepahe.org")
+            entryValues = arrayOf("https://animepahe.pw", "https://animepahe.com", "https://animepahe.org")
+            summary = "Change domain if AnimePahe is blocked.\n%s"
+            setDefaultValue("https://animepahe.pw")
+        }.also { screen.addPreference(it) }
+
+        // --- AnimePahe HLS Toggle ---
+        SwitchPreferenceCompat(screen.context).apply {
+            key = "animepahe_preferred_link_type"
+            title = "AnimePahe: Use HLS Links"
+            summary = "Enable if you are having Cloudflare playback issues."
+            setDefaultValue(true)
+        }.also { screen.addPreference(it) }
     }
 
     override fun getFilterList(): AnimeFilterList = MasterFilters.filterList
