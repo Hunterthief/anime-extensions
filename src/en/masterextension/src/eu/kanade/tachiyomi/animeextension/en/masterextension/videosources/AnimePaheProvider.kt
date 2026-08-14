@@ -208,6 +208,8 @@ class AnimePaheProvider(
 
     private suspend fun fetchEpisodeSession(animeSession: String, epNum: Int): String? {
         var page = 1
+        val allEpisodes = mutableListOf<PaheEpisodeDto>()
+        
         while (true) {
             val url = baseUrl.toHttpUrl().newBuilder().apply {
                 addPathSegment("api")
@@ -224,14 +226,24 @@ class AnimePaheProvider(
             }
 
             val episodesData = response.parseAs<PaheResponseDto<PaheEpisodeDto>>()
+            allEpisodes.addAll(episodesData.items)
 
-            episodesData.items
-                .firstOrNull { abs(it.episodeNumber - epNum.toFloat()) < 0.001f }
-                ?.let { return it.session }
+            // 1. Try exact match first
+            val exactMatch = episodesData.items.firstOrNull { abs(it.episodeNumber - epNum.toFloat()) < 0.001f }
+            if (exactMatch != null) return exactMatch.session
 
             if (page >= episodesData.lastPage) break
             page++
         }
+        
+        // 2. FALLBACK: Absolute vs Relative numbering mismatch
+        // If AniList says "Episode 1" but the site lists it as "Episode 29" (continuing from S1),
+        // we just grab the Nth episode from the sorted list.
+        if (epNum > 0 && epNum <= allEpisodes.size) {
+            val sorted = allEpisodes.sortedBy { it.episodeNumber }
+            return sorted[epNum - 1].session
+        }
+        
         return null
     }
 
