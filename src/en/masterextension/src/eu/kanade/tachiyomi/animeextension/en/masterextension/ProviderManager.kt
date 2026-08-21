@@ -43,7 +43,7 @@ class ProviderManager(
             "animeonsen" to AnimeOnsenProvider(client, headers),
             "anineko"    to AniNekoProvider(client, headers),
             //"anizone"    to AniZoneProvider(client, headers),
-            //"anikoto"    to AnikotoProvider(),
+            "anikoto"    to AnikotoProvider(),
             //"animegg"    to AnimeGGProvider(client, headers),
             //"torrentio"  to TorrentioProvider(client, headers, "none", ""),
             //"subsplease" to SubspleaseProvider(client, headers),
