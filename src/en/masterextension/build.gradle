@@ -6,22 +6,13 @@ ext {
 
 apply plugin: "kei.plugins.extension.legacy"
 
-// 1. Prevents META-INF merge conflicts between different NanoHTTPD versions
+// Prevents META-INF merge conflicts (harmless to keep)
 android {
     packaging {
         resources {
             pickFirsts += ['META-INF/nanohttpd/mimetypes.properties']
         }
     }
-}
-
-// 2. GLOBAL EXCLUDES: This is the hammer. It forcefully blocks the broken 
-// komikku-app SNAPSHOT fork and fragmented core JARs from entering the build.
-configurations.all {
-    exclude group: 'org.nanohttpd', module: 'nanohttpd'
-    exclude group: 'org.nanohttpd', module: 'nanohttpd-core'
-    exclude group: 'com.github.NanoHttpd.nanohttpd', module: 'nanohttpd'
-    exclude group: 'com.github.komikku-app.nanohttpd', module: 'nanohttpd'
 }
 
 dependencies {
@@ -42,8 +33,8 @@ dependencies {
     implementation(project(':lib:m3u8server'))
     implementation(project(':lib-multisrc:anikototheme'))
     
-    // 3. THE FIX: Use the official "jar-with-dependencies" from Maven Central.
-    // This single JAR contains BOTH 'fi.iki.elonen' (AnimePahe) AND 
-    // 'org.nanohttpd.protocols.http' (Anikoto/M3U8Server) without any conflicts.
-    implementation("org.nanohttpd:nanohttpd-webserver:2.3.1")
+    // 🎯 THE FIX: Exact same coordinates as lib:m3u8server.
+    // This provides the correct org.nanohttpd.protocols.http classes 
+    // and prevents resolution errors without needing any complex exclude blocks.
+    implementation("com.github.komikku-app.nanohttpd:nanohttpd:gradle-upgrade-SNAPSHOT")
 }
