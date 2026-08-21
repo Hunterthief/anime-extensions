@@ -6,6 +6,30 @@ ext {
 
 apply plugin: "kei.plugins.extension.legacy"
 
+// 🛡️ 1. Prevents META-INF merge conflicts (THIS FIXES THE "2 files found" ERROR)
+android {
+    packaging {
+        resources {
+            pickFirsts += ['META-INF/nanohttpd/mimetypes.properties']
+        }
+    }
+}
+
+// 🛡️ 2. Catch-All Global Fix: Forces ANY nanohttpd dependency across the ENTIRE 
+// project to use the stable, official Maven Central version. This catches 
+// "-SNAPSHOT", "komikku-app", or any other broken variants automatically.
+gradle.allprojects {
+    configurations.configureEach {
+        resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+            def req = details.requested
+            if (req.group.toLowerCase().contains('nanohttpd') || req.name.toLowerCase().contains('nanohttpd')) {
+                details.useTarget("org.nanohttpd:nanohttpd:2.3.1")
+                details.because("Forcing single valid NanoHTTPD version to prevent build failures")
+            }
+        }
+    }
+}
+
 dependencies {
     implementation(project(':lib:playlistutils'))
     implementation(project(':lib:unpacker'))
@@ -22,6 +46,11 @@ dependencies {
     implementation(project(':lib:okruextractor'))
     implementation(project(':lib:filemoonextractor'))
     
-    // Direct dependency for AnimePahe (also normalized by the global rule above)
+    // You can leave these commented out. If Gradle tries to build them, 
+    // the global rule above will automatically fix their broken dependencies.
+    // implementation(project(':lib:m3u8server'))
+    // implementation(project(':lib-multisrc:anikototheme'))
+    
+    // 3. Stable NanoHTTPD dependency (also normalized by the global rule above)
     implementation("org.nanohttpd:nanohttpd:2.3.1")
 }
