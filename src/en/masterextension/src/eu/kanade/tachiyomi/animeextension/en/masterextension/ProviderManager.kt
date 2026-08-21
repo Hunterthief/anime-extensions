@@ -38,7 +38,7 @@ class ProviderManager(
         linkedMapOf(
             "anidb"      to AniDBProvider(client, headers),
             "animepahe"  to AnimePaheProvider(client, headers, preferences),
-            //"mkissa"     to MKissaProvider(client, headers, preferences),
+            "mkissa"     to MKissaProvider(client, headers, preferences),
             "kickassanime"to KickAssAnimeProvider(client, headers, preferences),
             "animeonsen" to AnimeOnsenProvider(client, headers),
             "anineko"    to AniNekoProvider(client, headers),
