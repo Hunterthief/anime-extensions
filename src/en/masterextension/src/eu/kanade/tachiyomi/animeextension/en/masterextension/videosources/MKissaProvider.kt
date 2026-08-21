@@ -22,6 +22,7 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.MKissaSourceUrl
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.SEARCH_QUERY
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.STREAM_HASH
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.STREAM_QUERY
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -54,15 +55,6 @@ class MKissaProvider(
 
     private val apiUrl = "https://api.mkissa.net"
 
-    // =================================================================
-    // DEDICATED CLIENT — no CloudflareInterceptor
-    // The master client's CloudflareInterceptor hijacks 403/503 responses
-    // and tries to launch a WebView. MKissa's crypto handshake scrapes
-    // the site HTML and JS chunks; the interceptor hangs the coroutine
-    // for 30s × 3 retries, then the provider silently returns nothing.
-    // MKissa has its own anti-bot crypto (aaReq) and does not need CF bypass.
-    // =================================================================
-
     private val mkissaClient: OkHttpClient by lazy {
         client.newBuilder()
             .apply { networkInterceptors().clear() }
@@ -76,10 +68,6 @@ class MKissaProvider(
             .set("Referer", "$baseUrl/anime/")
             .build()
     }
-
-    // =================================================================
-    // Caches + extractors
-    // =================================================================
 
     private val showIdCache = ConcurrentHashMap<Int, String>()
 
@@ -95,10 +83,6 @@ class MKissaProvider(
     private val streamlareExtractor by lazy { StreamlareExtractor(client) }
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
-
-    // =================================================================
-    // VideoProvider contract
-    // =================================================================
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         return try {
@@ -119,10 +103,6 @@ class MKissaProvider(
             emptyList()
         }
     }
-
-    // =================================================================
-    // Step 1 — find the MKissa show ID by title
-    // =================================================================
 
     private suspend fun findShowId(anilistId: Int, title: String): String? {
         showIdCache[anilistId]?.let { return it }
@@ -174,10 +154,6 @@ class MKissaProvider(
         return showId
     }
 
-    // =================================================================
-    // Step 2 — find the episode string matching the episode number
-    // =================================================================
-
     private suspend fun findEpisodeString(
         showId: String,
         epNum: Int,
@@ -203,10 +179,6 @@ class MKissaProvider(
         return episodes.firstOrNull { it == epNum.toString() }
             ?: episodes.firstOrNull { it.toFloatOrNull()?.toInt() == epNum }
     }
-
-    // =================================================================
-    // Step 3 — fetch + decrypt source URLs (aaReq crypto)
-    // =================================================================
 
     private suspend fun fetchSourceUrls(
         showId: String,
@@ -241,6 +213,7 @@ class MKissaProvider(
 
             val url = apiUrl.toHttpUrl().newBuilder().apply {
                 addPathSegment("api")
+                addQueryParameter("query", STREAM_QUERY) // Added literal query text
                 addQueryParameter("variables", variables.toJsonString())
                 addQueryParameter("extensions", extensions.toJsonString())
             }.build()
@@ -260,6 +233,11 @@ class MKissaProvider(
                 val tobeparsed = runCatching {
                     responseBody.parseAs<MKissaEncryptedResult>().data.tobeparsed
                 }.getOrNull()
+
+                // Handle NEED_CAPTCHA and other API errors gracefully
+                if (tobeparsed.isNullOrBlank()) {
+                    keyManager.apiErrorMessage(responseBody)?.let { throw Exception(it) }
+                }
 
                 when {
                     !tobeparsed.isNullOrBlank() -> {
@@ -292,10 +270,6 @@ class MKissaProvider(
         throw lastError ?: encryptionChangedError
     }
 
-    // =================================================================
-    // Step 4 — route source URLs to extractors
-    // =================================================================
-
     private suspend fun extractVideos(sourceUrls: List<MKissaSourceUrl>): List<Video> {
         val mappings = listOf(
             "vidstreaming" to listOf("vidstreaming", "https://gogo", "playgo1.cc", "playtaku", "vidcloud"),
@@ -303,7 +277,7 @@ class MKissaProvider(
             "okru" to listOf("ok.ru", "okru"),
             "mp4upload" to listOf("mp4upload.com"),
             "streamlare" to listOf("streamlare.com"),
-            "filemoon" to listOf("filemoon", "moonplayer"),
+            "Fm-Hls" to listOf("bysekoze.com", "fastmoon", "filemoon", "moonplayer"), // Updated mapping
             "streamwish" to listOf("wish"),
         )
 
@@ -368,8 +342,8 @@ class MKissaProvider(
                 sName == "streamlare" ->
                     streamlareExtractor.videosFromUrl(server.sourceUrl)
 
-                sName == "filemoon" ->
-                    filemoonExtractor.videosFromUrl(server.sourceUrl, prefix = "Filemoon:")
+                sName == "Fm-Hls" -> // Updated extractor call
+                    filemoonExtractor.videosFromUrl(server.sourceUrl, prefix = "Fm-Hls:")
 
                 sName == "streamwish" ->
                     streamwishExtractor.videosFromUrl(server.sourceUrl, videoNameGen = { "StreamWish:$it" })
@@ -380,10 +354,6 @@ class MKissaProvider(
             .sortedByDescending { it.second }
             .map { it.first }
     }
-
-    // =================================================================
-    // Helpers
-    // =================================================================
 
     private fun resolveTranslationType(): String {
         val audioPref = preferences.getString("preferred_audio_type", "sub") ?: "sub"
