@@ -6,15 +6,16 @@ ext {
 
 apply plugin: "kei.plugins.extension.legacy"
 
-// 🛡️ GLOBAL FIX: Intercept and fix the broken NanoHTTPD dependency across ALL projects.
-// This prevents the "-SNAPSHOT" resolution failure in lib:m3u8server without 
-// needing to edit any files outside of this masterextension folder.
+// 🛡️ SILVER BULLET: Force EVERY nanohttpd request in the entire project 
+// to use this exact, working version. This fixes the "-SNAPSHOT" error 
+// and prevents duplicate class conflicts simultaneously.
 gradle.allprojects {
     configurations.configureEach {
         resolutionStrategy.eachDependency { DependencyResolveDetails details ->
-            if (details.requested.group == 'com.github.NanoHttpd.nanohttpd' && details.requested.name == 'nanohttpd') {
-                details.useVersion 'nanohttpd-project-2.3.1'
-                details.because 'Forcing valid version to prevent -SNAPSHOT build failure'
+            def req = details.requested
+            if (req.group.toLowerCase().contains('nanohttpd') || req.name.toLowerCase().contains('nanohttpd')) {
+                details.useTarget("com.github.NanoHttpd.nanohttpd:nanohttpd:nanohttpd-project-2.3.1")
+                details.because("Forcing single valid NanoHTTPD version to prevent build failures")
             }
         }
     }
@@ -36,6 +37,10 @@ dependencies {
     implementation(project(':lib:okruextractor'))
     implementation(project(':lib:filemoonextractor'))
     
-    // Direct dependency for AnimePahe (will also be normalized by the global rule above)
+    // Put these back exactly as they were when it worked
+    implementation(project(':lib:m3u8server'))
+    implementation(project(':lib-multisrc:anikototheme'))
+    
+    // AnimePahe NanoHTTPD dependency
     implementation("com.github.NanoHttpd.nanohttpd:nanohttpd:nanohttpd-project-2.3.1")
 }
