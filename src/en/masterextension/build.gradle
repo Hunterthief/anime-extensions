@@ -6,6 +6,20 @@ ext {
 
 apply plugin: "kei.plugins.extension.legacy"
 
+// 🛡️ GLOBAL FIX: Intercept and fix the broken NanoHTTPD dependency across ALL projects.
+// This prevents the "-SNAPSHOT" resolution failure in lib:m3u8server without 
+// needing to edit any files outside of this masterextension folder.
+gradle.allprojects {
+    configurations.configureEach {
+        resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+            if (details.requested.group == 'com.github.NanoHttpd.nanohttpd' && details.requested.name == 'nanohttpd') {
+                details.useVersion 'nanohttpd-project-2.3.1'
+                details.because 'Forcing valid version to prevent -SNAPSHOT build failure'
+            }
+        }
+    }
+}
+
 dependencies {
     implementation(project(':lib:playlistutils'))
     implementation(project(':lib:unpacker'))
@@ -21,5 +35,7 @@ dependencies {
     implementation(project(':lib:doodextractor'))
     implementation(project(':lib:okruextractor'))
     implementation(project(':lib:filemoonextractor'))
+    
+    // Direct dependency for AnimePahe (will also be normalized by the global rule above)
     implementation("com.github.NanoHttpd.nanohttpd:nanohttpd:nanohttpd-project-2.3.1")
 }
