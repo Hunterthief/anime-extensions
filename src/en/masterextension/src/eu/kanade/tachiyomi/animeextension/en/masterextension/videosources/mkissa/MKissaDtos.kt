@@ -3,12 +3,34 @@ package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkiss
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
-const val STREAM_HASH = "f4662f4b7510b26795dd53ef824a0bf1740fbbc5d1273fab18222ac831bca8d0"
-const val ANIME_LANE = "k7"
-
 fun buildQuery(queryAction: () -> String): String = queryAction()
     .trimIndent()
     .replace("%", "$")
+
+val STREAM_QUERY: String = buildQuery {
+    """
+        query(
+            %showId: String!
+            %translationType: VaildTranslationTypeEnumType!
+            %episodeString: String!
+        ) {
+            episode(
+                showId: %showId
+                translationType: %translationType
+                episodeString: %episodeString
+            ) {
+                sourceUrls
+                show {
+                    _id
+                }
+            }
+        }
+    """
+}
+
+val STREAM_HASH: String = MKissaCrypto.sha256Hex(STREAM_QUERY)
+
+const val ANIME_LANE = "k7"
 
 val SEARCH_QUERY: String = buildQuery {
     """
@@ -141,15 +163,16 @@ data class MKissaDecryptedResult(
 )
 
 @Serializable
-class MKissaApiError(
-    val errors: List<MKissaGraphQlError>? = null,
+class AaApiError(
+    val errors: List<GraphQlError>? = null,
 ) {
     @Serializable
-    class MKissaGraphQlError(
-        val extensions: MKissaErrorExtensions? = null,
+    class GraphQlError(
+        val message: String? = null,
+        val extensions: Extensions? = null,
     ) {
         @Serializable
-        class MKissaErrorExtensions(
+        class Extensions(
             val code: String? = null,
         )
     }
