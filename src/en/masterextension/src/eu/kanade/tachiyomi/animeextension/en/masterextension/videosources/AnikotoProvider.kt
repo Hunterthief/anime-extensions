@@ -1,4 +1,4 @@
-package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
+/*package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
@@ -67,3 +67,4 @@ class AnikotoProvider :
         }
     }
 }
+*/ 
