@@ -21,10 +21,6 @@ import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-// =====================================================================
-// MKissaCrypto — stateless AES-GCM + HMAC primitives
-// =====================================================================
-
 object MKissaCrypto {
 
     private const val TAG_LENGTH = 128
@@ -44,9 +40,13 @@ object MKissaCrypto {
 
     private const val WINDOW_MS = 5 * 60 * 1000L
 
-    // Updated to 3 days to match the latest site rotation
-    private const val EPOCH_WINDOW_MS = 3 * 24 * 60 * 60 * 1000L
+    // Updated to 7 days to match the latest site rotation
+    private const val EPOCH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000L
     private const val EPOCH_GRACE_MS = 24 * 60 * 60 * 1000L
+
+    fun sha256Hex(value: String): String = MessageDigest.getInstance(HASH_ALGO)
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .toHex()
 
     fun deriveMask(buildId: String, seeds: List<String>): ByteArray? {
         if (buildId.isEmpty() || seeds.size != SEED_COUNT) return null
@@ -157,10 +157,6 @@ object MKissaCrypto {
         return SecretKeySpec(bytes, KEY_TYPE)
     }
 }
-
-// =====================================================================
-// MKissaBundle — scrapes buildId + mask seeds from the obfuscated JS
-// =====================================================================
 
 object MKissaBundle {
 
@@ -295,30 +291,16 @@ object MKissaBundle {
     }
 
     private val BUILD_ID_REGEX = Regex("""!==\s*["']string["']\s*\?\s*["'](\d+)["']\s*:\s*["']["']""")
-    
-    // FIX: The obfuscator names functions with `$` too (`$l`, `Cr`), which `\w` excludes.
-    // This interpolation yields the literal dollar sign without starting a template.
-    private val IDENT = """[${'$'}A-Za-z0-9_]+"""
-
+    private val IDENT = """[\$A-Za-z0-9_]+"""
     private val TABLE_HEAD_REGEX = Regex("""function ($IDENT)\(\)\s*\{\s*(?:const|let|var)\s+$IDENT\s*=\s*\[""")
-
     private val BASE_DECODER_REGEX = Regex("""function ($IDENT)\(($IDENT)(?:,$IDENT)*\)\{return \2=\2-\(?([-\d+*\s]+?)\)?,($IDENT)\(\)\[\2\]\}""")
-
     private val ALIAS_DECODER_REGEX = Regex("""function ($IDENT)\(($IDENT),($IDENT)\)\{return ($IDENT)\(($IDENT)((?:[-+][\d+*\s-]+)?)\)\}""")
-
     private val CALL_PATTERN = """($IDENT)\(\s*(-?\d+)\s*(?:,\s*(-?\d+)\s*)?\)"""
     private val CALL_REGEX = Regex(CALL_PATTERN)
-
     private val SEED_ARRAY_REGEX = Regex("""=\[((?:$CALL_PATTERN\+$CALL_PATTERN,){3}$CALL_PATTERN\+$CALL_PATTERN)]""")
-
     private val SEED_REGEX = Regex("""[A-Za-z0-9+/]{11}=""")
-
     private val TERM_REGEX = Regex("""[-+]*[^-+]+""")
 }
-
-// =====================================================================
-// MKissaKeyManager — owns the aaReq key material lifecycle
-// =====================================================================
 
 class MKissaKeyManager(
     private val client: OkHttpClient,
@@ -388,8 +370,21 @@ class MKissaKeyManager(
     }
 
     fun isCryptoError(body: String): Boolean =
-        runCatching { body.parseAs<MKissaApiError>().errors }.getOrNull()
+        runCatching { body.parseAs<AaApiError>().errors }.getOrNull()
             ?.any { it.extensions?.code?.startsWith("AA_CRYPTO") == true } == true
+
+    fun apiErrorMessage(body: String): String? {
+        if (isCryptoError(body)) return null
+        val message = runCatching { body.parseAs<AaApiError>().errors }.getOrNull()
+            ?.firstNotNullOfOrNull { it.message }
+            ?: return null
+        return if (message == CAPTCHA_ERROR) {
+            "MKissa is rate limiting this network ($CAPTCHA_ERROR). Browsing still works; " +
+                "streams should return on their own after a while."
+        } else {
+            "MKissa: $message"
+        }
+    }
 
     private class Handshake(
         val build: MKissaBundle.BuildInfo,
@@ -503,6 +498,7 @@ class MKissaKeyManager(
 
     companion object {
         private const val MATERIAL_ERROR = "Unable to obtain MKissa crypto material"
+        private const val CAPTCHA_ERROR = "NEED_CAPTCHA"
         private const val BOOTSTRAP_PATH = "/client-crypto/v1/bootstrap"
         private val STALE_CODES = setOf(403, 404)
         private const val KEY_GROUP = "mkissa"
