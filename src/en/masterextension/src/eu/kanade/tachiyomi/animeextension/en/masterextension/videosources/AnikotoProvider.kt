@@ -50,7 +50,7 @@ class AnikotoProvider :
             val targetAnime = if (anime.url.isNotBlank() && anime.url.contains("anikoto", ignoreCase = true)) {
                 anime
             } else {
-                // 2. Otherwise, search and use smart scoring to find the best match
+                // 2. Otherwise, search and use strict word-overlap scoring to find the best match
                 val searchRequest = searchAnimeRequest(1, anime.title, getFilterList())
                 val searchResponse = client.newCall(searchRequest).awaitSuccess()
                 val searchResults = searchAnimeParse(searchResponse)
@@ -62,35 +62,54 @@ class AnikotoProvider :
                 val requestedTitleLower = anime.title.lowercase().trim()
                 val querySeason = extractSeasonNumber(requestedTitleLower)
                 val baseTitle = stripSeasonInfo(requestedTitleLower)
+                
+                // Split into words, ignoring very short words (like "a", "in", "to") to improve accuracy
+                val requestedWords = requestedTitleLower.split(Regex("\\s+")).filter { it.length > 2 }
 
-                // Score each result to find the best match
-                searchResults.animes.maxByOrNull { result ->
+                val scoredResults = searchResults.animes.map { result ->
                     val resTitleLower = result.title.lowercase().trim()
+                    val resWords = resTitleLower.split(Regex("\\s+")).filter { it.length > 2 }
                     val resSeason = extractSeasonNumber(resTitleLower)
                     val resBase = stripSeasonInfo(resTitleLower)
                     
                     var score = 0
                     
-                    // Exact match is the holy grail
+                    // 1. Exact match is the holy grail
                     if (resTitleLower == requestedTitleLower) {
-                        score += 100
-                    } else if (resBase == baseTitle) {
-                        score += 50 // Base title matches (e.g., "Frieren" matches "Frieren Season 2")
-                        
+                        score += 1000
+                    } 
+                    // 2. Base title match (handles "Title Season 2" vs "Title")
+                    else if (resBase == baseTitle) {
+                        score += 500
                         if (querySeason != null && resSeason == querySeason) {
-                            score += 20 // Bonus for matching the correct season
+                            score += 100 // Bonus for matching the correct season
                         } else if (querySeason != null && resSeason != null) {
-                            score -= 10 // Penalty for matching the WRONG season
+                            score -= 50 // Penalty for matching the WRONG season
                         }
                     }
                     
-                    // Small bonus if it at least contains the requested string
-                    if (resTitleLower.contains(requestedTitleLower)) {
-                        score += 5
+                    // 3. Word overlap scoring
+                    val matchingWords = requestedWords.count { reqWord -> 
+                        resWords.any { resWord -> resWord.contains(reqWord) || reqWord.contains(resWord) }
+                    }
+                    score += matchingWords * 10
+                    
+                    // 4. Massive penalty for completely unrelated titles (0 word overlap)
+                    if (matchingWords == 0 && resTitleLower != requestedTitleLower && resBase != baseTitle) {
+                        score = -1000
                     }
                     
-                    score
-                } ?: searchResults.animes.first() // Only fall back to first() if scoring somehow yields null
+                    Pair(result, score)
+                }
+                
+                // Only accept results with a positive score (meaning it actually matched something)
+                val bestMatch = scoredResults.filter { it.second > 0 }.maxByOrNull { it.second }?.first
+                
+                if (bestMatch == null) {
+                    return listOf(Video("debug://x", "No close match found for '${anime.title}'", "debug://x"))
+                }
+                
+                bestMatch
             }
 
             val episodes = getEpisodeList(targetAnime)
