@@ -30,8 +30,6 @@ dependencies {
     implementation(project(':lib:doodextractor'))
     implementation(project(':lib:okruextractor'))
     implementation(project(':lib:filemoonextractor'))
-    implementation(project(':lib:m3u8server'))
-    implementation(project(':lib-multisrc:anikototheme'))
     
     // 🎯 THE FIX: Exact same coordinates as lib:m3u8server.
     // This provides the correct org.nanohttpd.protocols.http classes 
