@@ -7,6 +7,11 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.multisrc.anikototheme.AnikotoTheme
 import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.utils.graphQLPost
+import keiyoushi.utils.parseGraphQLAs
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 class AnikotoProvider :
     AnikotoTheme(
@@ -54,26 +59,30 @@ class AnikotoProvider :
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         return try {
+            val meta = EpisodeMeta.from(episode)
+            val title = anime.title.takeIf { it.isNotBlank() } ?: meta.title
+
             // 1. If the master extension already provided a valid Anikoto URL, use it directly!
             val targetAnime = if (anime.url.isNotBlank() && anime.url.contains("anikoto", ignoreCase = true)) {
                 anime
             } else {
+                // If title is still blank, try to fetch it from AniList using the ID
+                val searchTitle = if (title.isBlank()) {
+                    fetchTitleFromAniList(meta.anilistId) ?: return listOf(Video("debug://x", "Title blank (AL: ${meta.anilistId})", "debug://x"))
+                } else {
+                    title
+                }
+
                 // 2. Otherwise, search and use normalized scoring to find the best match
-                val searchRequest = searchAnimeRequest(1, anime.title, getFilterList())
+                val searchRequest = searchAnimeRequest(1, searchTitle, getFilterList())
                 val searchResponse = client.newCall(searchRequest).awaitSuccess()
                 val searchResults = searchAnimeParse(searchResponse)
 
                 if (searchResults.animes.isEmpty()) {
-                    return listOf(Video("debug://x", "0 results for '${anime.title}'", "debug://x"))
+                    return listOf(Video("debug://x", "0 results for '$searchTitle'", "debug://x"))
                 }
 
-                val requestedTitleLower = anime.title.lowercase().trim()
-                
-                // Fail fast if the title is somehow empty
-                if (requestedTitleLower.isBlank()) {
-                    return listOf(Video("debug://x", "Anime title is missing", "debug://x"))
-                }
-
+                val requestedTitleLower = searchTitle.lowercase().trim()
                 val cleanRequested = requestedTitleLower.normalize()
                 val querySeason = extractSeasonNumber(requestedTitleLower)
                 val baseTitle = stripSeasonInfo(requestedTitleLower).normalize()
@@ -124,7 +133,7 @@ class AnikotoProvider :
                 val bestMatch = validMatches.maxByOrNull { it.second }?.first
                 
                 if (bestMatch == null) {
-                    return listOf(Video("debug://x", "No close match found for '${anime.title}'", "debug://x"))
+                    return listOf(Video("debug://x", "No close match found for '$searchTitle'", "debug://x"))
                 }
                 
                 bestMatch
@@ -134,8 +143,6 @@ class AnikotoProvider :
             if (episodes.isEmpty()) {
                 return listOf(Video("debug://x", "0 eps for '${targetAnime.title}'", "debug://x"))
             }
-
-            val meta = EpisodeMeta.from(episode)
             
             // Safely match the episode number (cast Float to Int to prevent crashes)
             val matchedEpisode = episodes.firstOrNull {
@@ -158,6 +165,32 @@ class AnikotoProvider :
                     "debug://x",
                 ),
             )
+        }
+    }
+
+    // ==================== AniList Title Fetcher ====================
+    @Serializable private data class AniListMediaResponse(val Media: AniListMediaFull? = null)
+    @Serializable private data class AniListMediaFull(val title: AniListTitlesFull? = null)
+    @Serializable private data class AniListTitlesFull(val english: String? = null, val romaji: String? = null)
+
+    private suspend fun fetchTitleFromAniList(anilistId: Int): String? {
+        val query = """
+            query(${'$'}id: Int) {
+                Media(id: ${'$'}id, type: ANIME) {
+                    title { english romaji }
+                }
+            }
+        """.trimIndent()
+
+        val variables = buildJsonObject { put("id", anilistId) }
+
+        return try {
+            val request = graphQLPost("https://graphql.anilist.co", headers, query, variables = variables)
+            val response = client.newCall(request).awaitSuccess()
+            val data = response.parseGraphQLAs<AniListMediaResponse>()
+            data.Media?.title?.english ?: data.Media?.title?.romaji
+        } catch (_: Exception) { 
+            null 
         }
     }
 }
