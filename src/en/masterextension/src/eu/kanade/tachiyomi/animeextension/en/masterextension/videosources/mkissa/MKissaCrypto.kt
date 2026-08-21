@@ -291,7 +291,10 @@ object MKissaBundle {
     }
 
     private val BUILD_ID_REGEX = Regex("""!==\s*["']string["']\s*\?\s*["'](\d+)["']\s*:\s*["']["']""")
-    private val IDENT = """[\$A-Za-z0-9_]+"""
+    
+    // ✅ FIX: Use ${'$'} to safely insert a literal dollar sign without triggering the string template parser.
+    private val IDENT = """[${'$'}A-Za-z0-9_]+"""
+    
     private val TABLE_HEAD_REGEX = Regex("""function ($IDENT)\(\)\s*\{\s*(?:const|let|var)\s+$IDENT\s*=\s*\[""")
     private val BASE_DECODER_REGEX = Regex("""function ($IDENT)\(($IDENT)(?:,$IDENT)*\)\{return \2=\2-\(?([-\d+*\s]+?)\)?,($IDENT)\(\)\[\2\]\}""")
     private val ALIAS_DECODER_REGEX = Regex("""function ($IDENT)\(($IDENT),($IDENT)\)\{return ($IDENT)\(($IDENT)((?:[-+][\d+*\s-]+)?)\)\}""")
