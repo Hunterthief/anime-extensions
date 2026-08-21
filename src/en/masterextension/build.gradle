@@ -6,21 +6,6 @@ ext {
 
 apply plugin: "kei.plugins.extension.legacy"
 
-// 1. Prevents META-INF merge conflicts between different NanoHTTPD versions
-android {
-    packaging {
-        resources {
-            pickFirsts += ['META-INF/nanohttpd/mimetypes.properties']
-        }
-    }
-}
-
-// 2. Force Gradle to strictly use the version from the source extension.
-// This stops lib:m3u8server's "-SNAPSHOT" from overriding it and breaking the 'fi.iki.elonen' package.
-configurations.all {
-    resolutionStrategy.force("com.github.NanoHttpd.nanohttpd:nanohttpd:nanohttpd-project-2.3.1")
-}
-
 dependencies {
     implementation(project(':lib:playlistutils'))
     implementation(project(':lib:unpacker'))
@@ -36,9 +21,5 @@ dependencies {
     implementation(project(':lib:doodextractor'))
     implementation(project(':lib:okruextractor'))
     implementation(project(':lib:filemoonextractor'))
-    //implementation(project(':lib:m3u8server'))
-    //implementation(project(':lib-multisrc:anikototheme'))
-    
-    // 3. Exact match from the AnimePahe source extension
     implementation("com.github.NanoHttpd.nanohttpd:nanohttpd:nanohttpd-project-2.3.1")
 }
