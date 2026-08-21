@@ -100,9 +100,9 @@ class AnikotoProvider :
 
             val meta = EpisodeMeta.from(episode)
             
-            // Safely match the episode number (using toIntOrNull() to prevent crashes on float episodes like "1.5")
+            // Safely match the episode number (cast Float to Int to prevent crashes)
             val matchedEpisode = episodes.firstOrNull {
-                it.episode_number.toIntOrNull() == meta.epNum
+                it.episode_number.toInt() == meta.epNum
             } ?: episodes.getOrNull(meta.epNum - 1) ?: return listOf(
                 Video("debug://x", "ep${meta.epNum} not in ${episodes.size}", "debug://x"),
             )
