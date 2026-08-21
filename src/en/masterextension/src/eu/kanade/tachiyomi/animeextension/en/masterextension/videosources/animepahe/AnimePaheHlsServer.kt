@@ -1,13 +1,17 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe
 
 import eu.kanade.tachiyomi.animesource.model.Video
-import fi.iki.elonen.NanoHTTPD
-import fi.iki.elonen.NanoHTTPD.Response.Status
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.nanohttpd.protocols.http.IHTTPSession
+import org.nanohttpd.protocols.http.NanoHTTPD
+import org.nanohttpd.protocols.http.response.Response
+import org.nanohttpd.protocols.http.response.Response.newChunkedResponse
+import org.nanohttpd.protocols.http.response.Response.newFixedLengthResponse
+import org.nanohttpd.protocols.http.response.Status
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
 import java.io.IOException
@@ -70,7 +74,7 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         }
     }
 
-    override fun serve(session: IHTTPSession): Response = when {
+    override fun handle(session: IHTTPSession): Response = when {
         session.uri.startsWith("/m3u8") -> handleM3u8Request(session)
         session.uri.startsWith("/segment") -> handleSegmentRequest(session)
         session.uri.startsWith("/mp4") -> handleMp4Request(session)
@@ -118,10 +122,8 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
             val status = Status.lookup(upstream.code) ?: Status.OK
             val stream = object : FilterInputStream(body.byteStream()) {
                 override fun close() {
-                    try {
+                    upstream.use { _ ->
                         super.close()
-                    } finally {
-                        upstream.close()
                     }
                 }
             }
@@ -204,15 +206,19 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         return response
     }
 
-    private fun fetchString(url: String, headers: Headers): String =
-        requireClient().newCall(Request.Builder().url(url).headers(headers).build()).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("Failed to fetch playlist: ${response.code}")
-            }
-            response.body.string()
+    private fun fetchString(url: String, headers: Headers): String = requireClient().newCall(Request.Builder().url(url).headers(headers).build()).execute().use { response ->
+        if (!response.isSuccessful) {
+            throw IOException("Failed to fetch playlist: ${response.code}")
         }
+        response.body.string()
+    }
 
-    private fun fetchSegment(url: String, headers: Headers, keyUrl: String?, iv: String?): ByteArray {
+    private fun fetchSegment(
+        url: String,
+        headers: Headers,
+        keyUrl: String?,
+        iv: String?,
+    ): ByteArray {
         val rawData = fetchBytes(url, headers)
         return if (keyUrl.isNullOrBlank()) {
             rawData
@@ -222,13 +228,12 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         }
     }
 
-    private fun fetchBytes(url: String, headers: Headers): ByteArray =
-        requireClient().newCall(Request.Builder().url(url).headers(headers).build()).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("Failed to fetch resource: ${response.code}")
-            }
-            response.body.bytes()
+    private fun fetchBytes(url: String, headers: Headers): ByteArray = requireClient().newCall(Request.Builder().url(url).headers(headers).build()).execute().use { response ->
+        if (!response.isSuccessful) {
+            throw IOException("Failed to fetch resource: ${response.code}")
         }
+        response.body.bytes()
+    }
 
     private fun requireClient(): OkHttpClient = client ?: throw IOException("AnimePahe HLS server is not initialized")
 
@@ -238,7 +243,7 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         val baseHttpUrl = originalUrl.toHttpUrlOrNull()
         val modifiedLines = mutableListOf<String>()
         var mediaSequence = 0L
-        var segmentSequence = mediaSequence
+        var segmentSequence = 0L
         var currentKey: HlsKey? = null
 
         content.lines().forEach { line ->
@@ -289,13 +294,11 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         return modifiedLines.joinToString("\n")
     }
 
-    private fun parseHlsAttributes(line: String): Map<String, String> =
-        hlsAttributeRegex.findAll(line.substringAfter(":")).associate {
-            it.groupValues[1] to it.groupValues[2].trim('"')
-        }
+    private fun parseHlsAttributes(line: String): Map<String, String> = hlsAttributeRegex.findAll(line.substringAfter(":")).associate {
+        it.groupValues[1] to it.groupValues[2].trim('"')
+    }
 
-    private fun resolveHlsUrl(baseHttpUrl: HttpUrl?, uri: String): String =
-        baseHttpUrl?.resolve(uri)?.toString() ?: uri
+    private fun resolveHlsUrl(baseHttpUrl: HttpUrl?, uri: String): String = baseHttpUrl?.resolve(uri)?.toString() ?: uri
 
     private fun createLocalSegmentUrl(segmentUrl: String, key: HlsKey?, sequence: Long): String {
         val encodedUrl = URLEncoder.encode(segmentUrl, Charsets.UTF_8.name())
@@ -311,10 +314,14 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
     }
 
     private fun decryptAes128Cbc(data: ByteArray, key: ByteArray, iv: String): ByteArray {
-        if (key.size != 16) throw IOException("Invalid AES-128 key length: ${key.size}")
+        if (key.size != 16) {
+            throw IOException("Invalid AES-128 key length: ${key.size}")
+        }
 
         val normalizedIv = iv.normalizeHlsIv()
-        if (normalizedIv.length != 32) throw IOException("Invalid AES-128 IV length: ${normalizedIv.length}")
+        if (normalizedIv.length != 32) {
+            throw IOException("Invalid AES-128 IV length: ${normalizedIv.length}")
+        }
 
         return try {
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
