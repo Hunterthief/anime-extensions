@@ -7,6 +7,7 @@ import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.delegate
+import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toHex
 import keiyoushi.utils.toJsonString
@@ -44,9 +45,14 @@ object MKissaCrypto {
 
     private const val WINDOW_MS = 5 * 60 * 1000L
 
-    // Updated to 3 days to match the latest site rotation
-    private const val EPOCH_WINDOW_MS = 3 * 24 * 60 * 60 * 1000L
+    // Reverted to 7 days to match upstream site rotation
+    private const val EPOCH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000L
     private const val EPOCH_GRACE_MS = 24 * 60 * 60 * 1000L
+
+    fun sha256Hex(input: String): String {
+        val bytes = MessageDigest.getInstance(HASH_ALGO).digest(input.toByteArray(Charsets.UTF_8))
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
 
     fun deriveMask(buildId: String, seeds: List<String>): ByteArray? {
         if (buildId.isEmpty() || seeds.size != SEED_COUNT) return null
@@ -296,8 +302,6 @@ object MKissaBundle {
 
     private val BUILD_ID_REGEX = Regex("""!==\s*["']string["']\s*\?\s*["'](\d+)["']\s*:\s*["']["']""")
     
-    // FIX: The obfuscator names functions with `$` too (`$l`, `Cr`), which `\w` excludes.
-    // This interpolation yields the literal dollar sign without starting a template.
     private val IDENT = """[${'$'}A-Za-z0-9_]+"""
 
     private val TABLE_HEAD_REGEX = Regex("""function ($IDENT)\(\)\s*\{\s*(?:const|let|var)\s+$IDENT\s*=\s*\[""")
@@ -391,6 +395,19 @@ class MKissaKeyManager(
         runCatching { body.parseAs<MKissaApiError>().errors }.getOrNull()
             ?.any { it.extensions?.code?.startsWith("AA_CRYPTO") == true } == true
 
+    fun apiErrorMessage(body: String): String? {
+        if (isCryptoError(body)) return null
+        val message = runCatching { body.parseAs<MKissaApiError>().errors }.getOrNull()
+            ?.firstNotNullOfOrNull { it.message }
+            ?: return null
+        return if (message == CAPTCHA_ERROR) {
+            "MKissa is rate limiting this network ($CAPTCHA_ERROR). Browsing still works; " +
+                "streams should return on their own after a while."
+        } else {
+            "MKissa: $message"
+        }
+    }
+
     private class Handshake(
         val build: MKissaBundle.BuildInfo,
         val mask: ByteArray,
@@ -475,16 +492,17 @@ class MKissaKeyManager(
             .distinct()
             .sortedByDescending { it.contains("/chunks/") }
             .take(MAX_BUILD_CHUNKS)
+            .toList()
 
-        for (ref in chunkRefs) {
-            val chunkUrl = appUrl.resolve(ref) ?: continue
-            val body = runCatching {
-                client.newCall(GET(chunkUrl, headers)).awaitSuccess().bodyString()
-            }.getOrNull() ?: continue
-
-            if (!body.contains(CRYPTO_CHUNK_MARKER)) continue
-
-            MKissaBundle.parse(body)?.let { return it }
+        // Fetch chunks in parallel batches to avoid downloading tens of MBs sequentially
+        for (batch in chunkRefs.chunked(BUILD_CHUNK_BATCH)) {
+            val found = batch.parallelCatchingMapNotNull { ref ->
+                val chunkUrl = appUrl.resolve(ref) ?: return@parallelCatchingMapNotNull null
+                val body = client.newCall(GET(chunkUrl, headers)).awaitSuccess().bodyString()
+                if (!body.contains(CRYPTO_CHUNK_MARKER)) return@parallelCatchingMapNotNull null
+                MKissaBundle.parse(body)
+            }
+            found.firstOrNull()?.let { return it }
         }
         return null
     }
@@ -503,12 +521,14 @@ class MKissaKeyManager(
 
     companion object {
         private const val MATERIAL_ERROR = "Unable to obtain MKissa crypto material"
+        private const val CAPTCHA_ERROR = "NEED_CAPTCHA"
         private const val BOOTSTRAP_PATH = "/client-crypto/v1/bootstrap"
         private val STALE_CODES = setOf(403, 404)
         private const val KEY_GROUP = "mkissa"
         private const val PREF_BUILD_KEY = "mkissa_client_build_cache"
         private const val FIELD_SEPARATOR = "|"
         private const val MAX_BUILD_CHUNKS = 40
+        private const val BUILD_CHUNK_BATCH = 4
         private const val MATERIAL_TTL_MS = 6 * 60 * 60 * 1000L
         private val APP_ENTRY_REGEX = Regex("""import\("([^"]*/entry/app\.[^"]*\.js)"\)""")
         private val CHUNK_REF_REGEX = Regex("""["'](\.\.?/[\w./-]+\.js)["']""")
