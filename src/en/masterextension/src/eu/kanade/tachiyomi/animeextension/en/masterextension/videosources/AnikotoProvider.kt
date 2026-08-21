@@ -24,29 +24,85 @@ class AnikotoProvider :
     ),
     VideoProvider {
 
-        override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
-        return try {
-            val searchRequest = searchAnimeRequest(1, anime.title, getFilterList())
-            val searchResponse = client.newCall(searchRequest).awaitSuccess()
-            val searchResults = searchAnimeParse(searchResponse)
+    // Regex to catch "Season 1", "Part 2", "2nd Season", etc.
+    private val seasonNumberRegex = Regex(
+        """(?:season|part)\s*(\d+)|(\d+)(?:st|nd|rd|th)\s*(?:season|part)""",
+        RegexOption.IGNORE_CASE
+    )
 
-            if (searchResults.animes.isEmpty()) {
-                return listOf(Video("debug://x", "0 results for '${anime.title}'", "debug://x"))
+    private fun extractSeasonNumber(text: String): Int? {
+        val match = seasonNumberRegex.find(text) ?: return null
+        val numStr = match.groupValues[1].ifEmpty { match.groupValues[2] }
+        return numStr.toIntOrNull()
+    }
+
+    private fun stripSeasonInfo(title: String): String {
+        return title
+            .replace(Regex("""\s*[-:]\s*(?:season|part)\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*(?:season|part)\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*\d+(?:st|nd|rd|th)\s*(?:season|part).*$""", RegexOption.IGNORE_CASE), "")
+            .trim()
+    }
+
+    override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
+        return try {
+            // 1. If the master extension already provided a valid Anikoto URL, use it directly!
+            val targetAnime = if (anime.url.isNotBlank() && anime.url.contains("anikoto", ignoreCase = true)) {
+                anime
+            } else {
+                // 2. Otherwise, search and use smart scoring to find the best match
+                val searchRequest = searchAnimeRequest(1, anime.title, getFilterList())
+                val searchResponse = client.newCall(searchRequest).awaitSuccess()
+                val searchResults = searchAnimeParse(searchResponse)
+
+                if (searchResults.animes.isEmpty()) {
+                    return listOf(Video("debug://x", "0 results for '${anime.title}'", "debug://x"))
+                }
+
+                val requestedTitleLower = anime.title.lowercase().trim()
+                val querySeason = extractSeasonNumber(requestedTitleLower)
+                val baseTitle = stripSeasonInfo(requestedTitleLower)
+
+                // Score each result to find the best match
+                searchResults.animes.maxByOrNull { result ->
+                    val resTitleLower = result.title.lowercase().trim()
+                    val resSeason = extractSeasonNumber(resTitleLower)
+                    val resBase = stripSeasonInfo(resTitleLower)
+                    
+                    var score = 0
+                    
+                    // Exact match is the holy grail
+                    if (resTitleLower == requestedTitleLower) {
+                        score += 100
+                    } else if (resBase == baseTitle) {
+                        score += 50 // Base title matches (e.g., "Frieren" matches "Frieren Season 2")
+                        
+                        if (querySeason != null && resSeason == querySeason) {
+                            score += 20 // Bonus for matching the correct season
+                        } else if (querySeason != null && resSeason != null) {
+                            score -= 10 // Penalty for matching the WRONG season
+                        }
+                    }
+                    
+                    // Small bonus if it at least contains the requested string
+                    if (resTitleLower.contains(requestedTitleLower)) {
+                        score += 5
+                    }
+                    
+                    score
+                } ?: searchResults.animes.first() // Only fall back to first() if scoring somehow yields null
             }
 
-            val titleLower = anime.title.lowercase().trim()
-            val matchedAnime = searchResults.animes.firstOrNull {
-                it.title.lowercase().trim() == titleLower
-            } ?: searchResults.animes.first()
-
-            val episodes = getEpisodeList(matchedAnime)
+            val episodes = getEpisodeList(targetAnime)
             if (episodes.isEmpty()) {
-                return listOf(Video("debug://x", "0 eps for '${matchedAnime.title}'", "debug://x"))
+                return listOf(Video("debug://x", "0 eps for '${targetAnime.title}'", "debug://x"))
             }
 
             val meta = EpisodeMeta.from(episode)
+            
+            // Safely match the episode number (using toIntOrNull() to prevent crashes on float episodes like "1.5")
             val matchedEpisode = episodes.firstOrNull {
-                it.episode_number.toInt() == meta.epNum
+                it.episode_number.toIntOrNull() == meta.epNum
             } ?: episodes.getOrNull(meta.epNum - 1) ?: return listOf(
                 Video("debug://x", "ep${meta.epNum} not in ${episodes.size}", "debug://x"),
             )
@@ -55,6 +111,7 @@ class AnikotoProvider :
             if (videos.isEmpty()) {
                 return listOf(Video("debug://x", "0 videos from player", "debug://x"))
             }
+            
             videos
         } catch (t: Throwable) {
             listOf(
