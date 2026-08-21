@@ -6,7 +6,7 @@ ext {
 
 apply plugin: "kei.plugins.extension.legacy"
 
-// 🛡️ 1. Prevents META-INF merge conflicts (THIS FIXES THE "2 files found" ERROR)
+// 1. Prevents META-INF merge conflicts between different NanoHTTPD versions
 android {
     packaging {
         resources {
@@ -15,19 +15,13 @@ android {
     }
 }
 
-// 🛡️ 2. Catch-All Global Fix: Forces ANY nanohttpd dependency across the ENTIRE 
-// project to use the stable, official Maven Central version. This catches 
-// "-SNAPSHOT", "komikku-app", or any other broken variants automatically.
-gradle.allprojects {
-    configurations.configureEach {
-        resolutionStrategy.eachDependency { DependencyResolveDetails details ->
-            def req = details.requested
-            if (req.group.toLowerCase().contains('nanohttpd') || req.name.toLowerCase().contains('nanohttpd')) {
-                details.useTarget("org.nanohttpd:nanohttpd:2.3.1")
-                details.because("Forcing single valid NanoHTTPD version to prevent build failures")
-            }
-        }
-    }
+// 2. GLOBAL EXCLUDES: This is the hammer. It forcefully blocks the broken 
+// komikku-app SNAPSHOT fork and fragmented core JARs from entering the build.
+configurations.all {
+    exclude group: 'org.nanohttpd', module: 'nanohttpd'
+    exclude group: 'org.nanohttpd', module: 'nanohttpd-core'
+    exclude group: 'com.github.NanoHttpd.nanohttpd', module: 'nanohttpd'
+    exclude group: 'com.github.komikku-app.nanohttpd', module: 'nanohttpd'
 }
 
 dependencies {
@@ -45,12 +39,11 @@ dependencies {
     implementation(project(':lib:doodextractor'))
     implementation(project(':lib:okruextractor'))
     implementation(project(':lib:filemoonextractor'))
+    implementation(project(':lib:m3u8server'))
+    implementation(project(':lib-multisrc:anikototheme'))
     
-    // You can leave these commented out. If Gradle tries to build them, 
-    // the global rule above will automatically fix their broken dependencies.
-    // implementation(project(':lib:m3u8server'))
-    // implementation(project(':lib-multisrc:anikototheme'))
-    
-    // 3. Stable NanoHTTPD dependency (also normalized by the global rule above)
-    implementation("org.nanohttpd:nanohttpd:2.3.1")
+    // 3. THE FIX: Use the official "jar-with-dependencies" from Maven Central.
+    // This single JAR contains BOTH 'fi.iki.elonen' (AnimePahe) AND 
+    // 'org.nanohttpd.protocols.http' (Anikoto/M3U8Server) without any conflicts.
+    implementation("org.nanohttpd:nanohttpd-webserver:2.3.1")
 }
