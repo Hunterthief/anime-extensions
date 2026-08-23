@@ -8,25 +8,18 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.utils.graphQLPost
+import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.parseGraphQLAs
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
-import org.jsoup.nodes.Element
+import java.net.URLEncoder
 
-/**
- * AnimeGG video source.
- *
- * Flow:
- *   1. GET /search/?q={title} → find anime URL
- *   2. GET {animeUrl} → find episode URL by matching epNum
- *   3. GET {episodeUrl} → extract iframe src(s) from tab-panes
- *   4. GET {iframeSrc} → regex extract `var videoSources = [...]`
- *   5. Fix unquoted JSON keys → parse → return direct .mp4/.m3u8 URLs
- *
- * No encryption, no JS execution, no tokens. Just plain HTML + regex.
- */
 class AnimeGGProvider(
     private val client: OkHttpClient,
     private val headers: Headers,
@@ -43,9 +36,6 @@ class AnimeGGProvider(
     @Serializable
     private data class GgVideo(val file: String, val label: String)
 
-    // =================================================================
-    // DEBUG HELPER
-    // =================================================================
     private fun debugVideo(msg: String): List<Video> {
         return listOf(
             Video(
@@ -56,23 +46,58 @@ class AnimeGGProvider(
         )
     }
 
+    // Helper to normalize titles: lowercase, remove punctuation, collapse spaces
+    private fun String.normalize(): String {
+        return this.lowercase()
+            .trim()
+            .replace(Regex("[^a-z0-9\\s]"), "")
+            .replace(Regex("\\s+"), " ")
+    }
+
     // =================================================================
-    // STEP 1: Search → anime URL
+    // STEP 1: Search → anime URL (with robust scoring)
     // =================================================================
     private suspend fun searchAnime(title: String): String? {
-        val encodedTitle = java.net.URLEncoder.encode(title, "UTF-8")
+        val encodedTitle = URLEncoder.encode(title, "UTF-8")
         val url = "$BASE/search/?q=$encodedTitle"
         val doc = client.newCall(GET(url, headers)).awaitSuccess().asJsoup()
         
-        // Try exact/contains match first, fallback to first result
-        val match = doc.select(".mse").firstOrNull { el ->
-            val elTitle = el.selectFirst(".first h2")?.text()?.trim() ?: ""
-            elTitle.equals(title, ignoreCase = true) || 
-            elTitle.contains(title, ignoreCase = true) ||
-            title.contains(elTitle, ignoreCase = true)
-        } ?: doc.selectFirst(".mse")
+        val elements = doc.select(".mse")
+        if (elements.isEmpty()) return null
+
+        val cleanRequested = title.normalize()
         
-        return match?.attr("abs:href")
+        val scoredResults = elements.map { el ->
+            val elTitle = el.selectFirst(".first h2")?.text()?.trim() ?: ""
+            val cleanRes = elTitle.normalize()
+            var score = 0
+
+            if (cleanRes == cleanRequested) {
+                score += 1000
+            } else if (cleanRes.contains(cleanRequested)) {
+                score += 800
+            } else if (cleanRequested.contains(cleanRes)) {
+                score += 600
+            }
+
+            val reqWords = cleanRequested.split(" ").filter { it.length > 2 }
+            val resWords = cleanRes.split(" ").filter { it.length > 2 }
+            val matchingWords = reqWords.count { reqWord ->
+                resWords.any { resWord -> resWord.contains(reqWord) || reqWord.contains(resWord) }
+            }
+            score += matchingWords * 20
+
+            if (matchingWords == 0 && cleanRes != cleanRequested) {
+                score = -1000
+            }
+
+            Pair(el, score)
+        }
+
+        return scoredResults.filter { it.second > 0 }
+            .maxByOrNull { it.second }
+            ?.first
+            ?.attr("abs:href")
     }
 
     // =================================================================
@@ -84,7 +109,7 @@ class AnimeGGProvider(
         val episodeElement = doc.select(".newmanga li div").firstOrNull { el ->
             val text = el.selectFirst(".anm_det_pop strong")?.text() ?: ""
             val num = getEpNumber(text)
-            num == epNum.toFloat()
+            num != null && num.toInt() == epNum
         }
         
         return episodeElement?.selectFirst(".anm_det_pop")?.attr("abs:href")
@@ -96,17 +121,15 @@ class AnimeGGProvider(
     }
 
     // =================================================================
-    // STEP 3 & 4: Episode page → iframes → extract videoSources
+    // STEP 3 & 4: Episode page → iframes → extract videoSources (Parallelized)
     // =================================================================
     private suspend fun extractVideos(episodeUrl: String): List<Video> {
         val doc = client.newCall(GET(episodeUrl, headers)).awaitSuccess().asJsoup()
-        val iframes = doc.select(".tab-pane iframe")
+        val iframes = doc.select("iframe")
         
         if (iframes.isEmpty()) return emptyList()
         
-        val allVideos = mutableListOf<Video>()
-        
-        for (iframe in iframes) {
+        return iframes.parallelCatchingFlatMap { iframe ->
             val mode = when (iframe.closest(".tab-pane")?.attr("id")) {
                 "subbed-Animegg" -> "[SUBBED]"
                 "dubbed-Animegg" -> "[DUBBED]"
@@ -115,40 +138,34 @@ class AnimeGGProvider(
             }
             
             val iframeSrc = iframe.attr("abs:src")
-            if (iframeSrc.isBlank()) continue
+            if (iframeSrc.isBlank()) return@parallelCatchingFlatMap emptyList()
             
-            try {
-                val embedDoc = client.newCall(GET(iframeSrc, headers)).awaitSuccess().asJsoup()
-                val host = iframeSrc.toHttpUrlOrNull()?.host ?: ""
+            val embedDoc = client.newCall(GET(iframeSrc, headers)).awaitSuccess().asJsoup()
+            val host = iframeSrc.toHttpUrlOrNull()?.host ?: ""
+            
+            val scriptData = embedDoc.selectFirst("script:containsData(var videoSources =)")?.data()
+                ?: return@parallelCatchingFlatMap emptyList()
                 
-                val scriptData = embedDoc.selectFirst("script:containsData(var videoSources =)")?.data()
-                    ?: continue
-                    
-                val rawJson = scriptData
-                    .substringAfter("var videoSources = ")
-                    .substringBefore(";")
-                    .replace(JSON_KEY_FIX) { mr -> " \"${mr.groupValues[1]}\":" }
-                    
-                val videos = try {
-                    rawJson.parseAs<Array<GgVideo>>()
-                } catch (e: Exception) {
-                    continue // Skip if JSON parsing fails
-                }
+            val rawJson = scriptData
+                .substringAfter("var videoSources = ")
+                .substringBefore(";")
+                .replace(JSON_KEY_FIX) { mr -> " \"${mr.groupValues[1]}\":" }
                 
-                val videoHeaders = headers.newBuilder()
-                    .add("Referer", "https://$host/")
-                    .build()
-                    
-                for (v in videos) {
-                    val url = if (v.file.startsWith("http")) v.file else "https://$host${v.file}"
-                    allVideos.add(Video(url, "$name $mode ${v.label}", url, headers = videoHeaders))
-                }
-            } catch (_: Exception) {
-                // Skip failed iframe extraction
+            val videos = try {
+                rawJson.parseAs<Array<GgVideo>>()
+            } catch (e: Exception) {
+                return@parallelCatchingFlatMap emptyList()
+            }
+            
+            val videoHeaders = headers.newBuilder()
+                .add("Referer", "https://$host/")
+                .build()
+                
+            videos.map { v ->
+                val url = if (v.file.startsWith("http")) v.file else "https://$host${v.file}"
+                Video(url, "$name $mode ${v.label}", url, headers = videoHeaders)
             }
         }
-        
-        return allVideos
     }
 
     // =================================================================
@@ -156,36 +173,47 @@ class AnimeGGProvider(
     // =================================================================
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
-        val title = anime.title.ifBlank { meta.title }
-        if (title.isBlank()) return debugVideo("title is blank")
+        var title = anime.title.takeIf { it.isNotBlank() } ?: meta.title
+        
+        // Fallback to AniList if title is missing
+        if (title.isBlank()) {
+            title = fetchTitleFromAniList(meta.anilistId) ?: return debugVideo("Title blank (AL: ${meta.anilistId})")
+        }
         
         val epNum = if (meta.epNum > 0) meta.epNum else 1
         
-        // Step 1: Search
-        val animeUrl = try {
-            searchAnime(title)
-        } catch (e: Exception) {
-            return debugVideo("search threw: ${e.message}")
-        } ?: return debugVideo("search null for '$title'")
-        
-        // Step 2: Get episode URL
-        val episodeUrl = try {
-            getEpisodeUrl(animeUrl, epNum)
-        } catch (e: Exception) {
-            return debugVideo("getEpisodeUrl threw: ${e.message}")
-        } ?: return debugVideo("no episode $epNum found for '$title'")
-        
-        // Step 3 & 4: Extract videos from iframes
-        val videos = try {
-            extractVideos(episodeUrl)
-        } catch (e: Exception) {
-            return debugVideo("extractVideos threw: ${e.message}")
-        }
+        val animeUrl = searchAnime(title) ?: return debugVideo("search null for '$title'")
+        val episodeUrl = getEpisodeUrl(animeUrl, epNum) ?: return debugVideo("no episode $epNum found for '$title'")
+        val videos = extractVideos(episodeUrl)
         
         if (videos.isEmpty()) {
             return debugVideo("0 videos extracted from iframes")
         }
         
         return videos
+    }
+
+    // ==================== AniList Title Fetcher ====================
+    @Serializable private data class AniListMediaResponse(val Media: AniListMediaFull? = null)
+    @Serializable private data class AniListMediaFull(val title: AniListTitlesFull? = null)
+    @Serializable private data class AniListTitlesFull(val english: String? = null, val romaji: String? = null)
+
+    private suspend fun fetchTitleFromAniList(anilistId: Int): String? {
+        val query = """
+            query(${'$'}id: Int) {
+                Media(id: ${'$'}id, type: ANIME) {
+                    title { english romaji }
+                }
+            }
+        """.trimIndent()
+        val variables = buildJsonObject { put("id", anilistId) }
+        return try {
+            val request = graphQLPost("https://graphql.anilist.co", headers, query, variables = variables)
+            val response = client.newCall(request).awaitSuccess()
+            val data = response.parseGraphQLAs<AniListMediaResponse>()
+            data.Media?.title?.english ?: data.Media?.title?.romaji
+        } catch (_: Exception) {
+            null
+        }
     }
 }
