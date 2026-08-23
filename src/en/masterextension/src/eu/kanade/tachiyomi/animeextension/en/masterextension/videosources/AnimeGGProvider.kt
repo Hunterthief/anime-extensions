@@ -157,8 +157,10 @@ class AnimeGGProvider(
                 return@parallelCatchingFlatMap emptyList()
             }
             
+            // ✅ FIX: Use .set() instead of .add() to OVERWRITE the Master Extension's 
+            // global Referer. Sending multiple Referer headers causes CDNs to throw 500 errors.
             val videoHeaders = headers.newBuilder()
-                .add("Referer", "https://$host/")
+                .set("Referer", "https://$host/")
                 .build()
                 
             videos.map { v ->
