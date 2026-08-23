@@ -19,7 +19,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.Headers
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
 
@@ -42,7 +41,8 @@ class SubspleaseProvider(
 
     private val siteHeaders by lazy {
         headers.newBuilder()
-            .set("Referer", "$BASE_URL/")
+            .set("X-Requested-With", "XMLHttpRequest")
+            .set("Referer", BASE_URL)
             .build()
     }
 
@@ -57,68 +57,69 @@ class SubspleaseProvider(
     }
 
     // =================================================================
-    // STEP 1: Search by title → get show page slug (Now tries multiple titles!)
+    // STEP 1: Search — mirrors source extension EXACTLY
+    // Source: GET("$baseUrl/api/?f=search&tz=Europe/Berlin&s=$query")
+    // No title cleaning, no stripping. Raw query passed directly.
     // =================================================================
     private suspend fun searchShow(titles: List<String>): String? {
         for (title in titles) {
             if (title.isBlank()) continue
-            
-            // Only strip (TV), (Cour 2), etc. Keep punctuation for the API query!
-            val queryTitle = title.replace(Regex("\\s*\\(.*?\\)\\s*"), "").trim()
-            
-            val url = "$BASE_URL/api/".toHttpUrl().newBuilder()
-                .addQueryParameter("f", "search")
-                .addQueryParameter("tz", "Europe/Berlin")
-                .addQueryParameter("s", queryTitle)
-                .build().toString()
+
+            // Mirror source EXACTLY: raw string URL, no cleaning
+            val url = "$BASE_URL/api/?f=search&tz=Europe/Berlin&s=$title"
 
             val body = try {
                 client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
-            } catch (e: Exception) {
-                continue // If this title throws an error, try the next one
+            } catch (_: Exception) {
+                continue
             }
-            
+
             if (body.isBlank() || body.trim() == "[]" || body.trim() == "{}") {
                 continue
             }
-            
+
             val jObject = try {
                 json.decodeFromString<JsonObject>(body)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 continue
             }
-            
+
             if (jObject.isEmpty()) continue
-            
+
+            // Mirror source parsing: jObject.entries → value.jsonObject["show"] / ["page"]
             var bestMatch: String? = null
             var bestScore = -1
 
             for ((_, value) in jObject) {
-                val entry = value.jsonObject
-                val show = entry["show"]?.jsonPrimitive?.content ?: continue
-                val page = entry["page"]?.jsonPrimitive?.content ?: continue
-                
-                // Clean both for scoring comparison only
-                val showClean = show.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
-                val titleClean = queryTitle.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
-                
+                val itJ = value.jsonObject
+                val show = itJ["show"]?.jsonPrimitive?.content ?: continue
+                val page = itJ["page"]?.jsonPrimitive?.content ?: continue
+
+                // Score for auto-matching (source doesn't need this because user picks manually)
+                val showClean = show.lowercase().trim()
+                val titleClean = title.lowercase().trim()
+
                 var score = 0
-                if (showClean == titleClean) score += 100
-                else if (showClean.contains(titleClean)) score += 50
-                else if (titleClean.contains(showClean)) score += 30
-                
+                if (showClean == titleClean) {
+                    score += 1000
+                } else if (showClean.contains(titleClean)) {
+                    score += 500
+                } else if (titleClean.contains(showClean)) {
+                    score += 300
+                }
+
+                // Word overlap
                 val titleWords = titleClean.split(" ").filter { it.length > 2 }
                 val showWords = showClean.split(" ").filter { it.length > 2 }
                 val overlap = titleWords.count { showWords.contains(it) }
-                score += overlap * 10
-                
+                score += overlap * 20
+
                 if (score > bestScore) {
                     bestScore = score
                     bestMatch = page
                 }
             }
-            
-            // If we found a decent match with this title, return it immediately
+
             if (bestMatch != null && bestScore > 0) {
                 return bestMatch
             }
@@ -128,55 +129,59 @@ class SubspleaseProvider(
 
     // =================================================================
     // STEP 2: Fetch show page → extract sid
+    // Mirror source: document.select("#show-release-table").attr("sid")
     // =================================================================
     private suspend fun getShowId(slug: String): String? {
         val url = "$BASE_URL/shows/$slug"
         val html = client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
         val doc = Jsoup.parse(html)
-        val sid = doc.selectFirst("#show-release-table")?.attr("sid")
-        return sid?.takeIf { it.isNotBlank() }
+        val sid = doc.select("#show-release-table").attr("sid")
+        return sid.takeIf { it.isNotBlank() }
     }
 
     // =================================================================
     // STEP 3: Episode API → magnet links
+    // Mirror source: GET("$baseUrl/api/?f=show&tz=Europe/Berlin&sid=$sId")
+    // Then parse jObject["episode"]?.jsonObject?.entries
+    // Match by: if (num != epN) return@mapNotNull null
     // =================================================================
     private suspend fun getMagnets(sid: String, epNum: Int): List<Video> {
         val url = "$BASE_URL/api/?f=show&tz=Europe/Berlin&sid=$sid"
-        
+
         val body = client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
-        
+
         if (body.isBlank() || body.trim() == "[]" || body.trim() == "{}") {
             return emptyList()
         }
 
         val jObject = json.decodeFromString<JsonObject>(body)
-        val episodes = jObject["episode"]?.jsonObject?.entries ?: return emptyList()
+        val epE = jObject["episode"]?.jsonObject?.entries ?: return emptyList()
 
-        val matchedVideos = mutableListOf<Video>()
+        // Mirror source: match by string comparison like the source does
+        // Source: val num = itJ["episode"]?.jsonPrimitive?.content
+        //         if (num != epN) return@mapNotNull null
+        val targetNum = epNum.toString()
 
-        for ((_, value) in episodes) {
-            val epObj = value.jsonObject
-            val epStr = epObj["episode"]?.jsonPrimitive?.content ?: continue
-            
-            val epFloat = epStr.takeWhile { it.isDigit() || it == '.' }.toFloatOrNull() ?: continue
-            
-            if (epFloat == epNum.toFloat()) {
-                val downloads = epObj["downloads"]?.jsonArray ?: continue
-                
-                for (dl in downloads) {
-                    val dlObj = dl.jsonObject
-                    val res = dlObj["res"]?.jsonPrimitive?.content ?: continue
-                    val magnet = dlObj["magnet"]?.jsonPrimitive?.content ?: continue
-                    
-                    if (magnet.startsWith("magnet:")) {
-                        matchedVideos.add(Video(magnet, "$name ${res}p", magnet))
-                    }
-                }
-                break
+        return epE.mapNotNull { (_, value) ->
+            val itJ = value.jsonObject
+            val epN = itJ["episode"]?.jsonPrimitive?.content ?: return@mapNotNull null
+
+            // Match: source uses exact string match (num != epN)
+            // We need to handle "1" matching "1" and "12" matching "12"
+            val epFloat = epN.takeWhile { it.isDigit() || it == '.' }.toFloatOrNull() ?: return@mapNotNull null
+            if (epFloat.toInt() != epNum) return@mapNotNull null
+
+            // Mirror source: itJ["downloads"]?.jsonArray?.mapNotNull
+            itJ["downloads"]?.jsonArray?.mapNotNull inner@{ item ->
+                val quality = item.jsonObject["res"]?.jsonPrimitive?.content?.plus("p") ?: return@inner null
+                val videoUrl = item.jsonObject["magnet"]?.jsonPrimitive?.content ?: return@inner null
+
+                if (!videoUrl.startsWith("magnet:")) return@inner null
+
+                // Mirror source: Video(videoUrl, quality, videoUrl)
+                Video(videoUrl, "$name $quality", videoUrl)
             }
-        }
-        
-        return matchedVideos
+        }.flatten()
     }
 
     // =================================================================
@@ -185,11 +190,11 @@ class SubspleaseProvider(
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
         val titlesToTry = mutableListOf<String>()
-        
+
         anime.title.takeIf { it.isNotBlank() }?.let { titlesToTry.add(it) }
         meta.title.takeIf { it.isNotBlank() && !titlesToTry.contains(it) }?.let { titlesToTry.add(it) }
-        
-        // Fetch both English and Romaji from AniList to maximize search chances
+
+        // Fetch both English and Romaji from AniList
         val aniListTitles = fetchTitlesFromAniList(meta.anilistId)
         for (t in aniListTitles) {
             if (!titlesToTry.contains(t)) titlesToTry.add(t)
@@ -218,7 +223,7 @@ class SubspleaseProvider(
         }
 
         if (videos.isEmpty()) {
-            return debugVideo("no magnets found for sid '$sid' ep ${meta.epNum}")
+            return debugVideo("no magnets for sid '$sid' ep ${meta.epNum}")
         }
 
         return videos
