@@ -27,7 +27,8 @@ import org.jsoup.Jsoup
 class SubspleaseProvider(
     private val client: OkHttpClient,
     private val headers: Headers,
-    private val preferences: SharedPreferences // Added preferences for Debrid support
+    // Added preferences for Debrid support
+    private val preferences: SharedPreferences,
 ) : VideoProvider {
 
     override val name = "Subsplease"
