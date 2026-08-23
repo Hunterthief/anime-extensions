@@ -1,7 +1,12 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
+import android.net.Uri
+import aniyomi.lib.doodextractor.DoodExtractor
+import aniyomi.lib.playlistutils.PlaylistUtils
+import aniyomi.lib.vidhideextractor.VidHideExtractor
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anineko.LocalProxy
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
@@ -9,6 +14,7 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
+import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.useAsJsoup
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -22,16 +28,19 @@ class AniNekoProvider(
     override val name = "AniNeko"
     override val baseUrl = "https://anineko.to"
 
-    companion object {
-        private const val BASE_URL = "https://anineko.to"
-    }
+    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
+    private val localProxy by lazy { LocalProxy(client) }
+    private val doodExtractor by lazy { DoodExtractor(client) }
+    private val vidHideExtractor by lazy { VidHideExtractor(client, headers) }
 
     private val nekoHeaders by lazy {
         headers.newBuilder()
-            .set("Referer", "$BASE_URL/")
+            .set("Referer", "$baseUrl/")
             .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .build()
     }
+
+    private val vibeRegex = Regex("""const src\s*=\s*"([^"]+)"""")
 
     // =================================================================
     // STEP 1: Search → slug
@@ -52,7 +61,7 @@ class AniNekoProvider(
         ).distinct()
 
         for (searchTitle in titlesToTry) {
-            val url = "$BASE_URL/browser".toHttpUrl().newBuilder()
+            val url = "$baseUrl/browser".toHttpUrl().newBuilder()
                 .addQueryParameter("keyword", searchTitle)
                 .build().toString()
 
@@ -73,7 +82,7 @@ class AniNekoProvider(
 
     private suspend fun verifySlug(slug: String): Boolean {
         return try {
-            val response = client.newCall(GET("$BASE_URL/watch/$slug/ep-1", nekoHeaders))
+            val response = client.newCall(GET("$baseUrl/watch/$slug/ep-1", nekoHeaders))
                 .awaitSuccess()
             val success = response.code == 200
             response.close()
@@ -84,18 +93,17 @@ class AniNekoProvider(
     }
 
     // =================================================================
-    // STEP 2: Watch page → extract server URLs (skip vivibebe.site)
+    // STEP 2: Watch page → extract server URLs
     // =================================================================
 
     private data class ServerSource(
         val dataVideo: String,
         val type: String,
         val serverName: String,
-        val subtitleUrl: String?
     )
 
     private suspend fun getServerSources(slug: String, epNum: Int): List<ServerSource> {
-        val watchUrl = "$BASE_URL/watch/$slug/ep-$epNum"
+        val watchUrl = "$baseUrl/watch/$slug/ep-$epNum"
 
         val doc = try {
             client.newCall(GET(watchUrl, nekoHeaders)).awaitSuccess().useAsJsoup()
@@ -104,138 +112,102 @@ class AniNekoProvider(
         }
 
         val sources = mutableListOf<ServerSource>()
+        val buttons = doc.select("button.server-video")
 
-        doc.select("div.nv-server-grid").forEach { grid ->
-            val type = grid.attr("data-id")
+        buttons.forEach { button ->
+            val iframeUrl = button.attr("data-video")
+            if (iframeUrl.isBlank()) return@forEach
 
-            grid.select("button.server-video").forEach { btn ->
-                val dataVideo = btn.attr("data-video")
-                val serverName = btn.text().trim().substringBefore("\n").trim()
-
-                if (dataVideo.isNotBlank()) {
-                    // Skip vivibebe.site — no CORS headers, doesn't play in ExoPlayer
-                    if (dataVideo.contains("vivibebe.site")) return@forEach
-
-                    val subtitleUrl = when {
-                        dataVideo.contains("sub=") ->
-                            dataVideo.substringAfter("sub=").substringBefore("&").ifBlank { null }
-                        dataVideo.contains("caption_1=") ->
-                            dataVideo.substringAfter("caption_1=").substringBefore("&").ifBlank { null }
-                        dataVideo.contains("c1_file=") ->
-                            dataVideo.substringAfter("c1_file=").substringBefore("&").ifBlank { null }
-                        else -> null
-                    }
-
-                    sources.add(ServerSource(dataVideo, type, serverName, subtitleUrl))
-                }
+            val serverName = button.ownText().trim()
+            val rawType = button.selectFirst("span")?.text() ?: ""
+            val versionType = when {
+                rawType.contains("Soft Sub", ignoreCase = true) -> "Soft Sub"
+                rawType.contains("Hard Sub", ignoreCase = true) -> "Hard Sub"
+                rawType.contains("Dub", ignoreCase = true) -> "Dub"
+                else -> rawType.ifBlank { "Video" }
             }
+
+            sources.add(ServerSource(iframeUrl, versionType, serverName))
         }
 
         return sources
     }
 
     // =================================================================
-    // STEP 3: Get m3u8 URL from each server
+    // STEP 3: Extract videos from sources
     // =================================================================
 
-    private suspend fun getM3u8(source: ServerSource): Pair<String, Headers>? {
-        val dataVideo = source.dataVideo
-        val cleanUrl = dataVideo.substringBefore("?")
+    private suspend fun extractVideosFromSource(source: ServerSource): List<Video> {
+        val iframeUrl = source.dataVideo
+        if (iframeUrl.isBlank()) return emptyList()
+
+        val subtitleTracks = mutableListOf<Track>()
+        runCatching {
+            val uri = Uri.parse(iframeUrl)
+            val subUrl = uri.getQueryParameter("sub")
+                ?: uri.getQueryParameter("caption_1")
+                ?: uri.getQueryParameter("c1_file")
+            if (!subUrl.isNullOrBlank()) {
+                val subLabel = uri.getQueryParameter("sub_1")
+                    ?: uri.getQueryParameter("c1_label")
+                    ?: "English"
+                subtitleTracks.add(Track(subUrl, subLabel))
+            }
+        }
 
         return when {
-            // ─── bibiemb.xyz (HD-2): direct construction, workers.dev CDN ───
-            // access-control-allow-origin: *
-            cleanUrl.contains("bibiemb.xyz") -> {
-                val id = cleanUrl.substringAfter("bibiemb.xyz/").trim('/')
-                val m3u8 = "https://morning-credit-3bcc.vibevibe.workers.dev/$id/master.m3u8"
-                val vidHeaders = headers.newBuilder()
-                    .set("Referer", "https://bibiemb.xyz/")
-                    .set("Origin", "https://bibiemb.xyz")
-                    .build()
-                Pair(m3u8, vidHeaders)
+            iframeUrl.contains("vivibebe.site") || iframeUrl.contains("vibevibe.workers.dev") || iframeUrl.contains("bibiemb.xyz") -> {
+                val iframeHtml = client.newCall(GET(iframeUrl, nekoHeaders)).awaitSuccess().bodyString()
+                val m3u8Url = vibeRegex.find(iframeHtml)?.groupValues?.get(1)
+                if (m3u8Url != null) {
+                    val finalM3u8 = if (iframeUrl.contains("bibiemb.xyz")) {
+                        m3u8Url
+                    } else {
+                        localProxy.getProxyUrl(m3u8Url, nekoHeaders)
+                    }
+                    playlistUtils.extractFromHls(
+                        finalM3u8,
+                        referer = iframeUrl,
+                        videoNameGen = { quality -> "${source.serverName} - ${source.type} - $quality" },
+                        subtitleList = subtitleTracks,
+                    )
+                } else {
+                    emptyList()
+                }
             }
 
-            // ─── otakuhg.site (StreamHG): fetch player page → regex m3u8 ───
-            // access-control-allow-origin: https://otakuhg.site
-            cleanUrl.contains("otakuhg.site") -> {
-                val playerHeaders = headers.newBuilder()
-                    .set("Referer", cleanUrl)
-                    .set("Cookie", "lang=1")
-                    .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                    .build()
-
-                val playerBody = try {
-                    client.newCall(GET(cleanUrl, playerHeaders)).awaitSuccess().bodyString()
-                } catch (_: Exception) { return null }
-
-                val m3u8 = Regex("""https?://[^\s"'<>\\]+\.urlset/master\.txt""").find(playerBody)?.value
-                    ?: Regex("""https?://[^\s"'<>\\]+master\.txt""").find(playerBody)?.value
-                    ?: Regex("""["'](https?://[^\s"'<>\\]+\.(?:m3u8|txt)[^\s"'<>\\]*)["']""").find(playerBody)?.groupValues?.get(1)
-                    ?: return null
-
-                val vidHeaders = headers.newBuilder()
-                    .set("Referer", "https://otakuhg.site/")
-                    .set("Origin", "https://otakuhg.site")
-                    .build()
-                Pair(m3u8, vidHeaders)
+            iframeUrl.contains("otakuhg.site") || iframeUrl.contains("otakuvid.online") -> {
+                vidHideExtractor.videosFromUrl(iframeUrl) { quality -> "${source.type} - $quality" }.map { video ->
+                    Video(
+                        url = video.url,
+                        quality = addServerName(source.serverName, video.quality),
+                        videoUrl = video.videoUrl,
+                        headers = video.headers,
+                        subtitleTracks = video.subtitleTracks + subtitleTracks,
+                    )
+                }
             }
 
-            // ─── otakuvid.online (Earnvids): fetch player page → regex m3u8 ───
-            // access-control-allow-origin: https://otakuvid.online
-            cleanUrl.contains("otakuvid.online") -> {
-                val playerHeaders = headers.newBuilder()
-                    .set("Referer", cleanUrl)
-                    .set("Cookie", "lang=1")
-                    .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                    .build()
-
-                val playerBody = try {
-                    client.newCall(GET(cleanUrl, playerHeaders)).awaitSuccess().bodyString()
-                } catch (_: Exception) { return null }
-
-                val m3u8 = Regex("""https?://[^\s"'<>\\]+/master\.m3u8""").find(playerBody)?.value
-                    ?: Regex("""https?://[^\s"'<>\\]+master\.txt""").find(playerBody)?.value
-                    ?: Regex("""["'](https?://[^\s"'<>\\]+\.(?:m3u8|txt)[^\s"'<>\\]*)["']""").find(playerBody)?.groupValues?.get(1)
-                    ?: return null
-
-                val vidHeaders = headers.newBuilder()
-                    .set("Referer", "https://otakuvid.online/")
-                    .set("Origin", "https://otakuvid.online")
-                    .build()
-                Pair(m3u8, vidHeaders)
+            iframeUrl.contains("playmogo.com") || iframeUrl.contains("dood") -> {
+                doodExtractor.videosFromUrl(iframeUrl, quality = source.type).map { video ->
+                    Video(
+                        url = video.url,
+                        quality = addServerName(source.serverName, video.quality),
+                        videoUrl = video.videoUrl,
+                        headers = video.headers,
+                        subtitleTracks = video.subtitleTracks + subtitleTracks,
+                    )
+                }
             }
 
-            else -> null
+            else -> emptyList()
         }
     }
 
-    // =================================================================
-    // STEP 4: Create Video directly with master m3u8
-    // ExoPlayer handles the full HLS chain internally.
-    // =================================================================
-
-    private fun createVideo(
-        m3u8Url: String,
-        vidHeaders: Headers,
-        source: ServerSource
-    ): Video {
-        val typeLabel = when (source.type) {
-            "dub" -> "Dub"
-            "sub" -> "Soft Sub"
-            else -> "Hard Sub"
-        }
-
-        val subtitles = source.subtitleUrl?.let {
-            listOf(Track(it, "English"))
-        }.orEmpty()
-
-        return Video(
-            url = m3u8Url,
-            quality = "$name ${source.serverName} $typeLabel Auto",
-            videoUrl = m3u8Url,
-            headers = vidHeaders,
-            subtitleTracks = subtitles,
-        )
+    private fun addServerName(serverName: String, quality: String): String = if (serverName.isBlank() || quality.startsWith("$serverName - ", ignoreCase = true)) {
+        quality
+    } else {
+        "$serverName - $quality"
     }
 
     // =================================================================
@@ -248,21 +220,11 @@ class AniNekoProvider(
         if (title.isBlank()) return emptyList()
 
         val slug = searchSlug(title) ?: return emptyList()
-
         val sources = getServerSources(slug, meta.epNum)
         if (sources.isEmpty()) return emptyList()
 
-        val allVideos = mutableListOf<Video>()
-
-        for (source in sources) {
-            try {
-                val (m3u8Url, vidHeaders) = getM3u8(source) ?: continue
-                allVideos.add(createVideo(m3u8Url, vidHeaders, source))
-            } catch (_: Exception) {
-                continue
-            }
-        }
-
-        return allVideos.distinctBy { it.videoUrl }
+        return sources.parallelCatchingFlatMap { source ->
+            extractVideosFromSource(source)
+        }.distinctBy { it.videoUrl }
     }
 }
