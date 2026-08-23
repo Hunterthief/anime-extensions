@@ -27,7 +27,6 @@ import org.jsoup.Jsoup
 class SubspleaseProvider(
     private val client: OkHttpClient,
     private val headers: Headers,
-    // Added preferences for Debrid support
     private val preferences: SharedPreferences,
 ) : VideoProvider {
 
@@ -59,66 +58,87 @@ class SubspleaseProvider(
     // =================================================================
     // STEP 1: Search by title → get show page slug
     // =================================================================
-    private suspend fun searchShow(titles: List<String>): String? {
+    private suspend fun searchShow(titles: List<String>): Pair<String?, String> {
+        val debugMessages = mutableListOf<String>()
         for (title in titles) {
             if (title.isBlank()) continue
             
-            val queryTitle = title.replace(Regex("\\s*\\(.*?\\)\\s*"), "").trim()
+            // Try both the raw title and a cleaned version (without parentheses/years)
+            val queries = listOf(
+                title.trim(),
+                title.replace(Regex("\\s*\\(.*?\\)\\s*"), "").trim()
+            ).filter { it.isNotBlank() }.distinct()
             
-            val url = "$baseUrl/api/".toHttpUrl().newBuilder()
-                .addQueryParameter("f", "search")
-                .addQueryParameter("tz", "Europe/Berlin")
-                .addQueryParameter("s", queryTitle)
-                .build().toString()
+            for (queryTitle in queries) {
+                // FIX: Removed trailing slash from /api/ to match official extension exactly
+                val url = "$baseUrl/api".toHttpUrl().newBuilder()
+                    .addQueryParameter("f", "search")
+                    .addQueryParameter("tz", "Europe/Berlin")
+                    .addQueryParameter("s", queryTitle)
+                    .build().toString()
 
-            val body = try {
-                client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
-            } catch (e: Exception) {
-                continue 
-            }
-            
-            if (body.isBlank() || body.trim() == "[]" || body.trim() == "{}") continue
-            
-            val jObject = try {
-                json.decodeFromString<JsonObject>(body)
-            } catch (e: Exception) {
-                continue
-            }
-            
-            if (jObject.isEmpty()) continue
-            
-            var bestMatch: String? = null
-            var bestScore = -1
+                val body = try {
+                    client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
+                } catch (e: Exception) {
+                    debugMessages.add("HTTP Error for '$queryTitle': ${e.message}")
+                    continue 
+                }
+                
+                if (body.isBlank() || body.trim() == "[]" || body.trim() == "{}") {
+                    debugMessages.add("Empty response for '$queryTitle'")
+                    continue
+                }
+                
+                val jObject = try {
+                    json.decodeFromString<JsonObject>(body)
+                } catch (e: Exception) {
+                    debugMessages.add("JSON parse error: ${e.message}. Body: ${body.take(100)}")
+                    continue
+                }
+                
+                if (jObject.isEmpty()) {
+                    debugMessages.add("JSON object empty for '$queryTitle'")
+                    continue
+                }
+                
+                var bestMatch: String? = null
+                var bestScore = -1
+                var bestShowName = ""
 
-            for ((_, value) in jObject) {
-                val entry = value.jsonObject
-                val show = entry["show"]?.jsonPrimitive?.content ?: continue
-                val page = entry["page"]?.jsonPrimitive?.content ?: continue
+                for ((_, value) in jObject) {
+                    val entry = value.jsonObject
+                    val show = entry["show"]?.jsonPrimitive?.content ?: continue
+                    val page = entry["page"]?.jsonPrimitive?.content ?: continue
+                    
+                    val showClean = show.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
+                    val titleClean = queryTitle.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
+                    
+                    var score = 0
+                    if (showClean == titleClean) score += 100
+                    else if (showClean.contains(titleClean)) score += 50
+                    else if (titleClean.contains(showClean)) score += 30
+                    
+                    val titleWords = titleClean.split(" ").filter { it.length > 2 }
+                    val showWords = showClean.split(" ").filter { it.length > 2 }
+                    val overlap = titleWords.count { showWords.contains(it) }
+                    score += overlap * 10
+                    
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestMatch = page
+                        bestShowName = show
+                    }
+                }
                 
-                val showClean = show.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
-                val titleClean = queryTitle.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
-                
-                var score = 0
-                if (showClean == titleClean) score += 100
-                else if (showClean.contains(titleClean)) score += 50
-                else if (titleClean.contains(showClean)) score += 30
-                
-                val titleWords = titleClean.split(" ").filter { it.length > 2 }
-                val showWords = showClean.split(" ").filter { it.length > 2 }
-                val overlap = titleWords.count { showWords.contains(it) }
-                score += overlap * 10
-                
-                if (score > bestScore) {
-                    bestScore = score
-                    bestMatch = page
+                if (bestMatch != null && bestScore > 0) {
+                    return Pair(bestMatch, "Success")
+                } else {
+                    // Capture the raw body so we can see EXACTLY what the API returned
+                    debugMessages.add("No match for '$queryTitle'. Best: '$bestShowName' (score: $bestScore). Body: ${body.take(150)}")
                 }
             }
-            
-            if (bestMatch != null && bestScore > 0) {
-                return bestMatch
-            }
         }
-        return null
+        return Pair(null, debugMessages.joinToString(" | "))
     }
 
     // =================================================================
@@ -151,7 +171,6 @@ class SubspleaseProvider(
             val epObj = value.jsonObject
             val epStr = epObj["episode"]?.jsonPrimitive?.content ?: continue
             
-            // Match exact string or float equivalent (handles "12" vs "12.0")
             if (epStr != targetEpStr && epStr.takeWhile { it.isDigit() || it == '.' }.toFloatOrNull() != epNum.toFloat()) {
                 continue
             }
@@ -166,26 +185,24 @@ class SubspleaseProvider(
                 if (magnet.startsWith("magnet:")) {
                     val quality = "${res}p"
                     
-                    // Check if Debrid is configured in MasterExtension preferences
                     val debridProvider = preferences.getString("subsplease_debrid_provider", "none") ?: "none"
                     val token = preferences.getString("subsplease_token", "") ?: ""
                     
                     val videoUrl = if (debridProvider != "none" && token.isNotBlank()) {
                         debrid(magnet, token, debridProvider)
                     } else {
-                        magnet // Fallback to raw magnet (requires external torrent player)
+                        magnet 
                     }
                     
                     matchedVideos.add(Video(videoUrl, "$name - $quality", videoUrl))
                 }
             }
-            break // Found the episode, stop searching
+            break 
         }
         
         return matchedVideos
     }
 
-    // Mirrors the official extension's Torrentio Debrid resolution
     private fun debrid(magnet: String, token: String, debridProvider: String): String {
         val regex = Regex("xt=urn:btih:([A-Fa-f0-9]{40}|[A-Za-z0-9]{32})|dn=([^&]+)")
         var infohash = ""
@@ -216,11 +233,16 @@ class SubspleaseProvider(
             return debugVideo("Title blank (AL: ${meta.anilistId})")
         }
 
-        val slug = try {
+        val (slug, searchDebug) = try {
             searchShow(titlesToTry)
         } catch (e: Exception) {
             return debugVideo("search threw: ${e.message}")
-        } ?: return debugVideo("search null for '${titlesToTry.joinToString(" / ")}'")
+        }
+        
+        if (slug == null) {
+            // THIS WILL NOW SHOW YOU EXACTLY WHY IT FAILED
+            return debugVideo("search null. Debug: $searchDebug")
+        }
 
         val sid = try {
             getShowId(slug)
@@ -238,7 +260,6 @@ class SubspleaseProvider(
             return debugVideo("no magnets found for sid '$sid' ep ${meta.epNum}")
         }
 
-        // Sort by preferred quality (mirrors official extension)
         val preferredQuality = preferences.getString("preferred_quality", "1080") ?: "1080"
         return videos.sortedByDescending { it.quality.contains(preferredQuality) }
     }
