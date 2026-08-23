@@ -8,11 +8,16 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
+import keiyoushi.utils.graphQLPost
+import keiyoushi.utils.parseGraphQLAs
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -65,31 +70,50 @@ class SubspleaseProvider(
     // STEP 1: Search by title → get show page slug
     // =================================================================
     private suspend fun searchShow(title: String): String? {
+        // Clean the title to match Subsplease's database format (removes punctuation and "(TV)")
+        val cleanTitle = title.replace(Regex("\\s*\\(.*?\\)\\s*"), "")
+            .replace(Regex("[^a-zA-Z0-9\\s]"), "")
+            .trim()
+
         val url = "$BASE_URL/api/".toHttpUrl().newBuilder()
             .addQueryParameter("f", "search")
             .addQueryParameter("tz", "Europe/Berlin")
-            .addQueryParameter("s", title)
+            .addQueryParameter("s", cleanTitle)
             .build().toString()
 
         val body = client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
         val jObject = json.decodeFromString<JsonObject>(body)
         
+        var bestMatch: String? = null
+        var bestScore = -1
+
         for ((_, value) in jObject) {
             val entry = value.jsonObject
             val show = entry["show"]?.jsonPrimitive?.content ?: continue
             val page = entry["page"]?.jsonPrimitive?.content ?: continue
             
-            // Match by title (case-insensitive)
-            if (show.equals(title, ignoreCase = true) ||
-                title.contains(show, ignoreCase = true) ||
-                show.contains(title, ignoreCase = true)
-            ) {
-                return page
+            val showClean = show.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
+            val titleClean = cleanTitle.lowercase()
+            
+            var score = 0
+            if (showClean == titleClean) score += 100
+            else if (showClean.contains(titleClean)) score += 50
+            else if (titleClean.contains(showClean)) score += 30
+            
+            // Word overlap bonus
+            val titleWords = titleClean.split(" ").filter { it.length > 2 }
+            val showWords = showClean.split(" ").filter { it.length > 2 }
+            val overlap = titleWords.count { showWords.contains(it) }
+            score += overlap * 10
+            
+            if (score > bestScore) {
+                bestScore = score
+                bestMatch = page
             }
         }
         
-        // Fallback: return first result
-        return jObject.values.firstOrNull()?.jsonObject?.get("page")?.jsonPrimitive?.content
+        // Fallback: return first result if scoring somehow fails
+        return bestMatch ?: jObject.values.firstOrNull()?.jsonObject?.get("page")?.jsonPrimitive?.content
     }
 
     // =================================================================
@@ -107,30 +131,24 @@ class SubspleaseProvider(
     // STEP 3: Episode API → magnet links
     // =================================================================
     private suspend fun getMagnets(sid: String, epNum: Int): List<Video> {
-        // FIX: Exact URL pattern from the original working extension. 
-        // Do NOT pass "num" to the API. The API returns the full list, we filter locally.
         val url = "$BASE_URL/api/?f=show&tz=Europe/Berlin&sid=$sid"
         
         val body = client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
         val jObject = json.decodeFromString<JsonObject>(body)
         val episodes = jObject["episode"]?.jsonObject?.entries ?: return emptyList()
 
-        var bestMatchVideos = emptyList<Video>()
-        var isExactMatch = false
+        val matchedVideos = mutableListOf<Video>()
 
         for ((_, value) in episodes) {
             val epObj = value.jsonObject
             val epStr = epObj["episode"]?.jsonPrimitive?.content ?: continue
             
-            val epFloat = epStr.toFloatOrNull() ?: continue
-            val isCurrentExact = (epFloat == epNum.toFloat())
+            // Safely parse episode number, handling strings like "12.5" or "12v2"
+            val epFloat = epStr.takeWhile { it.isDigit() || it == '.' }.toFloatOrNull() ?: continue
             
-            // If we already found an exact match, skip non-exact matches (e.g., skip "1.5" if we want "1")
-            if (isExactMatch && !isCurrentExact) continue
-            
-            if (epFloat.toInt() == epNum) {
+            // Strict float comparison to prevent "12.5" from matching episode "12"
+            if (epFloat == epNum.toFloat()) {
                 val downloads = epObj["downloads"]?.jsonArray ?: continue
-                val currentVideos = mutableListOf<Video>()
                 
                 for (dl in downloads) {
                     val dlObj = dl.jsonObject
@@ -138,19 +156,14 @@ class SubspleaseProvider(
                     val magnet = dlObj["magnet"]?.jsonPrimitive?.content ?: continue
                     
                     if (magnet.startsWith("magnet:")) {
-                        currentVideos.add(Video(magnet, "$name ${res}p", magnet))
+                        matchedVideos.add(Video(magnet, "$name ${res}p", magnet))
                     }
                 }
-                
-                if (currentVideos.isNotEmpty()) {
-                    bestMatchVideos = currentVideos
-                    isExactMatch = isCurrentExact
-                    if (isExactMatch) break // Found exact match, no need to look further
-                }
+                break // Found the exact episode, no need to continue
             }
         }
         
-        return bestMatchVideos
+        return matchedVideos
     }
 
     // =================================================================
@@ -158,8 +171,12 @@ class SubspleaseProvider(
     // =================================================================
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
-        val title = anime.title.ifBlank { meta.title }
-        if (title.isBlank()) return debugVideo("title is blank")
+        var title = anime.title.ifBlank { meta.title }
+        
+        // Fallback to AniList if the title is somehow blank
+        if (title.isBlank()) {
+            title = fetchTitleFromAniList(meta.anilistId) ?: return debugVideo("Title blank (AL: ${meta.anilistId})")
+        }
 
         val slug = try {
             searchShow(title)
@@ -184,5 +201,29 @@ class SubspleaseProvider(
         }
 
         return videos
+    }
+
+    // ==================== AniList Title Fetcher ====================
+    @Serializable private data class AniListMediaResponse(val Media: AniListMediaFull? = null)
+    @Serializable private data class AniListMediaFull(val title: AniListTitlesFull? = null)
+    @Serializable private data class AniListTitlesFull(val english: String? = null, val romaji: String? = null)
+
+    private suspend fun fetchTitleFromAniList(anilistId: Int): String? {
+        val query = """
+            query(${'$'}id: Int) {
+                Media(id: ${'$'}id, type: ANIME) {
+                    title { english romaji }
+                }
+            }
+        """.trimIndent()
+        val variables = buildJsonObject { put("id", anilistId) }
+        return try {
+            val request = graphQLPost("https://graphql.anilist.co", headers, query, variables = variables)
+            val response = client.newCall(request).awaitSuccess()
+            val data = response.parseGraphQLAs<AniListMediaResponse>()
+            data.Media?.title?.english ?: data.Media?.title?.romaji
+        } catch (_: Exception) {
+            null
+        }
     }
 }
