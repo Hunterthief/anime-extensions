@@ -34,6 +34,7 @@ dependencies {
     implementation(project(':lib:filemoonextractor'))
     implementation(project(':lib:m3u8server'))
     implementation(project(':lib-multisrc:anikototheme'))
+    implementation(project(':lib:vidhideextractor'))
     
     // 🎯 Single NanoHTTPD version that works for everything now!
     implementation("com.github.komikku-app.nanohttpd:nanohttpd:gradle-upgrade-SNAPSHOT")
