@@ -82,6 +82,13 @@ class SubspleaseProvider(
             .build().toString()
 
         val body = client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
+        
+        // 🛡️ FIX: Subsplease API returns an empty JSON array "[]" when no results are found,
+        // which crashes the JsonObject parser. Handle it gracefully.
+        if (body.isBlank() || body.trim() == "[]" || body.trim() == "{}") {
+            return null
+        }
+        
         val jObject = json.decodeFromString<JsonObject>(body)
         
         var bestMatch: String? = null
@@ -134,6 +141,12 @@ class SubspleaseProvider(
         val url = "$BASE_URL/api/?f=show&tz=Europe/Berlin&sid=$sid"
         
         val body = client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
+        
+        // 🛡️ Safety check for empty responses
+        if (body.isBlank() || body.trim() == "[]" || body.trim() == "{}") {
+            return emptyList()
+        }
+
         val jObject = json.decodeFromString<JsonObject>(body)
         val episodes = jObject["episode"]?.jsonObject?.entries ?: return emptyList()
 
