@@ -15,8 +15,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.Headers
@@ -63,14 +63,12 @@ class SubspleaseProvider(
         for (title in titles) {
             if (title.isBlank()) continue
             
-            // Try both the raw title and a cleaned version (without parentheses/years)
             val queries = listOf(
                 title.trim(),
                 title.replace(Regex("\\s*\\(.*?\\)\\s*"), "").trim()
             ).filter { it.isNotBlank() }.distinct()
             
             for (queryTitle in queries) {
-                // FIX: Removed trailing slash from /api/ to match official extension exactly
                 val url = "$baseUrl/api".toHttpUrl().newBuilder()
                     .addQueryParameter("f", "search")
                     .addQueryParameter("tz", "Europe/Berlin")
@@ -106,9 +104,9 @@ class SubspleaseProvider(
                 var bestShowName = ""
 
                 for ((_, value) in jObject) {
-                    val entry = value.jsonObject
-                    val show = entry["show"]?.jsonPrimitive?.content ?: continue
-                    val page = entry["page"]?.jsonPrimitive?.content ?: continue
+                    val entry = value as? JsonObject ?: continue
+                    val show = entry["show"]?.jsonPrimitive?.contentOrNull ?: continue
+                    val page = entry["page"]?.jsonPrimitive?.contentOrNull ?: continue
                     
                     val showClean = show.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
                     val titleClean = queryTitle.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
@@ -133,8 +131,7 @@ class SubspleaseProvider(
                 if (bestMatch != null && bestScore > 0) {
                     return Pair(bestMatch, "Success")
                 } else {
-                    // Capture the raw body so we can see EXACTLY what the API returned
-                    debugMessages.add("No match for '$queryTitle'. Best: '$bestShowName' (score: $bestScore). Body: ${body.take(150)}")
+                    debugMessages.add("No match for '$queryTitle'. Best: '$bestShowName' (score: $bestScore).")
                 }
             }
         }
@@ -161,26 +158,33 @@ class SubspleaseProvider(
         
         if (body.isBlank() || body.trim() == "[]" || body.trim() == "{}") return emptyList()
 
-        val jObject = json.decodeFromString<JsonObject>(body)
-        val episodes = jObject["episode"]?.jsonObject?.entries ?: return emptyList()
+        val jObject = try {
+            json.decodeFromString<JsonObject>(body)
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        
+        val episodesObj = jObject["episode"] as? JsonObject ?: return emptyList()
+        val episodes = episodesObj.entries
 
         val matchedVideos = mutableListOf<Video>()
         val targetEpStr = epNum.toString()
 
         for ((_, value) in episodes) {
-            val epObj = value.jsonObject
-            val epStr = epObj["episode"]?.jsonPrimitive?.content ?: continue
+            val epObj = value as? JsonObject ?: continue
+            val epStr = epObj["episode"]?.jsonPrimitive?.contentOrNull ?: continue
             
-            if (epStr != targetEpStr && epStr.takeWhile { it.isDigit() || it == '.' }.toFloatOrNull() != epNum.toFloat()) {
+            val epFloat = epStr.takeWhile { it.isDigit() || it == '.' }.toFloatOrNull()
+            if (epStr != targetEpStr && epFloat != epNum.toFloat()) {
                 continue
             }
             
             val downloads = epObj["downloads"]?.jsonArray ?: continue
             
             for (dl in downloads) {
-                val dlObj = dl.jsonObject
-                val res = dlObj["res"]?.jsonPrimitive?.content ?: continue
-                val magnet = dlObj["magnet"]?.jsonPrimitive?.content ?: continue
+                val dlObj = dl as? JsonObject ?: continue
+                val res = dlObj["res"]?.jsonPrimitive?.contentOrNull ?: continue
+                val magnet = dlObj["magnet"]?.jsonPrimitive?.contentOrNull ?: continue
                 
                 if (magnet.startsWith("magnet:")) {
                     val quality = "${res}p"
@@ -240,7 +244,6 @@ class SubspleaseProvider(
         }
         
         if (slug == null) {
-            // THIS WILL NOW SHOW YOU EXACTLY WHY IT FAILED
             return debugVideo("search null. Debug: $searchDebug")
         }
 
