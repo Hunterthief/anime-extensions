@@ -28,6 +28,7 @@ import java.net.URLEncoder
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
+import androidx.preference.EditTextPreference
 
 class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
@@ -445,6 +446,24 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
             title = "AnimePahe: Use HLS Links"
             summary = "Enable if you are having Cloudflare playback issues."
             setDefaultValue(true)
+        }.also { screen.addPreference(it) }
+        
+        // --- Subsplease Debrid Provider ---
+        ListPreference(screen.context).apply {
+            key = "subsplease_debrid_provider"
+            title = "Subsplease: Debrid Provider"
+            entries = arrayOf("None", "RealDebrid", "Premiumize", "AllDebrid", "DebridLink", "Offcloud", "TorBox")
+            entryValues = arrayOf("none", "realdebrid", "premiumize", "alldebrid", "debridlink", "offcloud", "torbox")
+            summary = "Select a Debrid service to resolve magnet links.\n%s"
+            setDefaultValue("none")
+        }.also { screen.addPreference(it) }
+
+        // --- Subsplease Token ---
+        EditTextPreference(screen.context).apply {
+            key = "subsplease_token"
+            title = "Subsplease: Debrid API Token"
+            summary = "Enter your API token for the selected Debrid service."
+            setDefaultValue("")
         }.also { screen.addPreference(it) }
     }
 
