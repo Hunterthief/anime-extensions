@@ -60,79 +60,107 @@ class SubspleaseProvider(
     // =================================================================
     private suspend fun searchShow(titles: List<String>): Pair<String?, String> {
         val debugMessages = mutableListOf<String>()
+        val allQueries = mutableSetOf<String>()
+        
+        // Generate smart query variations for all provided titles
         for (title in titles) {
             if (title.isBlank()) continue
+            val cleanTitle = title.trim()
+            allQueries.add(cleanTitle)
             
-            val queries = listOf(
-                title.trim(),
-                title.replace(Regex("\\s*\\(.*?\\)\\s*"), "").trim()
-            ).filter { it.isNotBlank() }.distinct()
+            // 1. Remove subtitle (everything after :, -, ~)
+            val baseTitle = cleanTitle.split(Regex("[:\\-–~]")).first().trim()
+            if (baseTitle.isNotBlank()) allQueries.add(baseTitle)
             
-            for (queryTitle in queries) {
-                val url = "$baseUrl/api".toHttpUrl().newBuilder()
-                    .addQueryParameter("f", "search")
-                    .addQueryParameter("tz", "Europe/Berlin")
-                    .addQueryParameter("s", queryTitle)
-                    .build().toString()
+            // 2. Remove all punctuation
+            val noPunct = cleanTitle.replace(Regex("[^a-zA-Z0-9\\s]"), "").trim()
+            if (noPunct.isNotBlank()) allQueries.add(noPunct)
+            
+            // 3. Base title without punctuation
+            val baseNoPunct = baseTitle.replace(Regex("[^a-zA-Z0-9\\s]"), "").trim()
+            if (baseNoPunct.isNotBlank()) allQueries.add(baseNoPunct)
+            
+            // 4. First few significant words (Subsplease search struggles with very long queries)
+            val words = baseNoPunct.split(" ").filter { it.length > 2 }
+            if (words.isNotEmpty()) {
+                allQueries.add(words.take(4).joinToString(" "))
+                if (words.size > 4) {
+                    allQueries.add(words.take(3).joinToString(" "))
+                }
+            }
+        }
+        
+        val queries = allQueries.filter { it.isNotBlank() }.distinct()
+        
+        for (queryTitle in queries) {
+            val url = "$baseUrl/api".toHttpUrl().newBuilder()
+                .addQueryParameter("f", "search")
+                .addQueryParameter("tz", "Europe/Berlin")
+                .addQueryParameter("s", queryTitle)
+                .build().toString()
 
-                val body = try {
-                    client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
-                } catch (e: Exception) {
-                    debugMessages.add("HTTP Error for '$queryTitle': ${e.message}")
-                    continue 
-                }
-                
-                if (body.isBlank() || body.trim() == "[]" || body.trim() == "{}") {
-                    debugMessages.add("Empty response for '$queryTitle'")
+            val body = try {
+                client.newCall(GET(url, siteHeaders)).awaitSuccess().bodyString()
+            } catch (e: Exception) {
+                debugMessages.add("HTTP Error for '$queryTitle': ${e.message}")
+                continue 
+            }
+            
+            if (body.isBlank() || body.trim() == "[]" || body.trim() == "{}" || body.trim() == "null") {
+                debugMessages.add("Empty response for '$queryTitle'")
+                continue
+            }
+            
+            val jObject = try {
+                if (body.trim().startsWith("[")) {
+                    debugMessages.add("Array response for '$queryTitle'")
                     continue
                 }
-                
-                val jObject = try {
-                    json.decodeFromString<JsonObject>(body)
-                } catch (e: Exception) {
-                    debugMessages.add("JSON parse error: ${e.message}. Body: ${body.take(100)}")
-                    continue
-                }
-                
-                if (jObject.isEmpty()) {
-                    debugMessages.add("JSON object empty for '$queryTitle'")
-                    continue
-                }
-                
-                var bestMatch: String? = null
-                var bestScore = -1
-                var bestShowName = ""
+                json.decodeFromString<JsonObject>(body)
+            } catch (e: Exception) {
+                debugMessages.add("JSON parse error for '$queryTitle': ${e.message}. Body: ${body.take(50)}")
+                continue
+            }
+            
+            if (jObject.isEmpty()) {
+                debugMessages.add("JSON object empty for '$queryTitle'")
+                continue
+            }
+            
+            var bestMatch: String? = null
+            var bestScore = -1
+            var bestShowName = ""
 
-                for ((_, value) in jObject) {
-                    val entry = value as? JsonObject ?: continue
-                    val show = entry["show"]?.jsonPrimitive?.contentOrNull ?: continue
-                    val page = entry["page"]?.jsonPrimitive?.contentOrNull ?: continue
-                    
-                    val showClean = show.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
-                    val titleClean = queryTitle.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
-                    
-                    var score = 0
-                    if (showClean == titleClean) score += 100
-                    else if (showClean.contains(titleClean)) score += 50
-                    else if (titleClean.contains(showClean)) score += 30
-                    
-                    val titleWords = titleClean.split(" ").filter { it.length > 2 }
-                    val showWords = showClean.split(" ").filter { it.length > 2 }
-                    val overlap = titleWords.count { showWords.contains(it) }
-                    score += overlap * 10
-                    
-                    if (score > bestScore) {
-                        bestScore = score
-                        bestMatch = page
-                        bestShowName = show
-                    }
-                }
+            for ((_, value) in jObject) {
+                val entry = value as? JsonObject ?: continue
+                val show = entry["show"]?.jsonPrimitive?.contentOrNull ?: continue
+                val page = entry["page"]?.jsonPrimitive?.contentOrNull ?: continue
                 
-                if (bestMatch != null && bestScore > 0) {
-                    return Pair(bestMatch, "Success")
-                } else {
-                    debugMessages.add("No match for '$queryTitle'. Best: '$bestShowName' (score: $bestScore).")
+                val showClean = show.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
+                val titleClean = queryTitle.replace(Regex("[^a-zA-Z0-9\\s]"), "").lowercase()
+                
+                var score = 0
+                if (showClean == titleClean) score += 100
+                else if (showClean.contains(titleClean)) score += 50
+                else if (titleClean.contains(showClean)) score += 30
+                
+                val titleWords = titleClean.split(" ").filter { it.length > 2 }
+                val showWords = showClean.split(" ").filter { it.length > 2 }
+                val overlap = titleWords.count { showWords.contains(it) }
+                score += overlap * 10
+                
+                if (score > bestScore) {
+                    bestScore = score
+                    bestMatch = page
+                    bestShowName = show
                 }
+            }
+            
+            // Lowered threshold slightly to 30 to catch strong partial matches
+            if (bestMatch != null && bestScore >= 30) {
+                return Pair(bestMatch, "Success with '$queryTitle' (Matched: $bestShowName)")
+            } else {
+                debugMessages.add("No good match for '$queryTitle'. Best: '$bestShowName' (score: $bestScore).")
             }
         }
         return Pair(null, debugMessages.joinToString(" | "))
