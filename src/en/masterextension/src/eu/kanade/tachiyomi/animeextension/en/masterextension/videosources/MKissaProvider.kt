@@ -83,6 +83,33 @@ class MKissaProvider(
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
 
+    // ==================== Smart Matching Helpers ====================
+    private fun String.normalize(): String {
+        return this.lowercase()
+            .trim()
+            .replace(Regex("[^a-z0-9\\s]"), "") // Remove all punctuation
+            .replace(Regex("\\s+"), " ")        // Collapse multiple spaces into one
+    }
+
+    private val seasonNumberRegex = Regex(
+        """(?:season|part)\s*(\d+)|(\d+)(?:st|nd|rd|th)\s*(?:season|part)""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private fun extractSeasonNumber(text: String): Int? {
+        val match = seasonNumberRegex.find(text) ?: return null
+        val numStr = match.groupValues[1].ifEmpty { match.groupValues[2] }
+        return numStr.toIntOrNull()
+    }
+
+    private fun stripSeasonInfo(title: String): String {
+        return title
+            .replace(Regex("""\s*[-:]\s*(?:season|part)\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*(?:season|part)\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*\d+(?:st|nd|rd|th)\s*(?:season|part).*$""", RegexOption.IGNORE_CASE), "")
+            .trim()
+    }
+
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         return try {
             val meta = EpisodeMeta.from(episode)
@@ -106,6 +133,8 @@ class MKissaProvider(
     private suspend fun findShowId(anilistId: Int, title: String): String? {
         showIdCache[anilistId]?.let { return it }
 
+        if (title.isBlank()) return null
+
         val data = buildJsonObject {
             putJsonObject("variables") {
                 putJsonObject("search") {
@@ -128,27 +157,63 @@ class MKissaProvider(
         val edges = result.data.shows.edges
         if (edges.isEmpty()) return null
 
-        val titleLower = title.lowercase().trim()
+        val requestedTitleLower = title.lowercase().trim()
+        val cleanRequested = requestedTitleLower.normalize()
+        val querySeason = extractSeasonNumber(requestedTitleLower)
+        val baseTitle = stripSeasonInfo(requestedTitleLower).normalize()
 
-        val best = edges.firstOrNull { edge ->
-            listOfNotNull(edge.name, edge.englishName, edge.nativeName)
-                .any { it.lowercase().trim() == titleLower }
-        }
-            ?: edges.minByOrNull { edge ->
-                listOfNotNull(edge.name, edge.englishName, edge.nativeName)
-                    .minOf { name ->
-                        val n = name.lowercase().trim()
-                        when {
-                            n.startsWith(titleLower) -> n.length
-                            titleLower.startsWith(n) -> n.length + 1000
-                            n.contains(titleLower) -> n.length + 2000
-                            else -> Int.MAX_VALUE
-                        }
+        val scoredResults = edges.map { edge ->
+            val names = listOfNotNull(edge.name, edge.englishName, edge.nativeName)
+            var maxScore = 0
+            
+            for (name in names) {
+                val resTitleLower = name.lowercase().trim()
+                val cleanRes = resTitleLower.normalize()
+                val resSeason = extractSeasonNumber(resTitleLower)
+                val resBase = stripSeasonInfo(resTitleLower).normalize()
+                var score = 0
+
+                // 1. Exact normalized match (ignores punctuation/capitalization)
+                if (cleanRes == cleanRequested) {
+                    score += 1000
+                }
+                // 2. Contains match
+                else if (cleanRes.contains(cleanRequested)) {
+                    score += 800
+                }
+                // 3. Reverse contains match
+                else if (cleanRequested.contains(cleanRes)) {
+                    score += 600
+                }
+                // 4. Base title match (handles "Title Season 2" vs "Title")
+                else if (resBase == baseTitle) {
+                    score += 500
+                    if (querySeason != null && resSeason == querySeason) {
+                        score += 100 // Bonus for matching the correct season
+                    } else if (querySeason != null && resSeason != null) {
+                        score -= 50 // Penalty for matching the WRONG season
                     }
-            }
-            ?: edges.firstOrNull()
+                }
 
-        val showId = best?.id ?: return null
+                // 5. Word overlap bonus (gives points for sharing key words)
+                val reqWords = cleanRequested.split(" ").filter { it.length > 2 }
+                val resWords = cleanRes.split(" ").filter { it.length > 2 }
+                val matchingWords = reqWords.count { reqWord ->
+                    resWords.any { resWord -> resWord.contains(reqWord) || reqWord.contains(resWord) }
+                }
+                score += matchingWords * 20
+                
+                if (score > maxScore) maxScore = score
+            }
+            
+            Pair(edge, maxScore)
+        }
+
+        // Filter out completely unrelated results (score <= 0 means no meaningful overlap)
+        val validMatches = scoredResults.filter { it.second > 0 }
+        val bestMatch = validMatches.maxByOrNull { it.second }?.first
+
+        val showId = bestMatch?.id ?: return null
         showIdCache[anilistId] = showId
         return showId
     }
