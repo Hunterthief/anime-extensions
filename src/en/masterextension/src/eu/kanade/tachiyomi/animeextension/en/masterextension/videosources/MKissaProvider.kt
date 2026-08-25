@@ -29,10 +29,13 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
+import keiyoushi.utils.graphQLPost
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.parseGraphQLAs
 import keiyoushi.utils.toJsonBody
 import keiyoushi.utils.toJsonString
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
@@ -114,7 +117,30 @@ class MKissaProvider(
         return try {
             val meta = EpisodeMeta.from(episode)
 
-            val showId = findShowId(meta.anilistId, anime.title) ?: return emptyList()
+            // Check cache first to avoid unnecessary AniList API calls
+            var showId = showIdCache[meta.anilistId]
+
+            if (showId == null) {
+                // Fetch both Romaji and English titles from AniList to ensure best match on MKissa
+                val (romajiTitle, englishTitle) = fetchTitlesFromAniList(meta.anilistId)
+                
+                // 1. Try Romaji first (MKissa heavily favors Romaji titles)
+                if (!romajiTitle.isNullOrBlank()) {
+                    showId = findShowId(meta.anilistId, romajiTitle)
+                }
+                
+                // 2. Fallback to English
+                if (showId == null && !englishTitle.isNullOrBlank()) {
+                    showId = findShowId(meta.anilistId, englishTitle)
+                }
+                
+                // 3. Fallback to the original title passed by the master extension
+                if (showId == null && anime.title.isNotBlank()) {
+                    showId = findShowId(meta.anilistId, anime.title)
+                }
+            }
+
+            if (showId == null) return emptyList()
 
             val translationType = resolveTranslationType()
             val episodeString = findEpisodeString(showId, meta.epNum, translationType)
@@ -473,6 +499,30 @@ class MKissaProvider(
         val sourceName: String,
         val priority: Float,
     )
+
+    // ==================== AniList Title Fetcher ====================
+    @Serializable private data class AniListMediaResponse(val Media: AniListMediaFull? = null)
+    @Serializable private data class AniListMediaFull(val title: AniListTitlesFull? = null)
+    @Serializable private data class AniListTitlesFull(val english: String? = null, val romaji: String? = null)
+
+    private suspend fun fetchTitlesFromAniList(anilistId: Int): Pair<String?, String?> {
+        val query = """
+            query(${'$'}id: Int) {
+                Media(id: ${'$'}id, type: ANIME) {
+                    title { english romaji }
+                }
+            }
+        """.trimIndent()
+        val variables = buildJsonObject { put("id", anilistId) }
+        return try {
+            val request = graphQLPost("https://graphql.anilist.co", headers, query, variables = variables)
+            val response = client.newCall(request).awaitSuccess()
+            val data = response.parseGraphQLAs<AniListMediaResponse>()
+            Pair(data.Media?.title?.romaji, data.Media?.title?.english)
+        } catch (_: Exception) {
+            Pair(null, null)
+        }
+    }
 
     companion object {
         private const val GRAPHQL_ORIGIN = "https://youtu-chan.com"
