@@ -625,7 +625,7 @@ class MKissaKeyManager(
         val appUrl = entryUrlFromSite()?.toHttpUrl() ?: return null
 
         val appJs = runCatching {
-            client.newCall(GET(appUrl, headers)).awaitSuccess().bodyString()
+            client.newCall(GET(appUrl, headers)).awaitSuccess().body?.string() ?: ""
         }.getOrNull() ?: return null
 
         val chunkRefs = CHUNK_REF_REGEX.findAll(appJs)
@@ -639,7 +639,7 @@ class MKissaKeyManager(
             val found = batch.parallelCatchingMapNotNull { ref ->
                 val chunkUrl = appUrl.resolve(ref) ?: return@parallelCatchingMapNotNull null
                 val body = runCatching {
-                    client.newCall(GET(chunkUrl, headers)).awaitSuccess().bodyString()
+                    client.newCall(GET(chunkUrl, headers)).awaitSuccess().body?.string() ?: ""
                 }.getOrNull() ?: return@parallelCatchingMapNotNull null
                 if (!body.contains(CRYPTO_CHUNK_MARKER)) return@parallelCatchingMapNotNull null
                 MKissaBundle.parse(body)
@@ -651,7 +651,7 @@ class MKissaKeyManager(
 
     private suspend fun entryUrlFromSite(): String? {
         val html = runCatching {
-            client.newCall(GET("$siteUrl/", headers)).awaitSuccess().bodyString()
+            client.newCall(GET("$siteUrl/", headers)).awaitSuccess().body?.string() ?: ""
         }.getOrNull() ?: return null
 
         return APP_ENTRY_REGEX.find(html)?.groupValues?.get(1)
