@@ -6,7 +6,6 @@ import aniyomi.lib.playlistutils.PlaylistUtils
 import aniyomi.lib.vidhideextractor.VidHideExtractor
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anineko.LocalProxy
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
@@ -29,7 +28,6 @@ class AniNekoProvider(
     override val baseUrl = "https://anineko.to"
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
-    private val localProxy by lazy { LocalProxy(client) }
     private val doodExtractor by lazy { DoodExtractor(client) }
     private val vidHideExtractor by lazy { VidHideExtractor(client, headers) }
 
@@ -61,7 +59,7 @@ class AniNekoProvider(
         ).distinct()
 
         for (searchTitle in titlesToTry) {
-            val url = "$baseUrl/browser".toHttpUrl().newBuilder()
+            val url = "$baseUrl/browse".toHttpUrl().newBuilder()
                 .addQueryParameter("keyword", searchTitle)
                 .build().toString()
 
@@ -69,8 +67,21 @@ class AniNekoProvider(
                 val doc = client.newCall(GET(url, nekoHeaders))
                     .awaitSuccess().useAsJsoup()
 
-                val link = doc.selectFirst("a[href*='/watch/']") ?: continue
-                val href = link.attr("href")
+                // Updated parsing logic to match the new site layout
+                val cards = doc.select("article.nv-anime-card.nv-browse-card")
+                val link = cards.firstNotNullOfOrNull { card ->
+                    card.selectFirst("a.nv-anime-thumb") ?: card.selectFirst("a")
+                }
+                
+                if (link != null) {
+                    val href = link.attr("href")
+                    val slug = href.substringAfterLast("/").substringBefore("?")
+                    if (slug.isNotBlank()) return slug
+                }
+                
+                // Fallback to old method just in case
+                val oldLink = doc.selectFirst("a[href*='/watch/']") ?: continue
+                val href = oldLink.attr("href")
                 val slug = href.substringAfter("/watch/").substringBefore("/").substringBefore("?")
                 if (slug.isNotBlank()) return slug
             } catch (_: Exception) {
@@ -121,7 +132,7 @@ class AniNekoProvider(
             val serverName = button.ownText().trim()
             val rawType = button.selectFirst("span")?.text() ?: ""
             val versionType = when {
-                rawType.contains("Soft Sub", ignoreCase = true) -> "Soft Sub"
+                rawType.contains("Soft Sub", ignoreCase = true) || rawType.contains("Sort Sub", ignoreCase = true) -> "Soft Sub"
                 rawType.contains("Hard Sub", ignoreCase = true) -> "Hard Sub"
                 rawType.contains("Dub", ignoreCase = true) -> "Dub"
                 else -> rawType.ifBlank { "Video" }
@@ -155,21 +166,21 @@ class AniNekoProvider(
             }
         }
 
+        val qualityPrefix = "${source.serverName} - ${source.type}"
+
         return when {
             iframeUrl.contains("vivibebe.site") || iframeUrl.contains("vibevibe.workers.dev") || iframeUrl.contains("bibiemb.xyz") -> {
                 val iframeHtml = client.newCall(GET(iframeUrl, nekoHeaders)).awaitSuccess().bodyString()
                 val m3u8Url = vibeRegex.find(iframeHtml)?.groupValues?.get(1)
                 if (m3u8Url != null) {
-                    val finalM3u8 = if (iframeUrl.contains("bibiemb.xyz")) {
-                        m3u8Url
-                    } else {
-                        localProxy.getProxyUrl(m3u8Url, nekoHeaders)
-                    }
+                    // LocalProxy is no longer needed; PlaylistUtils handles it natively now
                     playlistUtils.extractFromHls(
-                        finalM3u8,
+                        m3u8Url,
                         referer = iframeUrl,
-                        videoNameGen = { quality -> "${source.serverName} - ${source.type} - $quality" },
+                        videoNameGen = { quality -> "$qualityPrefix - $quality" },
                         subtitleList = subtitleTracks,
+                        masterHeaders = nekoHeaders,
+                        videoHeaders = nekoHeaders,
                     )
                 } else {
                     emptyList()
@@ -177,10 +188,10 @@ class AniNekoProvider(
             }
 
             iframeUrl.contains("otakuhg.site") || iframeUrl.contains("otakuvid.online") -> {
-                vidHideExtractor.videosFromUrl(iframeUrl) { quality -> "${source.type} - $quality" }.map { video ->
+                vidHideExtractor.videosFromUrl(iframeUrl) { quality -> "$qualityPrefix - $quality" }.map { video ->
                     Video(
                         url = video.url,
-                        quality = addServerName(source.serverName, video.quality),
+                        quality = video.quality,
                         videoUrl = video.videoUrl,
                         headers = video.headers,
                         subtitleTracks = video.subtitleTracks + subtitleTracks,
@@ -189,10 +200,10 @@ class AniNekoProvider(
             }
 
             iframeUrl.contains("playmogo.com") || iframeUrl.contains("dood") -> {
-                doodExtractor.videosFromUrl(iframeUrl, quality = source.type).map { video ->
+                doodExtractor.videosFromUrl(iframeUrl, quality = qualityPrefix).map { video ->
                     Video(
                         url = video.url,
-                        quality = addServerName(source.serverName, video.quality),
+                        quality = video.quality,
                         videoUrl = video.videoUrl,
                         headers = video.headers,
                         subtitleTracks = video.subtitleTracks + subtitleTracks,
@@ -202,12 +213,6 @@ class AniNekoProvider(
 
             else -> emptyList()
         }
-    }
-
-    private fun addServerName(serverName: String, quality: String): String = if (serverName.isBlank() || quality.startsWith("$serverName - ", ignoreCase = true)) {
-        quality
-    } else {
-        "$serverName - $quality"
     }
 
     // =================================================================
