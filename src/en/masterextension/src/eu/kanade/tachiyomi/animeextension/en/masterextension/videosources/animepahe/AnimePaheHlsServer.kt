@@ -52,24 +52,28 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         isRunning = false
     }
 
+    // ✅ FIXED: video.videoUrl is String? — extract to local non-null val first
     fun processVideoList(client: OkHttpClient, videos: List<Video>): List<Video> {
         this.client = client
         ensureStarted()
         return videos.map { video ->
-            if (video.videoUrl.contains(".m3u8", ignoreCase = true)) {
-                video.copyWithLocalUrl(createLocalM3u8Url(video.videoUrl))
+            val vUrl = video.videoUrl ?: return@map video
+            if (vUrl.contains(".m3u8", ignoreCase = true)) {
+                video.copyWithLocalUrl(createLocalM3u8Url(vUrl))
             } else {
                 video
             }
         }
     }
 
+    // ✅ FIXED: same nullable videoUrl issue
     fun processMp4VideoList(client: OkHttpClient, videos: List<Video>): List<Video> {
         mp4Client = client
         ensureStarted()
         return videos.map { video ->
-            val localUrl = createLocalMp4Url(video.videoUrl)
-            mp4Headers[video.videoUrl] = video.headers ?: Headers.Builder().build()
+            val vUrl = video.videoUrl ?: return@map video
+            val localUrl = createLocalMp4Url(vUrl)
+            mp4Headers[vUrl] = video.headers ?: Headers.Builder().build()
             video.copyWithLocalMp4Url(localUrl)
         }
     }
@@ -82,13 +86,13 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
     }
 
     private fun handleM3u8Request(session: IHTTPSession): Response {
-        val url = session.parameters["url"]?.firstOrNull()
+        val url: String = session.parameters["url"]?.firstOrNull()
             ?: return newFixedLengthResponse(Status.BAD_REQUEST, MIME_PLAINTEXT, "Missing url parameter")
 
         return try {
             val headers = extractHeadersFromSession(session)
-            val playlist = fetchString(url!!, headers)
-            val content = rewritePlaylist(playlist, url!!)
+            val playlist = fetchString(url, headers)
+            val content = rewritePlaylist(playlist, url)
             newFixedLengthResponse(Status.OK, "application/vnd.apple.mpegurl", content)
         } catch (e: Exception) {
             newFixedLengthResponse(Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}")
@@ -96,14 +100,14 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
     }
 
     private fun handleSegmentRequest(session: IHTTPSession): Response {
-        val url = session.parameters["url"]?.firstOrNull()
+        val url: String = session.parameters["url"]?.firstOrNull()
             ?: return newFixedLengthResponse(Status.BAD_REQUEST, MIME_PLAINTEXT, "Missing url parameter")
 
         return try {
             val headers = extractHeadersFromSession(session)
             val keyUrl = session.parameters["key"]?.firstOrNull()
             val iv = session.parameters["iv"]?.firstOrNull()
-            val data = fetchSegment(url!!, headers, keyUrl, iv)
+            val data = fetchSegment(url, headers, keyUrl, iv)
             newChunkedResponse(Status.OK, "video/mp2t", ByteArrayInputStream(data))
         } catch (e: Exception) {
             newFixedLengthResponse(Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}")
@@ -111,11 +115,11 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
     }
 
     private fun handleMp4Request(session: IHTTPSession): Response {
-        val url = session.parameters["url"]?.firstOrNull()
+        val url: String = session.parameters["url"]?.firstOrNull()
             ?: return newFixedLengthResponse(Status.BAD_REQUEST, MIME_PLAINTEXT, "Missing url parameter")
 
         return try {
-            val upstream = fetchMp4(url!!, session)
+            val upstream = fetchMp4(url, session)
             val body = upstream.body
             val contentLength = upstream.header("Content-Length")?.toLongOrNull() ?: -1L
             val contentType = upstream.header("Content-Type") ?: "video/mp4"
@@ -224,7 +228,7 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
             rawData
         } else {
             val ivHex = iv ?: throw IOException("Missing AES-128 IV for encrypted segment")
-            decryptAes128Cbc(rawData, fetchBytes(keyUrl!!, headers), ivHex)
+            decryptAes128Cbc(rawData, fetchBytes(keyUrl, headers), ivHex)
         }
     }
 
