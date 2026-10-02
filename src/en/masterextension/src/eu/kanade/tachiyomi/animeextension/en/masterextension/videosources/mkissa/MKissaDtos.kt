@@ -9,22 +9,22 @@ fun buildQuery(queryAction: () -> String): String = queryAction()
 
 val STREAM_QUERY: String = buildQuery {
     """
-        query(
-            %showId: String!
-            %translationType: VaildTranslationTypeEnumType!
-            %episodeString: String!
-        ) {
-            episode(
-                showId: %showId
-                translationType: %translationType
-                episodeString: %episodeString
-            ) {
-                sourceUrls
-                show {
-                    _id
-                }
-            }
-        }
+    query(
+    %showId: String!
+    %translationType: VaildTranslationTypeEnumType!
+    %episodeString: String!
+    ) {
+    episode(
+    showId: %showId
+    translationType: %translationType
+    episodeString: %episodeString
+    ) {
+    sourceUrls
+    show {
+    _id
+    }
+    }
+    }
     """
 }
 
@@ -34,89 +34,89 @@ const val ANIME_LANE = "k7"
 
 val SEARCH_QUERY: String = buildQuery {
     """
-        query(
-            %search: SearchInput
-            %limit: Int
-            %page: Int
-            %translationType: VaildTranslationTypeEnumType
-            %countryOrigin: VaildCountryOriginEnumType
-        ) {
-            shows(
-                search: %search
-                limit: %limit
-                page: %page
-                translationType: %translationType
-                countryOrigin: %countryOrigin
-            ) {
-                pageInfo {
-                    total
-                }
-                edges {
-                    _id
-                    name
-                    thumbnail
-                    englishName
-                    nativeName
-                    slugTime
-                }
-            }
-        }
+    query(
+    %search: SearchInput
+    %limit: Int
+    %page: Int
+    %translationType: VaildTranslationTypeEnumType
+    %countryOrigin: VaildCountryOriginEnumType
+    ) {
+    shows(
+    search: %search
+    limit: %limit
+    page: %page
+    translationType: %translationType
+    countryOrigin: %countryOrigin
+    ) {
+    pageInfo {
+    total
+    }
+    edges {
+    _id
+    name
+    thumbnail
+    englishName
+    nativeName
+    slugTime
+    }
+    }
+    }
     """
 }
 
 val EPISODES_QUERY = buildQuery {
     """
-        query (%_id: String!) {
-            show(
-                _id: %_id
-            ) {
-                _id
-                availableEpisodesDetail
-            }
-        }
+    query (%_id: String!) {
+    show(
+    _id: %_id
+    ) {
+    _id
+    availableEpisodesDetail
+    }
+    }
     """
 }
 
 @Serializable
-data class MKissaSearchResult(
-    val data: MKissaSearchData,
+class SearchResult(
+    val data: SearchResultData,
 ) {
     @Serializable
-    data class MKissaSearchData(
-        val shows: MKissaSearchShows,
+    class SearchResultData(
+        val shows: SearchResultShows,
     ) {
         @Serializable
-        data class MKissaSearchShows(
-            val edges: List<MKissaSearchEdge>,
-        ) {
-            @Serializable
-            data class MKissaSearchEdge(
-                @SerialName("_id")
-                val id: String,
-                val name: String,
-                val englishName: String? = null,
-                val nativeName: String? = null,
-            )
-        }
+        class SearchResultShows(
+            val edges: List<ShowCard>,
+        )
     }
 }
 
 @Serializable
-data class MKissaSeriesResult(
-    val data: MKissaSeriesData,
+class ShowCard(
+    @SerialName("_id") val id: String,
+    val name: String,
+    val thumbnail: String? = null,
+    val englishName: String? = null,
+    val nativeName: String? = null,
+    val slugTime: String? = null,
+)
+
+@Serializable
+class SeriesResult(
+    val data: DataShow,
 ) {
     @Serializable
-    data class MKissaSeriesData(
-        val show: MKissaSeriesShow,
+    class DataShow(
+        val show: SeriesShows,
     ) {
         @Serializable
-        data class MKissaSeriesShow(
-            @SerialName("_id")
-            val id: String,
-            val availableEpisodesDetail: MKissaAvailableEps,
+        class SeriesShows(
+            @SerialName("_id") val id: String,
+            val availableEpisodesDetail: AvailableEps,
         ) {
             @Serializable
-            data class MKissaAvailableEps(
+            class AvailableEps(
                 val sub: List<String>? = null,
                 val dub: List<String>? = null,
             )
@@ -125,41 +125,41 @@ data class MKissaSeriesResult(
 }
 
 @Serializable
-data class MKissaEpisodeResult(
-    val data: MKissaEpisodeData,
+class EpisodeResult(
+    val data: DataEpisode,
 ) {
     @Serializable
-    data class MKissaEpisodeData(
-        val episode: MKissaEpisode? = null,
-    ) {
-        @Serializable
-        data class MKissaEpisode(
-            val sourceUrls: List<MKissaSourceUrl>,
-        )
-    }
+    class DataEpisode(
+        val episode: Episode? = null,
+    )
 }
 
 @Serializable
-data class MKissaSourceUrl(
-    val sourceUrl: String,
-    val type: String,
-    val sourceName: String,
-    val priority: Float = 0F,
-)
-
-@Serializable
-data class MKissaEncryptedResult(
-    val data: MKissaEncryptedData,
+class Episode(
+    val sourceUrls: List<SourceUrl>,
 ) {
     @Serializable
-    data class MKissaEncryptedData(
+    class SourceUrl(
+        val sourceUrl: String,
+        val type: String,
+        val sourceName: String,
+        val priority: Float = 0F,
+    )
+}
+
+@Serializable
+class EncryptedEpisodeResult(
+    val data: EncryptedData,
+) {
+    @Serializable
+    class EncryptedData(
         val tobeparsed: String? = null,
     )
 }
 
 @Serializable
-data class MKissaDecryptedResult(
-    val episode: MKissaEpisodeResult.MKissaEpisodeData.MKissaEpisode? = null,
+class DecryptedEpisodeResult(
+    val episode: Episode? = null,
 )
 
 @Serializable
@@ -179,14 +179,15 @@ class AaApiError(
 }
 
 @Serializable
-class MKissaCryptoBootstrap(
+class AaCryptoBootstrap(
     val epoch: Long,
     val partB: String,
     val k: String? = null,
+    val switchAt: Long? = null,
 )
 
 @Serializable
-class MKissaAaReqPayload(
+class AaReqPayload(
     private val v: Int,
     private val ts: Long,
     private val epoch: Long,
