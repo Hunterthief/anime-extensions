@@ -42,7 +42,7 @@ class ProviderManager(
             "kickassanime"to KickAssAnimeProvider(client, headers, preferences),
             "animeonsen" to AnimeOnsenProvider(client, headers),
             "anineko"    to AniNekoProvider(client, headers),
-            //"anizone"    to AniZoneProvider(client, headers),
+            "anizone"    to AniZoneProvider(client, headers),
             "anikoto"    to AnikotoProvider(),
             "animegg"    to AnimeGGProvider(client, headers),
             //"torrentio"  to TorrentioProvider(client, headers, "none", ""),
