@@ -82,7 +82,7 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
     }
 
     private fun handleM3u8Request(session: IHTTPSession): Response {
-        val url = session.parameters["url"]?.first()
+        val url = session.parameters["url"]?.firstOrNull()
             ?: return newFixedLengthResponse(Status.BAD_REQUEST, MIME_PLAINTEXT, "Missing url parameter")
 
         return try {
@@ -96,13 +96,13 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
     }
 
     private fun handleSegmentRequest(session: IHTTPSession): Response {
-        val url = session.parameters["url"]?.first()
+        val url = session.parameters["url"]?.firstOrNull()
             ?: return newFixedLengthResponse(Status.BAD_REQUEST, MIME_PLAINTEXT, "Missing url parameter")
 
         return try {
             val headers = extractHeadersFromSession(session)
-            val keyUrl = session.parameters["key"]?.first()
-            val iv = session.parameters["iv"]?.first()
+            val keyUrl = session.parameters["key"]?.firstOrNull()
+            val iv = session.parameters["iv"]?.firstOrNull()
             val data = fetchSegment(url, headers, keyUrl, iv)
             newChunkedResponse(Status.OK, "video/mp2t", ByteArrayInputStream(data))
         } catch (e: Exception) {
@@ -111,7 +111,7 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
     }
 
     private fun handleMp4Request(session: IHTTPSession): Response {
-        val url = session.parameters["url"]?.first()
+        val url = session.parameters["url"]?.firstOrNull()
             ?: return newFixedLengthResponse(Status.BAD_REQUEST, MIME_PLAINTEXT, "Missing url parameter")
 
         return try {
