@@ -1,6 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm
 
-import eu.kanade.tachiyomi.animesource.model.Video
+import okhttp3.ConnectionPool
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -8,101 +8,108 @@ import okhttp3.Request
 import org.nanohttpd.protocols.http.IHTTPSession
 import org.nanohttpd.protocols.http.NanoHTTPD
 import org.nanohttpd.protocols.http.response.Response
+import org.nanohttpd.protocols.http.response.Response.newChunkedResponse
+import org.nanohttpd.protocols.http.response.Response.newFixedLengthResponse
 import org.nanohttpd.protocols.http.response.Status
-import java.io.ByteArrayInputStream
 import java.net.URLEncoder
+import java.util.Collections
+import java.util.LinkedHashMap
+import java.util.concurrent.TimeUnit
 
-object SettlarProxy : NanoHTTPD(0) {
-    val port: Int get() = super.getListeningPort()
-    
-    @Volatile private var isRunning = false
-    @Volatile private var client: OkHttpClient? = null
-    
-    private val settlarHeaders = Headers.Builder()
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .set("Referer", "https://ani.pm/")
-        .set("Origin", "https://ani.pm")
+class SettlarProxy(
+    baseHeaders: Headers,
+) : NanoHTTPD("127.0.0.1", 0) {
+
+    private val upstreamHeaders: Headers = baseHeaders.newBuilder()
+        .apply { set("Origin", "https://embed.settlar.io") }
         .build()
 
-    override fun start() {
-        super.start()
-        isRunning = true
-    }
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .connectionPool(ConnectionPool(10, 2, TimeUnit.MINUTES))
+        .build()
 
-    override fun stop() {
-        super.stop()
-        isRunning = false
-    }
+    private val subtitleCache: MutableMap<String, String> = Collections.synchronizedMap(
+        object : LinkedHashMap<String, String>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>): Boolean = size > 50
+        },
+    )
 
-    fun processVideoList(okClient: OkHttpClient, videos: List<Video>): List<Video> {
-        this.client = okClient
-        ensureStarted()
-        return videos.map { video ->
-            if (video.url.contains(".m3u8", ignoreCase = true)) {
-                val encodedUrl = URLEncoder.encode(video.url, "UTF-8")
-                Video(
-                    "http://localhost:$port/proxy?url=$encodedUrl",
-                    video.quality,
-                    video.url,
-                    video.headers,
-                    video.subtitleTracks,
-                    video.audioTracks
-                )
-            } else {
-                video
+    fun proxyUrl(url: String): String = "http://127.0.0.1:$listeningPort/proxy?url=${URLEncoder.encode(url, "UTF-8")}"
+    fun subtitleUrl(url: String): String = "http://127.0.0.1:$listeningPort/subtitle.vtt?url=${URLEncoder.encode(url, "UTF-8")}"
+
+    private fun getOrCacheSubtitle(originalUrl: String): String {
+        subtitleCache[originalUrl]?.let { return it }
+        val res = client.newCall(Request.Builder().url(originalUrl).headers(upstreamHeaders).build()).execute()
+        if (!res.isSuccessful) { res.close(); throw Exception("Upstream error: ${res.code}") }
+        val text = res.body.string(); res.close()
+
+        if (!text.startsWith("#EXTM3U")) {
+            if (text.isNotBlank() && !text.trimStart().startsWith("<")) subtitleCache[originalUrl] = text
+            return text.ifBlank { "WEBVTT\n\n" }
+        }
+
+        val vttUrls = text.split("\n").map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.map { resolveUrl(originalUrl, it) }
+        val combinedVtt = buildString {
+            for (vttUrl in vttUrls) {
+                try {
+                    val subRes = client.newCall(Request.Builder().url(vttUrl).headers(upstreamHeaders).build()).execute()
+                    if (subRes.isSuccessful) {
+                        val subText = subRes.body.string(); subRes.close()
+                        if (subText.isNotBlank()) { append(subText); append("\n\n") }
+                    } else { subRes.close() }
+                } catch (_: Exception) {}
             }
         }
-    }
-
-    @Synchronized
-    private fun ensureStarted() {
-        if (!isRunning) start()
+        val result = combinedVtt.ifBlank { text }
+        if (result.isNotBlank() && !result.trimStart().startsWith("<")) subtitleCache[originalUrl] = result
+        return result.ifBlank { "WEBVTT\n\n" }
     }
 
     override fun handle(session: IHTTPSession): Response {
-        val url = session.parameters["url"]?.firstOrNull()
-            ?: return Response.newFixedLengthResponse(Status.BAD_REQUEST, MIME_PLAINTEXT, "Missing url")
-            
+        val uri = session.uri ?: ""
+        if (uri.endsWith(".vtt", true) || uri.contains("subtitle", true)) {
+            val url = session.parameters["url"]?.firstOrNull() ?: return newFixedLengthResponse(Status.BAD_REQUEST, "text/plain", "Missing url")
+            return try { newFixedLengthResponse(Status.OK, "text/vtt", getOrCacheSubtitle(url)) } 
+            catch (e: Exception) { newFixedLengthResponse(Status.INTERNAL_ERROR, "text/plain", e.toString()) }
+        }
+
+        val url = session.parameters["url"]?.firstOrNull() ?: return newFixedLengthResponse(Status.BAD_REQUEST, "text/plain", "Missing url")
         return try {
-            val reqClient = client ?: throw Exception("Client not initialized")
-            val request = Request.Builder().url(url).headers(settlarHeaders).build()
-            val response = reqClient.newCall(request).execute()
-            
-            val bodyBytes = response.body.bytes()
-            val contentType = response.header("Content-Type") ?: "application/vnd.apple.mpegurl"
-            
-            // If it's an m3u8 playlist, rewrite segment URLs to also go through the proxy
-            if (contentType.contains("mpegurl", ignoreCase = true) || url.endsWith(".m3u8")) {
-                val playlist = String(bodyBytes)
-                val rewritten = rewritePlaylist(playlist, url)
-                Response.newFixedLengthResponse(Status.OK, contentType, rewritten)
-            } else {
-                // It's a .ts segment or other media
-                Response.newChunkedResponse(Status.OK, contentType, ByteArrayInputStream(bodyBytes))
+            val response = client.newCall(Request.Builder().url(url).headers(upstreamHeaders).build()).execute()
+            if (!response.isSuccessful) {
+                val snippet = runCatching { response.body.string().take(200) }.getOrDefault(""); response.close()
+                return newFixedLengthResponse(Status.lookup(response.code) ?: Status.INTERNAL_ERROR, "text/plain", "Upstream ${response.code}: $snippet")
             }
-        } catch (e: Exception) {
-            Response.newFixedLengthResponse(Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Proxy Error: ${e.message}")
+
+            val contentType = response.header("Content-Type") ?: ""
+            val isManifest = url.toHttpUrl().encodedPath.endsWith(".m3u8", true) || contentType.contains("mpegurl", true)
+
+            if (!isManifest) {
+                val body = response.body; val length = body.contentLength(); val mime = contentType.ifBlank { "application/octet-stream" }
+                if (length > 0) newFixedLengthResponse(Status.OK, mime, body.byteStream(), length) 
+                else newChunkedResponse(Status.OK, mime, body.byteStream())
+            } else {
+                val text = response.body.string(); response.close()
+                newFixedLengthResponse(Status.OK, "application/vnd.apple.mpegurl", rewriteManifest(text, url))
+            }
+        } catch (e: Exception) { newFixedLengthResponse(Status.INTERNAL_ERROR, "text/plain", e.toString()) }
+    }
+
+    private fun rewriteManifest(text: String, parentUrl: String): String = text.split("\n").joinToString("\n") { rawLine ->
+        val line = rawLine.trim()
+        when {
+            line.isEmpty() -> ""
+            line.startsWith("#") -> URI_REGEX.find(line)?.let { m -> line.replace(URI_REGEX, "URI=\"${proxyUrl(resolveUrl(parentUrl, m.groupValues[1]))}\"") } ?: line
+            else -> proxyUrl(resolveUrl(parentUrl, line))
         }
     }
 
-    private fun rewritePlaylist(content: String, baseUrl: String): String {
-        val lines = content.lines()
-        return lines.joinToString("\n") { line ->
-            if (line.startsWith("#") || line.isBlank()) {
-                line
-            } else {
-                val absoluteUrl = if (line.startsWith("http")) line else resolveUrl(baseUrl, line)
-                val encoded = URLEncoder.encode(absoluteUrl, "UTF-8")
-                "http://localhost:$port/proxy?url=$encoded"
-            }
-        }
+    private fun resolveUrl(parent: String, ref: String): String {
+        if (ref.startsWith("http://") || ref.startsWith("https://")) return ref
+        return runCatching { parent.toHttpUrl().resolve(ref).toString() }.getOrDefault(ref)
     }
-    
-    private fun resolveUrl(base: String, relative: String): String {
-        return try {
-            base.toHttpUrl().resolve(relative)?.toString() ?: relative
-        } catch (e: Exception) {
-            relative
-        }
-    }
+
+    companion object { private val URI_REGEX = Regex("URI=\"(.*?)\"") }
 }
