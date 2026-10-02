@@ -87,8 +87,8 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
 
         return try {
             val headers = extractHeadersFromSession(session)
-            val playlist = fetchString(url, headers)
-            val content = rewritePlaylist(playlist, url)
+            val playlist = fetchString(url!!, headers)
+            val content = rewritePlaylist(playlist, url!!)
             newFixedLengthResponse(Status.OK, "application/vnd.apple.mpegurl", content)
         } catch (e: Exception) {
             newFixedLengthResponse(Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}")
@@ -103,7 +103,7 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
             val headers = extractHeadersFromSession(session)
             val keyUrl = session.parameters["key"]?.firstOrNull()
             val iv = session.parameters["iv"]?.firstOrNull()
-            val data = fetchSegment(url, headers, keyUrl, iv)
+            val data = fetchSegment(url!!, headers, keyUrl, iv)
             newChunkedResponse(Status.OK, "video/mp2t", ByteArrayInputStream(data))
         } catch (e: Exception) {
             newFixedLengthResponse(Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}")
@@ -115,7 +115,7 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
             ?: return newFixedLengthResponse(Status.BAD_REQUEST, MIME_PLAINTEXT, "Missing url parameter")
 
         return try {
-            val upstream = fetchMp4(url, session)
+            val upstream = fetchMp4(url!!, session)
             val body = upstream.body
             val contentLength = upstream.header("Content-Length")?.toLongOrNull() ?: -1L
             val contentType = upstream.header("Content-Type") ?: "video/mp4"
@@ -224,7 +224,7 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
             rawData
         } else {
             val ivHex = iv ?: throw IOException("Missing AES-128 IV for encrypted segment")
-            decryptAes128Cbc(rawData, fetchBytes(keyUrl, headers), ivHex)
+            decryptAes128Cbc(rawData, fetchBytes(keyUrl!!, headers), ivHex)
         }
     }
 
