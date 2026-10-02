@@ -7,11 +7,11 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.graphQLPost
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.parseGraphQLAs
+import keiyoushi.utils.useAsJsoup
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -60,7 +60,8 @@ class AnimeGGProvider(
     private suspend fun searchAnime(title: String): String? {
         val encodedTitle = URLEncoder.encode(title, "UTF-8")
         val url = "$BASE/search/?q=$encodedTitle"
-        val doc = client.newCall(GET(url, headers)).awaitSuccess().asJsoup()
+        // ✅ UPDATED: useAsJsoup() automatically closes the response to prevent connection leaks
+        val doc = client.newCall(GET(url, headers)).awaitSuccess().useAsJsoup()
         
         val elements = doc.select(".mse")
         if (elements.isEmpty()) return null
@@ -104,7 +105,7 @@ class AnimeGGProvider(
     // STEP 2: Anime page → episode URL
     // =================================================================
     private suspend fun getEpisodeUrl(animeUrl: String, epNum: Int): String? {
-        val doc = client.newCall(GET(animeUrl, headers)).awaitSuccess().asJsoup()
+        val doc = client.newCall(GET(animeUrl, headers)).awaitSuccess().useAsJsoup()
         
         val episodeElement = doc.select(".newmanga li div").firstOrNull { el ->
             val text = el.selectFirst(".anm_det_pop strong")?.text() ?: ""
@@ -124,7 +125,7 @@ class AnimeGGProvider(
     // STEP 3 & 4: Episode page → iframes → extract videoSources (Parallelized)
     // =================================================================
     private suspend fun extractVideos(episodeUrl: String): List<Video> {
-        val doc = client.newCall(GET(episodeUrl, headers)).awaitSuccess().asJsoup()
+        val doc = client.newCall(GET(episodeUrl, headers)).awaitSuccess().useAsJsoup()
         val iframes = doc.select("iframe")
         
         if (iframes.isEmpty()) return emptyList()
@@ -140,7 +141,7 @@ class AnimeGGProvider(
             val iframeSrc = iframe.attr("abs:src")
             if (iframeSrc.isBlank()) return@parallelCatchingFlatMap emptyList()
             
-            val embedDoc = client.newCall(GET(iframeSrc, headers)).awaitSuccess().asJsoup()
+            val embedDoc = client.newCall(GET(iframeSrc, headers)).awaitSuccess().useAsJsoup()
             val host = iframeSrc.toHttpUrlOrNull()?.host ?: ""
             
             val scriptData = embedDoc.selectFirst("script:containsData(var videoSources =)")?.data()
@@ -165,7 +166,8 @@ class AnimeGGProvider(
                 
             videos.map { v ->
                 val url = if (v.file.startsWith("http")) v.file else "https://$host${v.file}"
-                Video(url, "$name $mode ${v.label}", url, headers = videoHeaders)
+                // ✅ UPDATED: Matched the new source's label formatting
+                Video(url, "$mode AnimeGG: ${v.label}", url, headers = videoHeaders)
             }
         }
     }
