@@ -1,5 +1,8 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
+import android.net.Uri
+import android.util.Base64
+import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
 import eu.kanade.tachiyomi.animesource.model.SAnime
@@ -10,10 +13,19 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parseAs
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.URLEncoder
+import java.util.concurrent.Executors
+import kotlin.math.min
 
 class AnikageProvider(
     private val client: OkHttpClient,
@@ -23,14 +35,14 @@ class AnikageProvider(
     override val name = "Anikage"
     override val baseUrl = "https://anikage.cc"
 
-    companion object {
-        private const val API_URL = "https://anikage.cc/api/media/anime"
-    }
+    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
+    private val localProxy by lazy { LocalProxy(client) }
 
     private val apiHeaders by lazy {
         headers.newBuilder()
             .set("Accept", "application/json")
-            .set("Referer", "https://anikage.cc/")
+            .set("Referer", "$baseUrl/")
+            .set("Origin", baseUrl)
             .build()
     }
 
@@ -39,106 +51,56 @@ class AnikageProvider(
     // =================================================================
 
     @Serializable
-    private data class SourcesResponse(
-        val embeds: List<Embed> = emptyList(),
-        val subtitles: List<SubtitleEntry> = emptyList(),
-        val intro: SkipTime? = null,
-        val outro: SkipTime? = null
+    private data class AnikageResponse(
+        val data: List<Result> = emptyList(),
     )
 
     @Serializable
-    private data class Embed(
-        val url: String = "",
-        val type: String = "",
-        val server: String = ""
+    private data class Result(
+        @SerialName("anilistId") val aniListId: Int,
+        val slug: String,
     )
 
     @Serializable
-    private data class SubtitleEntry(
-        val file: String = "",
-        val label: String = "",
-        val kind: String = "",
-        val default: Boolean = false,
-        val embedUrl: String = ""
+    private data class EpisodeSource(
+        val sources: List<SourceData> = emptyList(),
+        val subtitles: List<SubtitleData> = emptyList(),
     )
 
     @Serializable
-    private data class SkipTime(
-        val start: Int = 0,
-        val end: Int = 0
+    private data class SourceData(
+        val url: String,
+        val quality: String,
+        val isM3U8: Boolean? = null,
+    ) {
+        fun episodeSourceUrl(): String = listOfNotNull(
+            "https://og.bakayaro.live",
+            if (isM3U8 == true) "m3u8" else "stream",
+            url,
+        ).joinToString("/")
+    }
+
+    @Serializable
+    private data class SubtitleData(
+        val file: String,
+        val label: String,
     )
 
     // =================================================================
-    // STEP 1: Call sources API (uses AniList ID directly!)
+    // Helpers
     // =================================================================
 
-    private suspend fun fetchSources(
-        anilistId: Int,
-        epNum: Int,
-        provider: String,
-        lang: String
-    ): SourcesResponse? {
-        val url = "$API_URL/$anilistId/episodes/$epNum/sources".toHttpUrl().newBuilder()
-            .addQueryParameter("provider", provider)
-            .addQueryParameter("lang", lang)
-            .build().toString()
-
+    private suspend fun getSlug(anilistId: Int, title: String): String? {
+        val encodedTitle = URLEncoder.encode(title, "UTF-8")
+        val url = "$baseUrl/api/media/anime/browse?q=$encodedTitle&limit=25".toHttpUrl()
         return try {
-            client.newCall(GET(url, apiHeaders))
-                .awaitSuccess().bodyString()
-                .parseAs<SourcesResponse>()
+            val response = client.newCall(GET(url, apiHeaders)).awaitSuccess().bodyString()
+            val results = response.parseAs<AnikageResponse>().data
+            results.firstOrNull { it.aniListId == anilistId }?.slug
+                ?: results.firstOrNull()?.slug
         } catch (_: Exception) {
             null
         }
-    }
-
-    // =================================================================
-    // STEP 2: Extract m3u8 from bibiemb embed URL
-    // =================================================================
-
-    private fun getM3u8FromEmbed(embedUrl: String): Pair<String, Headers>? {
-        val cleanUrl = embedUrl.substringBefore("?")
-
-        return when {
-            // bibiemb.xyz → workers.dev CDN (access-control-allow-origin: *)
-            cleanUrl.contains("bibiemb.xyz") -> {
-                val id = cleanUrl.substringAfter("bibiemb.xyz/").trim('/')
-                val m3u8 = "https://morning-credit-3bcc.vibevibe.workers.dev/$id/master.m3u8"
-                val vidHeaders = headers.newBuilder()
-                    .set("Referer", "https://bibiemb.xyz/")
-                    .set("Origin", "https://bibiemb.xyz")
-                    .build()
-                Pair(m3u8, vidHeaders)
-            }
-
-            // Skip vivibebe.site (no CORS, doesn't play in ExoPlayer)
-            else -> null
-        }
-    }
-
-    // =================================================================
-    // STEP 3: Create Video
-    // =================================================================
-
-    private fun createVideo(
-        m3u8Url: String,
-        vidHeaders: Headers,
-        embed: Embed,
-        subtitles: List<Track>
-    ): Video {
-        val typeLabel = when (embed.type) {
-            "softsub" -> "Soft Sub"
-            "hardsub" -> "Hard Sub"
-            else -> embed.type.replaceFirstChar { it.uppercase() }
-        }
-
-        return Video(
-            url = m3u8Url,
-            quality = "$name ${embed.server} $typeLabel Auto",
-            videoUrl = m3u8Url,
-            headers = vidHeaders,
-            subtitleTracks = subtitles,
-        )
     }
 
     // =================================================================
@@ -147,31 +109,379 @@ class AnikageProvider(
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         val meta = EpisodeMeta.from(episode)
-        if (meta.anilistId == 0) return emptyList()
+        if (meta.anilistId == 0 && meta.title.isBlank()) return emptyList()
 
+        val slug = getSlug(meta.anilistId, meta.title) ?: return emptyList()
+        
         val allVideos = mutableListOf<Video>()
+        val providers = listOf("koto", "neko", "uwu", "kiwi", "megg", "dib", "wave")
+        val langs = listOf("sub", "dub")
 
-        // Try both sub and dub
-        for (lang in listOf("sub", "dub")) {
-            val response = fetchSources(meta.anilistId, meta.epNum, "neko", lang) ?: continue
-
-            // Extract subtitle tracks from the response
-            val subtitleTracks = response.subtitles
-                .filter { it.kind == "captions" && it.embedUrl.isNotBlank() }
-                .map { Track(it.embedUrl.substringAfter("sub=").ifBlank { it.file }, it.label) }
-                .filter { it.url.startsWith("http") }
-
-            // Process each embed
-            for (embed in response.embeds) {
+        for (lang in langs) {
+            for (provider in providers) {
                 try {
-                    val (m3u8Url, vidHeaders) = getM3u8FromEmbed(embed.url) ?: continue
-                    allVideos.add(createVideo(m3u8Url, vidHeaders, embed, subtitleTracks))
+                    val sourceUrl = "$baseUrl/api/media/anime/$slug/episodes/${meta.epNum}/sources?lang=$lang&provider=$provider"
+                    val response = client.newCall(GET(sourceUrl, apiHeaders)).awaitSuccess().bodyString()
+                    val episodeData = response.parseAs<EpisodeSource>()
+                    
+                    val tracks = episodeData.subtitles.map {
+                        Track("https://og.bakayaro.live/stream/${it.file}", it.label)
+                    }
+
+                    for (source in episodeData.sources) {
+                        val videoUrl = source.episodeSourceUrl()
+                        if (source.isM3U8 == true) {
+                            // The "neko" provider wraps segments in a fake PNG header, requiring the local proxy
+                            val effectiveUrl = if (provider == "neko") {
+                                localProxy.getProxyUrl(videoUrl, headers)
+                            } else {
+                                videoUrl
+                            }
+                            
+                            val videos = playlistUtils.extractFromHls(
+                                playlistUrl = effectiveUrl,
+                                masterHeaders = headers,
+                                videoHeaders = headers,
+                                videoNameGen = { "$lang - $provider - ${source.quality} - $it" },
+                                subtitleList = tracks,
+                            )
+                            allVideos.addAll(videos)
+                        } else {
+                            allVideos.add(
+                                Video(
+                                    url = videoUrl,
+                                    quality = "$lang - $provider - ${source.quality}",
+                                    videoUrl = videoUrl,
+                                    subtitleTracks = tracks,
+                                    headers = headers,
+                                )
+                            )
+                        }
+                    }
                 } catch (_: Exception) {
-                    continue
+                    // Ignore and continue
                 }
             }
         }
 
         return allVideos.distinctBy { it.videoUrl }
+    }
+}
+
+// =================================================================
+// Local Proxy for Neko Provider (strips fake PNG header)
+// =================================================================
+
+internal class LocalProxy(private val client: OkHttpClient) {
+    private var serverSocket: ServerSocket? = null
+    private val executor = Executors.newFixedThreadPool(
+        maxOf(2, Runtime.getRuntime().availableProcessors() * 2),
+    )
+    var port: Int = 0
+        private set
+
+    val isAvailable: Boolean get() = port > 0 && serverSocket?.isClosed == false
+
+    init {
+        try {
+            val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+            serverSocket = ss
+            port = ss.localPort
+            executor.execute {
+                while (!ss.isClosed) {
+                    try {
+                        val socket = ss.accept()
+                        socket.soTimeout = 30_000
+                        executor.execute { handleSocket(socket) }
+                    } catch (_: Exception) {}
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    fun getProxyUrl(targetUrl: String, headers: Headers?): String {
+        if (!isAvailable) return targetUrl
+        val encodedUrl = Base64.encodeToString(targetUrl.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        val headersStr = headers?.let { h ->
+            val sb = StringBuilder()
+            for (i in 0 until h.size) {
+                sb.append(h.name(i)).append(":").append(h.value(i)).append("\n")
+            }
+            sb.toString()
+        } ?: ""
+        val encodedHeaders = Base64.encodeToString(headersStr.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        val ext = if (targetUrl.contains(".m3u8") || targetUrl.contains("mpegurl")) "playlist.m3u8" else "segment.ts"
+        return "http://127.0.0.1:$port/proxy/$ext?url=$encodedUrl&headers=$encodedHeaders"
+    }
+
+    private fun handleSocket(socket: Socket) {
+        var requestParsed = false
+        try {
+            val input = socket.getInputStream()
+            val reader = input.bufferedReader()
+            val firstLine = reader.readLine() ?: return
+            val parts = firstLine.split(" ")
+            if (parts.size < 2) return
+            val rawPath = parts[1]
+            val queryIndex = rawPath.indexOf('?')
+            val queryString = if (queryIndex != -1) rawPath.substring(queryIndex) else ""
+            val pathWithoutQuery = if (queryIndex != -1) rawPath.substring(0, queryIndex) else rawPath
+
+            val path = if (pathWithoutQuery.startsWith("http://") || pathWithoutQuery.startsWith("https://")) {
+                Uri.parse(pathWithoutQuery).path ?: ""
+            } else {
+                pathWithoutQuery
+            }
+
+            if (!path.startsWith("/proxy")) {
+                sendError(socket, 404, "Not Found")
+                return
+            }
+
+            val httpUrl = ("http://127.0.0.1$path$queryString").toHttpUrl()
+            val encodedUrl = httpUrl.queryParameter("url")
+            val encodedHeaders = httpUrl.queryParameter("headers") ?: ""
+
+            if (encodedUrl.isNullOrEmpty()) {
+                sendError(socket, 400, "Missing url parameter")
+                return
+            }
+
+            val targetUrl = String(Base64.decode(encodedUrl, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING))
+            val isM3u8Request = targetUrl.contains(".m3u8") || path.contains("playlist.m3u8")
+
+            val targetHeaders = Headers.Builder()
+            if (encodedHeaders.isNotEmpty()) {
+                val headersStr = String(Base64.decode(encodedHeaders, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING))
+                headersStr.split("\n").forEach { line ->
+                    val headerParts = line.split(":", limit = 2)
+                    if (headerParts.size == 2) {
+                        targetHeaders[headerParts[0].trim()] = headerParts[1].trim()
+                    }
+                }
+            }
+
+            var clientRange: String? = null
+            var line: String?
+            while (reader.readLine().also { line = it } != null) {
+                if (line!!.isEmpty()) break
+                val headerParts = line.split(":", limit = 2)
+                if (headerParts.size == 2) {
+                    val name = headerParts[0].trim()
+                    val value = headerParts[1].trim()
+                    if (name.equals("Range", ignoreCase = true) && !isM3u8Request) {
+                        clientRange = value
+                    }
+                }
+            }
+
+            val request = Request.Builder()
+                .url(targetUrl)
+                .headers(targetHeaders.build())
+                .build()
+
+            requestParsed = true
+            client.newCall(request).execute().use { response ->
+                sendResponse(socket, response, targetUrl, encodedHeaders, clientRange)
+            }
+        } catch (e: Exception) {
+            if (requestParsed) {
+                try {
+                    sendError(socket, 500, e.message ?: "Internal Error")
+                } catch (_: Exception) {}
+            }
+        } finally {
+            try {
+                socket.close()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun sendResponse(
+        socket: Socket,
+        response: Response,
+        targetUrl: String,
+        encodedHeaders: String,
+        clientRange: String?,
+    ) {
+        val out = socket.getOutputStream()
+        val isM3u8 = targetUrl.contains(".m3u8") || response.header("Content-Type")?.contains("mpegurl") == true
+
+        if (isM3u8) {
+            val bodyString = response.body.string()
+            val modifiedContent = processM3u8(bodyString, targetUrl, encodedHeaders)
+            val body = modifiedContent.toByteArray()
+            out.write("HTTP/1.1 ${response.code} ${response.message}\r\n".toByteArray())
+            writeForwardedHeaders(out, response, isM3u8 = true)
+            out.write("Content-Length: ${body.size}\r\n".toByteArray())
+            out.write("Content-Type: application/vnd.apple.mpegurl\r\n".toByteArray())
+            out.write("Connection: close\r\n\r\n".toByteArray())
+            out.write(body)
+            out.flush()
+            return
+        }
+
+        val stripped = stripPngHeader(response.body.bytes())
+        val range = if (response.isSuccessful) parseRange(clientRange, stripped.size) else null
+        val body = range?.let { stripped.copyOfRange(it.first, it.last + 1) } ?: stripped
+        val isPartial = range != null
+        val status = if (isPartial) 206 else response.code
+        val reason = when {
+            isPartial -> "Partial Content"
+            response.message.isNotBlank() -> response.message
+            else -> status.toString()
+        }
+        val contentType = if (isMpegTs(stripped)) {
+            "video/mp2t"
+        } else {
+            response.header("Content-Type") ?: "application/octet-stream"
+        }
+
+        out.write("HTTP/1.1 $status $reason\r\n".toByteArray())
+        writeForwardedHeaders(out, response, isM3u8 = false)
+        if (range != null) {
+            out.write("Accept-Ranges: bytes\r\n".toByteArray())
+            out.write("Content-Range: bytes ${range.first}-${range.last}/${stripped.size}\r\n".toByteArray())
+        }
+        out.write("Content-Length: ${body.size}\r\n".toByteArray())
+        out.write("Content-Type: $contentType\r\n".toByteArray())
+        out.write("Connection: close\r\n\r\n".toByteArray())
+        out.write(body)
+        out.flush()
+    }
+
+    private fun writeForwardedHeaders(
+        out: java.io.OutputStream,
+        response: Response,
+        isM3u8: Boolean,
+    ) {
+        val headers = response.headers
+        for (i in 0 until headers.size) {
+            val name = headers.name(i)
+            val value = headers.value(i)
+            if (name.equals("Connection", ignoreCase = true) ||
+                name.equals("Transfer-Encoding", ignoreCase = true) ||
+                name.equals("Content-Type", ignoreCase = true) ||
+                name.equals("Content-Length", ignoreCase = true) ||
+                (!isM3u8 && name.equals("Content-Range", ignoreCase = true)) ||
+                (!isM3u8 && name.equals("Accept-Ranges", ignoreCase = true))
+            ) {
+                continue
+            }
+            out.write("$name: $value\r\n".toByteArray())
+        }
+    }
+
+    private fun parseRange(rangeHeader: String?, size: Int): IntRange? {
+        if (rangeHeader.isNullOrBlank() || size <= 0 || !rangeHeader.startsWith("bytes=")) return null
+
+        val range = rangeHeader.removePrefix("bytes=").substringBefore(",")
+        val parts = range.split("-", limit = 2)
+        if (parts.size != 2) return null
+
+        val startStr = parts[0].trim()
+        val endStr = parts[1].trim()
+
+        return when {
+            startStr.isEmpty() -> {
+                val end = endStr.toIntOrNull()
+                if (end != null && end > 0) maxOf(0, size - end)..<size else null
+            }
+            else -> {
+                val start = startStr.toIntOrNull()
+                val end = endStr.toIntOrNull()
+                if (start == null || start < 0 || start >= size) return null
+                if (end != null && end < start) return null
+                start..min(end ?: (size - 1), size - 1)
+            }
+        }
+    }
+
+    private fun processM3u8(content: String, playlistUrl: String, encodedHeaders: String): String {
+        val lines = content.split(Regex("""\r?\n"""))
+        val builder = StringBuilder(content.length * 2)
+
+        for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) {
+                builder.append("\n")
+                continue
+            }
+
+            if (trimmed.startsWith("#")) {
+                if (trimmed.startsWith("#EXT-X-KEY") || trimmed.startsWith("#EXT-X-MAP") || trimmed.startsWith("#EXT-X-MEDIA")) {
+                    val uriRegex = Regex("""URI=["']?([^"',\s>]+)["']?""")
+                    uriRegex.find(trimmed)?.let { match ->
+                        val uriValue = match.groupValues[1]
+                        val resolvedUri = resolveUrl(playlistUrl, uriValue)
+                        val proxiedUri = getProxyUrlWithEncodedHeaders(resolvedUri, encodedHeaders)
+                        builder.append(trimmed.replace(uriValue, proxiedUri))
+                    } ?: builder.append(trimmed)
+                } else {
+                    builder.append(trimmed)
+                }
+            } else {
+                val resolvedUri = resolveUrl(playlistUrl, trimmed)
+                builder.append(getProxyUrlWithEncodedHeaders(resolvedUri, encodedHeaders))
+            }
+            builder.append("\n")
+        }
+
+        return builder.toString()
+    }
+
+    private fun getProxyUrlWithEncodedHeaders(targetUrl: String, encodedHeaders: String): String {
+        val encodedUrl = Base64.encodeToString(targetUrl.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        val ext = if (targetUrl.contains(".m3u8") || targetUrl.contains("mpegurl")) "playlist.m3u8" else "segment.ts"
+        return "http://127.0.0.1:$port/proxy/$ext?url=$encodedUrl&headers=$encodedHeaders"
+    }
+
+    private fun resolveUrl(baseUrl: String, relativeUrl: String): String = try {
+        baseUrl.toHttpUrl().resolve(relativeUrl)?.toString() ?: relativeUrl
+    } catch (_: Exception) {
+        relativeUrl
+    }
+
+    private fun stripPngHeader(data: ByteArray): ByteArray {
+        if (data.size < 8) return data
+        val isPng = data[0] == (-119).toByte() && data[1] == 80.toByte() && data[2] == 78.toByte() && data[3] == 71.toByte()
+        if (!isPng) return data
+        var videoStart = -1
+        val length = data.size - 4
+        for (i in 0 until length) {
+            if (data[i] == 73.toByte() && data[i + 1] == 69.toByte() && data[i + 2] == 78.toByte() && data[i + 3] == 68.toByte()) {
+                videoStart = i + 8
+                break
+            }
+        }
+        if (videoStart < 0 || videoStart >= data.size) return data
+        val tsData = data.copyOfRange(videoStart, data.size)
+        val iMin = min(tsData.size - 188, 400)
+        for (offset in 0 until iMin) {
+            if (tsData[offset] == 0x47.toByte() && tsData[offset + 188] == 0x47.toByte()) {
+                return tsData.copyOfRange(offset, tsData.size)
+            }
+        }
+        return tsData
+    }
+
+    private fun isMpegTs(data: ByteArray): Boolean {
+        if (data.size < 377) return false
+        val maxOffset = min(data.size - 377, 400)
+        return (0..maxOffset).any { offset ->
+            data[offset] == 0x47.toByte() &&
+                data[offset + 188] == 0x47.toByte() &&
+                data[offset + 376] == 0x47.toByte()
+        }
+    }
+
+    private fun sendError(socket: Socket, code: Int, message: String) {
+        val out = socket.getOutputStream()
+        out.write("HTTP/1.1 $code $message\r\n".toByteArray())
+        out.write("Content-Type: text/plain\r\n".toByteArray())
+        out.write("\r\n".toByteArray())
+        out.write(message.toByteArray())
+        out.flush()
     }
 }
