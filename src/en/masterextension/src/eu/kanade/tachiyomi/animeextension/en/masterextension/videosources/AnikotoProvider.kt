@@ -29,10 +29,6 @@ class AnikotoProvider :
     ),
     VideoProvider {
 
-    // 🎯 NEW: Enable the theme's built-in source and episode filters
-    override val hasSourceFilter = true
-    override val hasEpisodeFilter = true
-
     // Regex to catch "Season 1", "Part 2", "2nd Season", etc.
     private val seasonNumberRegex = Regex(
         """(?:season|part)\s*(\d+)|(\d+)(?:st|nd|rd|th)\s*(?:season|part)""",
