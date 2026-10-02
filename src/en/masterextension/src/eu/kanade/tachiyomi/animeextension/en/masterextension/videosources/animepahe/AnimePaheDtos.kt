@@ -5,31 +5,24 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class PaheResponseDto<T>(
-    @SerialName("current_page")
-    val currentPage: Int,
-    @SerialName("last_page")
-    val lastPage: Int,
-    @EncodeDefault
-    @SerialName("data")
-    val items: List<T> = emptyList(),
+data class ResponseDto<T>(
+    @SerialName("current_page") val currentPage: Int,
+    @SerialName("last_page") val lastPage: Int,
+    @EncodeDefault @SerialName("data") val items: List<T> = emptyList(),
 )
 
 @Serializable
-data class PaheSearchResultDto(
+data class SearchResultDto(
     val id: Int,
     val title: String,
     val poster: String,
-    val session: String, // Added: Allows us to skip the dead /a/$id redirect
+    val session: String,
 )
 
 @Serializable
-data class PaheEpisodeDto(
-    @SerialName("created_at")
-    val createdAt: String,
+data class EpisodeDto(
+    @SerialName("created_at") val createdAt: String,
     val session: String,
-    @SerialName("episode")
-    val episodeNumber: Float,
-    @SerialName("anime_id")
-    val animeId: Int,
+    @SerialName("episode") val episodeNumber: Float,
+    @SerialName("anime_id") val animeId: Int,
 )
