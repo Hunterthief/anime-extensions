@@ -12,16 +12,18 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.ANIME_LANE
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.EPISODES_QUERY
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.MKissaDecryptedResult
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.MKissaEncryptedResult
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.MKissaEpisodeResult
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.DecryptedEpisodeResult
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.EncryptedEpisodeResult
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.Episode
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.EpisodeResult
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.MKissaExtractor
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.MKissaKeyManager
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.MKissaSearchResult
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.MKissaSeriesResult
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.MKissaSourceUrl
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.SearchResult
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.SeriesResult
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.SEARCH_QUERY
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.STREAM_HASH
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.UniExtractor
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.mkissa.VidnestExtractor
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -29,13 +31,10 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
-import keiyoushi.utils.graphQLPost
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.parseGraphQLAs
 import keiyoushi.utils.toJsonBody
 import keiyoushi.utils.toJsonString
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
@@ -51,10 +50,8 @@ class MKissaProvider(
     private val headers: Headers,
     private val preferences: SharedPreferences,
 ) : VideoProvider {
-
     override val name = "MKissa"
     override val baseUrl = "https://mkissa.to"
-
     private val apiUrl = "https://api.mkissa.net"
 
     private val mkissaClient: OkHttpClient by lazy {
@@ -72,11 +69,9 @@ class MKissaProvider(
     }
 
     private val showIdCache = ConcurrentHashMap<Int, String>()
-
     private val keyManager by lazy {
         MKissaKeyManager(mkissaClient, mkissaHeaders, preferences, baseUrl, apiUrl)
     }
-
     private val mkissaExtractor by lazy { MKissaExtractor(mkissaClient, mkissaHeaders) }
     private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
     private val doodExtractor by lazy { DoodExtractor(client) }
@@ -85,71 +80,19 @@ class MKissaProvider(
     private val streamlareExtractor by lazy { StreamlareExtractor(client) }
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
-
-    // ==================== Smart Matching Helpers ====================
-    private fun String.normalize(): String {
-        return this.lowercase()
-            .trim()
-            .replace(Regex("[^a-z0-9\\s]"), "") // Remove all punctuation
-            .replace(Regex("\\s+"), " ")        // Collapse multiple spaces into one
-    }
-
-    private val seasonNumberRegex = Regex(
-        """(?:season|part)\s*(\d+)|(\d+)(?:st|nd|rd|th)\s*(?:season|part)""",
-        RegexOption.IGNORE_CASE
-    )
-
-    private fun extractSeasonNumber(text: String): Int? {
-        val match = seasonNumberRegex.find(text) ?: return null
-        val numStr = match.groupValues[1].ifEmpty { match.groupValues[2] }
-        return numStr.toIntOrNull()
-    }
-
-    private fun stripSeasonInfo(title: String): String {
-        return title
-            .replace(Regex("""\s*[-:]\s*(?:season|part)\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*(?:season|part)\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\d+(?:st|nd|rd|th)\s*(?:season|part).*$""", RegexOption.IGNORE_CASE), "")
-            .trim()
-    }
+    private val vidnestExtractor by lazy { VidnestExtractor(client, headers) }
+    private val uniExtractor by lazy { UniExtractor(client, headers) }
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
         return try {
             val meta = EpisodeMeta.from(episode)
-
-            // Check cache first to avoid unnecessary AniList API calls
-            var showId = showIdCache[meta.anilistId]
-
-            if (showId == null) {
-                // Fetch both Romaji and English titles from AniList to ensure best match on MKissa
-                val (romajiTitle, englishTitle) = fetchTitlesFromAniList(meta.anilistId)
-                
-                // 1. Try Romaji first (MKissa heavily favors Romaji titles)
-                if (!romajiTitle.isNullOrBlank()) {
-                    showId = findShowId(meta.anilistId, romajiTitle)
-                }
-                
-                // 2. Fallback to English
-                if (showId == null && !englishTitle.isNullOrBlank()) {
-                    showId = findShowId(meta.anilistId, englishTitle)
-                }
-                
-                // 3. Fallback to the original title passed by the master extension
-                if (showId == null && anime.title.isNotBlank()) {
-                    showId = findShowId(meta.anilistId, anime.title)
-                }
-            }
-
-            if (showId == null) return emptyList()
-
+            val showId = findShowId(meta.anilistId, anime.title) ?: return emptyList()
             val translationType = resolveTranslationType()
             val episodeString = findEpisodeString(showId, meta.epNum, translationType)
                 ?: findEpisodeString(showId, meta.epNum, if (translationType == "sub") "dub" else "sub")
                 ?: return emptyList()
-
             val sourceUrls = fetchSourceUrls(showId, episodeString, translationType)
             if (sourceUrls.isEmpty()) return emptyList()
-
             extractVideos(sourceUrls)
         } catch (_: Exception) {
             emptyList()
@@ -158,9 +101,6 @@ class MKissaProvider(
 
     private suspend fun findShowId(anilistId: Int, title: String): String? {
         showIdCache[anilistId]?.let { return it }
-
-        if (title.isBlank()) return null
-
         val data = buildJsonObject {
             putJsonObject("variables") {
                 putJsonObject("search") {
@@ -175,71 +115,30 @@ class MKissaProvider(
             }
             put("query", SEARCH_QUERY)
         }
-
         val result = mkissaClient.newCall(buildPost(data))
             .awaitSuccess()
-            .parseAs<MKissaSearchResult>()
-
+            .parseAs<SearchResult>()
         val edges = result.data.shows.edges
         if (edges.isEmpty()) return null
-
-        val requestedTitleLower = title.lowercase().trim()
-        val cleanRequested = requestedTitleLower.normalize()
-        val querySeason = extractSeasonNumber(requestedTitleLower)
-        val baseTitle = stripSeasonInfo(requestedTitleLower).normalize()
-
-        val scoredResults = edges.map { edge ->
-            val names = listOfNotNull(edge.name, edge.englishName, edge.nativeName)
-            var maxScore = 0
-            
-            for (name in names) {
-                val resTitleLower = name.lowercase().trim()
-                val cleanRes = resTitleLower.normalize()
-                val resSeason = extractSeasonNumber(resTitleLower)
-                val resBase = stripSeasonInfo(resTitleLower).normalize()
-                var score = 0
-
-                // 1. Exact normalized match (ignores punctuation/capitalization)
-                if (cleanRes == cleanRequested) {
-                    score += 1000
-                }
-                // 2. Contains match
-                else if (cleanRes.contains(cleanRequested)) {
-                    score += 800
-                }
-                // 3. Reverse contains match
-                else if (cleanRequested.contains(cleanRes)) {
-                    score += 600
-                }
-                // 4. Base title match (handles "Title Season 2" vs "Title")
-                else if (resBase == baseTitle) {
-                    score += 500
-                    if (querySeason != null && resSeason == querySeason) {
-                        score += 100 // Bonus for matching the correct season
-                    } else if (querySeason != null && resSeason != null) {
-                        score -= 50 // Penalty for matching the WRONG season
-                    }
-                }
-
-                // 5. Word overlap bonus (gives points for sharing key words)
-                val reqWords = cleanRequested.split(" ").filter { it.length > 2 }
-                val resWords = cleanRes.split(" ").filter { it.length > 2 }
-                val matchingWords = reqWords.count { reqWord ->
-                    resWords.any { resWord -> resWord.contains(reqWord) || reqWord.contains(resWord) }
-                }
-                score += matchingWords * 20
-                
-                if (score > maxScore) maxScore = score
-            }
-            
-            Pair(edge, maxScore)
+        val titleLower = title.lowercase().trim()
+        val best = edges.firstOrNull { edge ->
+            listOfNotNull(edge.name, edge.englishName, edge.nativeName)
+                .any { it.lowercase().trim() == titleLower }
         }
-
-        // Filter out completely unrelated results (score <= 0 means no meaningful overlap)
-        val validMatches = scoredResults.filter { it.second > 0 }
-        val bestMatch = validMatches.maxByOrNull { it.second }?.first
-
-        val showId = bestMatch?.id ?: return null
+            ?: edges.minByOrNull { edge ->
+                listOfNotNull(edge.name, edge.englishName, edge.nativeName)
+                    .minOf { name ->
+                        val n = name.lowercase().trim()
+                        when {
+                            n.startsWith(titleLower) -> n.length
+                            titleLower.startsWith(n) -> n.length + 1000
+                            n.contains(titleLower) -> n.length + 2000
+                            else -> Int.MAX_VALUE
+                        }
+                    }
+            }
+            ?: edges.firstOrNull()
+        val showId = best?.id ?: return null
         showIdCache[anilistId] = showId
         return showId
     }
@@ -255,17 +154,14 @@ class MKissaProvider(
             }
             put("query", EPISODES_QUERY)
         }
-
         val result = mkissaClient.newCall(buildPost(data))
             .awaitSuccess()
-            .parseAs<MKissaSeriesResult>()
-
+            .parseAs<SeriesResult>()
         val episodes = if (translationType == "dub") {
             result.data.show.availableEpisodesDetail.dub
         } else {
             result.data.show.availableEpisodesDetail.sub
         } ?: return null
-
         return episodes.firstOrNull { it == epNum.toString() }
             ?: episodes.firstOrNull { it.toFloatOrNull()?.toInt() == epNum }
     }
@@ -274,24 +170,21 @@ class MKissaProvider(
         showId: String,
         episodeString: String,
         translationType: String,
-    ): List<MKissaSourceUrl> {
+    ): List<Episode.SourceUrl> {
         val encryptionChangedError = Exception("MKissa changed its stream encryption")
         var lastError: Throwable? = null
         var buildHealed = false
-
         repeat(MAX_KEY_ATTEMPTS) { attempt ->
             val material = runCatching { keyManager.material(forceRefresh = attempt > 0) }
                 .getOrElse {
                     lastError = it
                     return@repeat
                 }
-
             val variables = buildJsonObject {
                 put("showId", showId)
                 put("translationType", translationType)
                 put("episodeString", episodeString)
             }
-
             val extensions = buildJsonObject {
                 putJsonObject("persistedQuery") {
                     put("version", 1)
@@ -300,54 +193,46 @@ class MKissaProvider(
                 put("k", ANIME_LANE)
                 put("aaReq", keyManager.aaReq(material))
             }
-
             val url = apiUrl.toHttpUrl().newBuilder().apply {
                 addPathSegment("api")
                 addQueryParameter("variables", variables.toJsonString())
                 addQueryParameter("extensions", extensions.toJsonString())
             }.build()
-
             val streamHeaders = mkissaHeaders.newBuilder()
                 .set("x-build-id", material.buildId)
                 .build()
-
             val responseBody = runCatching {
                 mkissaClient.newCall(GET(url, streamHeaders)).awaitSuccess().bodyString()
             }.getOrElse {
                 lastError = it
                 null
             }
-
             if (responseBody != null) {
                 val tobeparsed = runCatching {
-                    responseBody.parseAs<MKissaEncryptedResult>().data.tobeparsed
+                    responseBody.parseAs<EncryptedEpisodeResult>().data.tobeparsed
                 }.getOrNull()
-
-                // Catch rate limiting / captcha errors explicitly instead of failing silently
+                
                 if (tobeparsed.isNullOrBlank()) {
                     keyManager.apiErrorMessage(responseBody)?.let { throw Exception(it) }
                 }
-
+                
                 when {
                     !tobeparsed.isNullOrBlank() -> {
                         runCatching {
                             keyManager.decrypt(tobeparsed, material)
-                                ?.parseAs<MKissaDecryptedResult>()
+                                ?.parseAs<DecryptedEpisodeResult>()
                         }.getOrNull()
                             ?.let { return it.episode?.sourceUrls.orEmpty() }
                     }
-
                     !keyManager.isCryptoError(responseBody) -> {
                         runCatching {
-                            responseBody.parseAs<MKissaEpisodeResult>()
+                            responseBody.parseAs<EpisodeResult>()
                                 .data.episode?.sourceUrls.orEmpty()
                         }.getOrNull()
                             ?.let { return it }
                     }
                 }
-
                 lastError = encryptionChangedError
-
                 if (attempt >= 1 && !buildHealed && keyManager.isCryptoError(responseBody)) {
                     keyManager.invalidateBuild()
                     buildHealed = true
@@ -355,11 +240,10 @@ class MKissaProvider(
             }
             keyManager.invalidate()
         }
-
         throw lastError ?: encryptionChangedError
     }
 
-    private suspend fun extractVideos(sourceUrls: List<MKissaSourceUrl>): List<Video> {
+    private suspend fun extractVideos(sourceUrls: List<Episode.SourceUrl>): List<Video> {
         val mappings = listOf(
             "vidstreaming" to listOf("vidstreaming", "https://gogo", "playgo1.cc", "playtaku", "vidcloud"),
             "doodstream" to listOf("dood"),
@@ -368,46 +252,40 @@ class MKissaProvider(
             "streamlare" to listOf("streamlare.com"),
             "Fm-Hls" to listOf("bysekoze.com", "fastmoon", "filemoon", "moonplayer"),
             "streamwish" to listOf("wish"),
+            "vidnest" to listOf("vidnest"),
+            "uni" to listOf("uns.bio", "uniplayer"),
         )
-
         val serverList = mutableListOf<Server>()
         sourceUrls.forEach { video ->
             val videoUrl = video.sourceUrl.decryptSource()
-
             val matchingMapping = mappings.firstOrNull { (_, urlMatches) ->
                 videoUrl.containsAny(urlMatches)
             }
-
             when {
                 videoUrl.startsWith("/apivtwo/") && INTERNAL_HOSTER_NAMES.any {
                     Regex("""\b${it.lowercase()}\b""").find(video.sourceName.lowercase()) != null
                 } ->
                     Server(videoUrl, "internal ${video.sourceName}", video.priority)
                         .let(serverList::add)
-
                 video.type == "player" ->
                     Server(videoUrl, "player@${video.sourceName}", video.priority)
                         .let(serverList::add)
-
                 matchingMapping != null ->
                     Server(videoUrl, matchingMapping.first, video.priority)
                         .let(serverList::add)
             }
         }
-
         return serverList.parallelCatchingFlatMap { server ->
             val sName = server.sourceName
             when {
                 sName.startsWith("internal ") ->
                     mkissaExtractor.videoFromUrl(server.sourceUrl, server.sourceName, PLAYER_DOMAIN)
-
                 sName.startsWith("player@") -> {
                     val videoHeaders = mkissaHeaders.newBuilder().apply {
                         add("Accept", "video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5")
                         add("Host", server.sourceUrl.toHttpUrl().host)
                         add("Referer", "$PLAYER_DOMAIN/")
                     }.build()
-
                     Video(
                         server.sourceUrl,
                         "Original (player ${server.sourceName.substringAfter("player@")})",
@@ -415,28 +293,24 @@ class MKissaProvider(
                         headers = videoHeaders,
                     ).let(::listOf)
                 }
-
                 sName == "vidstreaming" ->
                     gogoStreamExtractor.videosFromUrl(server.sourceUrl.replace(Regex("^//"), "https://"))
-
                 sName == "doodstream" ->
                     doodExtractor.videosFromUrl(server.sourceUrl)
-
                 sName == "okru" ->
                     okruExtractor.videosFromUrl(server.sourceUrl)
-
                 sName == "mp4upload" ->
                     mp4uploadExtractor.videosFromUrl(server.sourceUrl, headers)
-
                 sName == "streamlare" ->
                     streamlareExtractor.videosFromUrl(server.sourceUrl)
-
                 sName == "Fm-Hls" ->
                     filemoonExtractor.videosFromUrl(server.sourceUrl, prefix = "Fm-Hls:")
-
                 sName == "streamwish" ->
                     streamwishExtractor.videosFromUrl(server.sourceUrl, videoNameGen = { "StreamWish:$it" })
-
+                sName == "vidnest" ->
+                    vidnestExtractor.videosFromUrl(server.sourceUrl, PLAYER_DOMAIN)
+                sName == "uni" ->
+                    uniExtractor.videosFromUrl(server.sourceUrl, PLAYER_DOMAIN)
                 else -> emptyList()
             }.map { v -> Pair(v, server.priority) }
         }
@@ -451,7 +325,6 @@ class MKissaProvider(
 
     private fun buildPost(dataObject: kotlinx.serialization.json.JsonObject): Request {
         val payload = dataObject.toJsonString().toJsonBody()
-
         val postHeaders = mkissaHeaders.newBuilder().apply {
             add("Accept", "*/*")
             add("Content-Length", payload.contentLength().toString())
@@ -460,7 +333,6 @@ class MKissaProvider(
             add("Origin", GRAPHQL_ORIGIN)
             add("Referer", "$GRAPHQL_ORIGIN/")
         }.build()
-
         return POST("$apiUrl/api", headers = postHeaders, body = payload)
     }
 
@@ -473,13 +345,11 @@ class MKissaProvider(
             startsWith("#") -> substring(1) to 0
             else -> this to null
         }
-
         val parsedChunks = try {
             hexPayload.chunked(2).map { it.toInt(16) }
         } catch (_: NumberFormatException) {
             return this
         }
-
         if (keyType == null) {
             XOR_MASKS.forEach { mask ->
                 val decrypted = String(CharArray(parsedChunks.size) { i -> ((parsedChunks[i] xor mask) and 0xFF).toChar() })
@@ -487,7 +357,6 @@ class MKissaProvider(
             }
             return this
         }
-
         val mask = XOR_MASKS[keyType]
         return String(CharArray(parsedChunks.size) { i -> ((parsedChunks[i] xor mask) and 0xFF).toChar() })
     }
@@ -500,40 +369,14 @@ class MKissaProvider(
         val priority: Float,
     )
 
-    // ==================== AniList Title Fetcher ====================
-    @Serializable private data class AniListMediaResponse(val Media: AniListMediaFull? = null)
-    @Serializable private data class AniListMediaFull(val title: AniListTitlesFull? = null)
-    @Serializable private data class AniListTitlesFull(val english: String? = null, val romaji: String? = null)
-
-    private suspend fun fetchTitlesFromAniList(anilistId: Int): Pair<String?, String?> {
-        val query = """
-            query(${'$'}id: Int) {
-                Media(id: ${'$'}id, type: ANIME) {
-                    title { english romaji }
-                }
-            }
-        """.trimIndent()
-        val variables = buildJsonObject { put("id", anilistId) }
-        return try {
-            val request = graphQLPost("https://graphql.anilist.co", headers, query, variables = variables)
-            val response = client.newCall(request).awaitSuccess()
-            val data = response.parseGraphQLAs<AniListMediaResponse>()
-            Pair(data.Media?.title?.romaji, data.Media?.title?.english)
-        } catch (_: Exception) {
-            Pair(null, null)
-        }
-    }
-
     companion object {
         private const val GRAPHQL_ORIGIN = "https://youtu-chan.com"
         private const val PLAYER_DOMAIN = "https://allanime.day"
         private const val MAX_KEY_ATTEMPTS = 3
-
         private val INTERNAL_HOSTER_NAMES = arrayOf(
             "Default", "Ac", "Ak", "Kir", "Rab", "Luf-mp4",
             "Si-Hls", "S-mp4", "Ac-Hls", "Uv-mp4", "Pn-Hls",
         )
-
         private val XOR_KEYS = arrayOf(
             "allanimenews",
             "1234567890123456789",
@@ -541,7 +384,6 @@ class MKissaProvider(
             "s5feqxw21",
             "feqx1",
         )
-
         private val XOR_MASKS = XOR_KEYS.map { key ->
             key.fold(0) { mask, ch -> mask xor ch.code }
         }.toIntArray()
