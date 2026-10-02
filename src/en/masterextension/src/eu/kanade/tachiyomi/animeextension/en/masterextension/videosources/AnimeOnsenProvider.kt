@@ -11,31 +11,18 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
+import keiyoushi.utils.graphQLPost
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.parseGraphQLAs
 import keiyoushi.utils.toJsonRequestBody
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.FormBody
 import okhttp3.Headers
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
 
-/**
- * AnimeOnsen video source.
- *
- * Clean REST pipeline: OAuth2 → title search → direct .m3u8 URL.
- * No JS execution, no encryption, no HTML scraping for video URLs.
- *
- * Flow:
- *   1. POST auth.animeonsen.xyz/oauth/token → access_token
- *   2. GET www.animeonsen.xyz → scrape search token from <meta>
- *   3. POST search.animeonsen.xyz/indexes/content/search → content_id
- *   4. GET api.animeonsen.xyz/v4/content/{id}/video/{ep} → .m3u8 + subtitles
- */
 class AnimeOnsenProvider(
     private val client: OkHttpClient,
     private val headers: Headers,
@@ -61,14 +48,10 @@ class AnimeOnsenProvider(
     // =================================================================
 
     @Serializable
-    private data class TokenResponse(
-        val access_token: String = "",
-    )
+    private data class TokenResponse(val access_token: String = "")
 
     @Serializable
-    private data class MeilisearchResponse(
-        val hits: List<SearchHit> = emptyList(),
-    )
+    private data class MeilisearchResponse(val hits: List<SearchHit> = emptyList())
 
     @Serializable
     private data class SearchHit(
@@ -85,9 +68,7 @@ class AnimeOnsenProvider(
     )
 
     @Serializable
-    private data class VideoMetaData(
-        val subtitles: Map<String, String> = emptyMap(),
-    )
+    private data class VideoMetaData(val subtitles: Map<String, String> = emptyMap())
 
     @Serializable
     private data class VideoStreamData(
@@ -105,7 +86,6 @@ class AnimeOnsenProvider(
     @Volatile
     private var searchToken: String? = null
 
-    // Cache: malId or anilistId → contentId (avoids re-searching per episode)
     private val contentIdCache = mutableMapOf<String, String>()
 
     // =================================================================
@@ -126,9 +106,6 @@ class AnimeOnsenProvider(
         .add("Authorization", "Bearer ${accessToken ?: ""}")
         .add("Origin", SITE_URL)
         .add("Referer", "$SITE_URL/")
-        .add("Sec-Fetch-Dest", "empty")
-        .add("Sec-Fetch-Mode", "cors")
-        .add("Sec-Fetch-Site", "same-site")
         .build()
 
     private fun searchHeaders() = Headers.Builder()
@@ -160,7 +137,6 @@ class AnimeOnsenProvider(
                 .awaitSuccess().bodyString()
 
             if (body.isBlank() || body.trimStart().startsWith("<")) return null
-
             body.parseAs<TokenResponse>().access_token.takeIf { it.isNotBlank() }
         } catch (_: Exception) {
             null
@@ -178,12 +154,9 @@ class AnimeOnsenProvider(
 
     private suspend fun fetchSearchToken(): String? {
         return try {
-            val html = client.newCall(GET(SITE_URL, authHeaders()))
-                .awaitSuccess().bodyString()
+            val html = client.newCall(GET(SITE_URL, authHeaders())).awaitSuccess().bodyString()
             val doc = Jsoup.parse(html)
-            doc.selectFirst("meta[name=ao-search-token]")
-                ?.attr("content")
-                ?.takeIf { it.isNotBlank() }
+            doc.selectFirst("meta[name=ao-search-token]")?.attr("content")?.takeIf { it.isNotBlank() }
         } catch (_: Exception) {
             null
         }
@@ -193,16 +166,15 @@ class AnimeOnsenProvider(
     // STEP 3: Title search → content_id (cached)
     // =================================================================
 
-    private suspend fun resolveContentId(meta: EpisodeMeta): String? {
-        // Check cache first (keyed on malId if available, else title)
-        val cacheKey = if (meta.malId != 0) "mal:${meta.malId}" else "title:${meta.title}"
+    private suspend fun resolveContentId(meta: EpisodeMeta, title: String): String? {
+        val cacheKey = if (meta.malId != 0) "mal:${meta.malId}" else "title:$title"
         contentIdCache[cacheKey]?.let { return it }
 
         ensureSearchToken()
         if (searchToken == null) return null
 
         val searchBody = buildJsonObject {
-            put("q", meta.title)
+            put("q", title)
         }.toJsonRequestBody()
 
         val responseBody = try {
@@ -221,25 +193,22 @@ class AnimeOnsenProvider(
 
         if (hits.isEmpty()) return null
 
-        // Try to match by title (case-insensitive contains)
-        val titleLower = meta.title.lowercase()
+        // Meilisearch ranks by relevance natively, but we do a quick sanity check
+        val titleLower = title.lowercase()
         val match = hits.firstOrNull { hit ->
             hit.content_title_en?.lowercase()?.contains(titleLower) == true ||
                 hit.content_title?.lowercase()?.contains(titleLower) == true ||
                 hit.content_title_jp?.lowercase()?.contains(titleLower) == true
         } ?: hits.firstOrNull { hit ->
-            // Fuzzy: check if any word matches
             val hitTitle = (hit.content_title_en ?: hit.content_title ?: "").lowercase()
             titleLower.split(" ").any { word -> word.length > 3 && hitTitle.contains(word) }
         } ?: hits.first()
 
         val contentId = match.content_id.takeIf { it.isNotBlank() } ?: return null
 
-        // Cache it
         contentIdCache[cacheKey] = contentId
-        // Also cache by title if we used malId
         if (meta.malId != 0) {
-            contentIdCache["title:${meta.title}"] = contentId
+            contentIdCache["title:$title"] = contentId
         }
 
         return contentId
@@ -280,40 +249,75 @@ class AnimeOnsenProvider(
     // =================================================================
 
     override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
-        val meta = EpisodeMeta.from(episode)
-        val title = anime.title.ifBlank { meta.title }
-        if (title.isBlank()) return emptyList()
+        return try {
+            val meta = EpisodeMeta.from(episode)
+            var title = anime.title.takeIf { it.isNotBlank() } ?: meta.title
+            
+            // Fallback to AniList if the title is completely blank
+            if (title.isBlank()) {
+                title = fetchTitleFromAniList(meta.anilistId) ?: return listOf(Video("debug://x", "Title blank (AL: ${meta.anilistId})", "debug://x"))
+            }
 
-        // Resolve content_id via search
-        val contentId = resolveContentId(meta.copy(title = title)) ?: return emptyList()
+            val contentId = resolveContentId(meta, title) ?: return listOf(Video("debug://x", "0 results for '$title'", "debug://x"))
 
-        // Fetch video data
-        val videoData = fetchVideoData(contentId, meta.epNum) ?: return emptyList()
+            val videoData = fetchVideoData(contentId, meta.epNum) ?: return listOf(Video("debug://x", "No video data for ep ${meta.epNum}", "debug://x"))
 
-        val streamUrl = videoData.uri.stream
-        if (streamUrl.isBlank() || !streamUrl.startsWith("http")) return emptyList()
+            val streamUrl = videoData.uri.stream
+            if (streamUrl.isBlank() || !streamUrl.startsWith("http")) {
+                return listOf(Video("debug://x", "Invalid stream URL", "debug://x"))
+            }
 
-        // Build subtitle tracks
-        val subtitleLangs = videoData.metadata.subtitles
-        val subtitles = videoData.uri.subtitles.mapNotNull { (langCode, subUrl) ->
-            val langName = subtitleLangs[langCode] ?: langCode
-            if (subUrl.isNotBlank()) Track(subUrl, langName) else null
+            val subtitleLangs = videoData.metadata.subtitles
+            val subtitles = videoData.uri.subtitles.mapNotNull { (langCode, subUrl) ->
+                val langName = subtitleLangs[langCode] ?: langCode
+                if (subUrl.isNotBlank()) Track(subUrl, langName) else null
+            }
+
+            val vidHeaders = Headers.Builder()
+                .add("User-Agent", AO_USER_AGENT)
+                .add("Referer", "$SITE_URL/")
+                .add("Origin", SITE_URL)
+                .build()
+
+            // Handle HLS vs Direct MP4 safely
+            if (streamUrl.contains(".m3u8")) {
+                playlistUtils.extractFromHls(
+                    streamUrl,
+                    videoNameGen = { quality -> "$name $quality" },
+                    subtitleList = subtitles,
+                    referer = "$SITE_URL/",
+                    masterHeaders = vidHeaders,
+                    videoHeaders = vidHeaders,
+                )
+            } else {
+                listOf(Video(streamUrl, "$name Default", streamUrl, vidHeaders, subtitleTracks = subtitles))
+            }
+        } catch (t: Throwable) {
+            listOf(Video("debug://x", "${t::class.simpleName}: ${t.message?.take(115)}", "debug://x"))
         }
+    }
 
-        // The stream is a direct .m3u8 — extract quality variants via PlaylistUtils
-        val vidHeaders = Headers.Builder()
-            .add("User-Agent", AO_USER_AGENT)
-            .add("Referer", "$SITE_URL/")
-            .add("Origin", SITE_URL)
-            .build()
+    // ==================== AniList Title Fetcher ====================
+    @Serializable private data class AniListMediaResponse(val Media: AniListMediaFull? = null)
+    @Serializable private data class AniListMediaFull(val title: AniListTitlesFull? = null)
+    @Serializable private data class AniListTitlesFull(val english: String? = null, val romaji: String? = null)
 
-        return playlistUtils.extractFromHls(
-            streamUrl,
-            videoNameGen = { quality -> "$name $quality" },
-            subtitleList = subtitles,
-            referer = "$SITE_URL/",
-            masterHeaders = vidHeaders,
-            videoHeaders = vidHeaders,
-        )
+    private suspend fun fetchTitleFromAniList(anilistId: Int): String? {
+        val query = """
+            query(${'$'}id: Int) {
+                Media(id: ${'$'}id, type: ANIME) {
+                    title { english romaji }
+                }
+            }
+        """.trimIndent()
+        val variables = buildJsonObject { put("id", anilistId) }
+        return try {
+            val request = graphQLPost("https://graphql.anilist.co", headers, query, variables = variables)
+            val response = client.newCall(request).awaitSuccess()
+            val data = response.parseGraphQLAs<AniListMediaResponse>()
+            data.Media?.title?.english ?: data.Media?.title?.romaji
+        } catch (_: Exception) {
+            null
+        }
     }
 }
