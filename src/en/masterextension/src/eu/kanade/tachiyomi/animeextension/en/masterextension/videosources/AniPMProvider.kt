@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
 import aniyomi.lib.playlistutils.PlaylistUtils
-import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.BootstrapDto
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.CatalogResponseDto
@@ -11,6 +10,7 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.SettlarSessionDto
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.fmtNum
 import eu.kanade.tachiyomi.animesource.model.SAnime
+import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
@@ -49,8 +49,8 @@ class AniPMProvider(
         return SettlarProxy(headers).also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false); proxy = it }
     }
 
-    override suspend fun fetchVideos(anime: SAnime, episode: EpisodeMeta): List<Video> {
-        val searchQuery = episode.title.ifBlank { anime.title }
+    override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
+        val searchQuery = anime.title
         val encodedQuery = URLEncoder.encode(searchQuery, "UTF-8")
         val searchUrl = "$apiUrl/anime/catalog?q=$encodedQuery&limit=10"
         
@@ -65,7 +65,7 @@ class AniPMProvider(
             client.newCall(GET("$apiUrl/anime/series/$settlarId?routes=e3", apiHeaders)).awaitSuccess().parseAs<SeriesResponseDto>()
         } catch (_: Exception) { return emptyList() }
         
-        val epNumStr = episode.epNum.toString()
+        val epNumStr = fmtNum(episode.episode_number.toDouble())
         val targetEp = series.episodes.firstOrNull { fmtNum(it.number) == epNumStr } ?: return emptyList()
         val epParam = targetEp.routeId ?: epNumStr
         
@@ -98,7 +98,7 @@ class AniPMProvider(
                 )
                 
                 extractedVideos.forEach { vid ->
-                    videos.add(vid.copy(videoTitle = "AniPM - ${vid.videoTitle} [$langLabel]"))
+                    videos.add(vid.copy(quality = "AniPM - ${vid.quality} [$langLabel]"))
                 }
             } catch (_: Exception) { /* Ignore missing languages */ }
         }
