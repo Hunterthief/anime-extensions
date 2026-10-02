@@ -1,122 +1,113 @@
 package eu.kanade.tachiyomi.animeextension.en.masterextension.videosources
 
-import android.content.SharedPreferences
+import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.BootstrapDto
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.CatalogResponseDto
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.EmbedSessionDto
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.SeriesResponseDto
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.SettlarProxy
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.SettlarSessionDto
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.anipm.fmtNum
 import eu.kanade.tachiyomi.animesource.model.SAnime
-import eu.kanade.tachiyomi.animesource.model.SEpisode
+import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.useAsJsoup
-import kotlinx.serialization.Serializable
 import okhttp3.Headers
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import java.util.concurrent.TimeUnit
+import org.nanohttpd.protocols.http.NanoHTTPD
+import java.net.URLEncoder
 
 class AniPMProvider(
     private val client: OkHttpClient,
     private val headers: Headers,
-    private val preferences: SharedPreferences,
 ) : VideoProvider {
+
     override val name = "AniPM"
     override val baseUrl = "https://ani.pm"
     
-    private val apiClient: OkHttpClient by lazy {
-        client.newBuilder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .build()
+    private val apiUrl = "$baseUrl/api"
+    private val embedApi = "https://embed.settlar.io"
+    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
+    
+    private val apiHeaders: Headers by lazy {
+        headers.newBuilder().set("Accept", "application/json, text/plain, */*").set("Referer", "$baseUrl/anime").build()
+    }
+    private val embedHeaders: Headers by lazy {
+        headers.newBuilder().set("Accept", "application/json").set("Referer", "$baseUrl/").build()
     }
 
-    private val anipmHeaders: Headers by lazy {
-        headers.newBuilder()
-            .set("Referer", "$baseUrl/")
-            .set("Origin", baseUrl)
-            .build()
+    @Volatile private var proxy: SettlarProxy? = null
+    @Synchronized
+    private fun getProxy(): SettlarProxy {
+        proxy?.takeIf { it.isAlive }?.let { return it }
+        proxy?.stop()
+        return SettlarProxy(headers).also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false); proxy = it }
     }
 
-    override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
-        return try {
-            val meta = EpisodeMeta.from(episode)
-            val title = anime.title.takeIf { it.isNotBlank() } ?: meta.title
-            if (title.isBlank()) return dbg("Title is missing")
-
-            // 1. Search AniPM for the Anime ID
-            val animeId = searchAnimeId(title) ?: return dbg("0 results for '$title'")
-            
-            // 2. Get Episode Embed URL
-            val embedUrl = fetchEpisodeEmbed(animeId, meta.epNum) ?: return dbg("Ep ${meta.epNum} not found")
-            
-            // 3. Extract Settlar Host & Qualities
-            val rawVideos = extractSettlarVideos(embedUrl)
-            if (rawVideos.isEmpty()) return dbg("0 videos extracted")
-
-            // 4. Proxy through local NanoHTTPD server to bypass hotlink protection
-            SettlarProxy.processVideoList(apiClient, rawVideos)
-        } catch (t: Throwable) {
-            dbg("${t::class.simpleName}: ${t.message?.take(100)}")
-        }
-    }
-
-    private suspend fun searchAnimeId(title: String): String? {
-        val url = "$baseUrl/api/search?q=${java.net.URLEncoder.encode(title, "UTF-8")}"
-        val response = apiClient.newCall(GET(url, anipmHeaders)).awaitSuccess()
-        val results = response.parseAs<List<AniPMSearchResult>>()
+    override suspend fun fetchVideos(anime: SAnime, episode: EpisodeMeta): List<Video> {
+        val searchQuery = episode.title.ifBlank { anime.title }
+        val encodedQuery = URLEncoder.encode(searchQuery, "UTF-8")
+        val searchUrl = "$apiUrl/anime/catalog?q=$encodedQuery&limit=10"
         
-        val match = results.firstOrNull { it.title.equals(title, true) } 
-            ?: results.firstOrNull { it.title.contains(title, true) }
-            ?: results.firstOrNull()
-        return match?.id
-    }
-
-    private suspend fun fetchEpisodeEmbed(animeId: String, epNum: Int): String? {
-        val url = "$baseUrl/api/anime/$animeId/episodes"
-        val response = apiClient.newCall(GET(url, anipmHeaders)).awaitSuccess()
-        val episodes = response.parseAs<List<AniPMEpisode>>()
-        val targetEp = episodes.firstOrNull { it.number == epNum } ?: episodes.getOrNull(epNum - 1)
-        return targetEp?.settlarEmbed
-    }
-
-    private suspend fun extractSettlarVideos(embedUrl: String): List<Video> {
-        val response = apiClient.newCall(GET(embedUrl, anipmHeaders)).awaitSuccess()
-        val document = response.useAsJsoup()
+        val catalog = try {
+            client.newCall(GET(searchUrl, apiHeaders)).awaitSuccess().parseAs<CatalogResponseDto>()
+        } catch (_: Exception) { return emptyList() }
         
-        // Settlar usually hides the master m3u8 in a script or data attribute
-        val masterUrl = document.selectFirst("source[src*=.m3u8]")?.attr("abs:src")
-            ?: document.html().substringAfter("file:\"").substringBefore("\"")
-            ?: document.html().substringAfter("source: '").substringBefore("'")
-            
-        if (masterUrl.isBlank() || !masterUrl.contains(".m3u8")) return emptyList()
-
-        // Fetch the m3u8 to parse qualities
-        val m3u8Response = apiClient.newCall(GET(masterUrl, anipmHeaders)).awaitSuccess()
-        val playlist = m3u8Response.body.string()
+        val seriesItem = catalog.items.firstOrNull() ?: return emptyList()
+        val settlarId = seriesItem.id ?: return emptyList()
+        
+        val series = try {
+            client.newCall(GET("$apiUrl/anime/series/$settlarId?routes=e3", apiHeaders)).awaitSuccess().parseAs<SeriesResponseDto>()
+        } catch (_: Exception) { return emptyList() }
+        
+        val epNumStr = episode.epNum.toString()
+        val targetEp = series.episodes.firstOrNull { fmtNum(it.number) == epNumStr } ?: return emptyList()
+        val epParam = targetEp.routeId ?: epNumStr
         
         val videos = mutableListOf<Video>()
-        val regex = Regex("""RESOLUTION=\d+x(\d+).*\n(.*)""")
-        regex.findAll(playlist).forEach { match ->
-            val quality = match.groupValues[1]
-            val streamUrl = match.groupValues[2]
-            val absoluteUrl = if (streamUrl.startsWith("http")) streamUrl else masterUrl.substringBeforeLast("/") + "/" + streamUrl
-            videos.add(Video(absoluteUrl, "AniPM - ${quality}p", absoluteUrl))
+        
+        suspend fun fetchLangVideos(lang: String, langLabel: String) {
+            try {
+                val boot = client.newCall(GET("$apiUrl/anime/playback-bootstrap/settlar/$settlarId?ep=$epParam&lang=$lang", apiHeaders)).awaitSuccess().parseAs<BootstrapDto>()
+                val selection = boot.settlarSelection ?: return
+                
+                val sessionUrl = "$apiUrl/anime/settlar/session".toHttpUrl().newBuilder()
+                    .addQueryParameter("selection", selection).addQueryParameter("provider", "anipm")
+                    .addQueryParameter("ep", epParam).addQueryParameter("channel", lang).addQueryParameter("telemetry", "0").build()
+                
+                val settlar = client.newCall(GET(sessionUrl, apiHeaders)).awaitSuccess().parseAs<SettlarSessionDto>()
+                val token = settlar.embedUrl?.toHttpUrl()?.queryParameter("t") ?: return
+                
+                val embed = client.newCall(GET("$embedApi/api/embed/session?t=$token", embedHeaders)).awaitSuccess().parseAs<EmbedSessionDto>()
+                val manifest = embed.source ?: return
+                
+                val proxy = getProxy()
+                val subtitleTracks = embed.subtitles.mapNotNull { sub ->
+                    val subUrl = sub.url ?: return@mapNotNull null
+                    Track(proxy.subtitleUrl(subUrl), sub.label ?: sub.srclang ?: "Unknown")
+                }
+                
+                val extractedVideos = playlistUtils.extractFromHls(
+                    playlistUrl = proxy.proxyUrl(manifest), referer = embedApi,
+                    masterHeaders = headers, videoHeaders = headers, subtitleList = subtitleTracks
+                )
+                
+                extractedVideos.forEach { vid ->
+                    videos.add(vid.copy(videoTitle = "AniPM - ${vid.videoTitle} [$langLabel]"))
+                }
+            } catch (_: Exception) { /* Ignore missing languages */ }
         }
         
-        // Fallback if it's a single stream playlist
-        if (videos.isEmpty()) {
-            videos.add(Video(masterUrl, "AniPM - Auto", masterUrl))
-        }
+        if (targetEp.sub) fetchLangVideos("sub", "Sub")
+        if (targetEp.dub) fetchLangVideos("dub", "Dub")
+        if (targetEp.subhard) fetchLangVideos("subhard", "Hard Sub")
+        if (targetEp.dubhard) fetchLangVideos("dubhard", "Hard Dub")
         
         return videos
     }
-
-    private fun dbg(msg: String): List<Video> = listOf(Video("debug://x", msg.take(120), "debug://x"))
-
-    @Serializable
-    data class AniPMSearchResult(val id: String, val title: String)
-    
-    @Serializable
-    data class AniPMEpisode(val number: Int, val settlarEmbed: String)
 }
