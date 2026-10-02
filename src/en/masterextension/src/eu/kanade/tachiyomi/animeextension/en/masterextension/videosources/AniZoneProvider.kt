@@ -15,39 +15,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.add
-import kotlinx.serialization.json.addJsonObject
-import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonArray
 import okhttp3.Headers
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.Jsoup.parseBodyFragment
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
-import org.jsoup.parser.Parser
 import java.net.URLEncoder
 
 /**
  * AniZone video source (anizone.to).
  *
- * Laravel Livewire application. Video URLs are direct .m3u8 links inside
- * <media-player src="..."> HTML attributes, but reaching them requires
- * speaking the Livewire protocol (CSRF token + snapshot + POST /livewire/update).
- *
- * Flow:
- *   1. GET /anime?search={title} → find anime slug
- *   2. GET /anime/{slug} → find episode link
- *   3. GET /anime/{slug}/episode/{ep} → extract media-player src + servers
- *   4. POST /livewire/update (setVideo) → alternate server m3u8 URLs
- *   5. PlaylistUtils.extractFromHls → quality variants
- *
- * No encryption, no JS execution, no WASM. Just HTML parsing + Livewire protocol.
+ * Updated to handle the new Alpine.js x-data Vidstack player payloads
+ * and the updated Livewire 3 protocol for server switching.
  */
 class AniZoneProvider(
     private val client: OkHttpClient,
@@ -60,194 +43,110 @@ class AniZoneProvider(
     companion object {
         private const val BASE = "https://anizone.to"
         private val EP_NUM_REGEX = Regex("""\d+(\.\d+)?""")
-        private val SET_VIDEO_REGEX = Regex("""setVideo\('(\d+)'\)""")
+        private val SET_VIDEO_REGEX = Regex("""setVideo\(['"]?(\d+)['"]?\)""")
+        private val VIDSTACK_REGEX = Regex("""JSON\.parse\('((?:[^'\\]|\\.)*)'\)""")
     }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
-    // ── Livewire state (per-fetch, not shared across calls) ──
-    private var csrfToken = ""
-    private var currentSnapshot = ""
+    private var token: String = ""
+    private val snapShots: MutableMap<String, String> = mutableMapOf(
+        "video_snapshot_key" to "",
+    )
 
     // =================================================================
-    // DTOs (private to this provider)
+    // DTOs
     // =================================================================
 
     @Serializable
-    private data class LivewireResponseDto(
-        val components: List<LivewireComponentDto> = emptyList(),
-    )
+    class LivewireDto(val components: List<ComponentDto>) {
+        @Serializable
+        class ComponentDto(val snapshot: String, val effects: EffectsDto) {
+            @Serializable
+            class EffectsDto(val html: String)
+        }
+    }
 
     @Serializable
-    private data class LivewireComponentDto(
-        val snapshot: String = "",
-        val effects: LivewireEffectsDto? = null,
-    )
+    class LivewireCall(val path: String = "", val method: String, val params: List<JsonElement>)
 
     @Serializable
-    private data class LivewireEffectsDto(
-        val html: String = "",
-    )
-
-    @Serializable
-    private data class LivewireRequestDto(
+    class LivewirePayload(
         @SerialName("_token") val token: String,
-        val components: List<LivewireComponentRequestDto>,
+        val components: List<LivewireComponentPayload>,
     )
 
     @Serializable
-    private data class LivewireComponentRequestDto(
-        val calls: JsonArray,
+    class LivewireComponentPayload(
         val snapshot: String,
         val updates: JsonObject,
+        val calls: List<LivewireCall>,
     )
 
-    // =================================================================
-    // HEADERS
-    // =================================================================
+    @Serializable
+    class VidstackConfig(val src: String, val subtitles: List<VidstackSubtitle> = emptyList())
 
-    private fun siteHeaders(referer: String = "$BASE/") = headers.newBuilder()
-        .set("Referer", referer)
-        .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .build()
-
-    private fun livewireHeaders(referer: String) = headers.newBuilder()
-        .set("Referer", referer)
-        .set("Accept", "application/json, text/javascript, */*; q=0.01")
-        .set("X-Livewire", "")
-        .set("X-CSRF-TOKEN", csrfToken)
-        .set("Origin", BASE)
-        .set("Content-Type", "application/json")
-        .build()
+    @Serializable
+    class VidstackSubtitle(val title: String, val file: String)
 
     // =================================================================
     // LIVEWIRE STATE MANAGEMENT
     // =================================================================
 
-    /** Extract CSRF token + snapshot from a full-page HTML document */
-    private fun Document.extractState(): Document {
-        selectFirst("script[data-csrf]")?.attr("data-csrf")
-            ?.takeIf { it.isNotEmpty() }
-            ?.let { csrfToken = it }
+    private fun Document.getSnapshot(): String? = this.selectFirst("main > div[wire:snapshot], main > ul[wire:snapshot], div[wire:snapshot]")
+        ?.attr("wire:snapshot")
+        ?.replace("&quot;", "\"")
 
-        selectFirst("main > div[wire:snapshot], main > ul[wire:snapshot]")
-            ?.attr("wire:snapshot")
-            ?.replace("&quot;", "\"")
-            ?.let { currentSnapshot = it }
-
+    private fun Document.updateState(): Document {
+        this.selectFirst("script[data-csrf]")?.attr("data-csrf")?.takeIf(String::isNotEmpty)?.let { token = it }
+        val snapshot = this.getSnapshot()
+        snapshot?.let { snapShots["video_snapshot_key"] = it }
         return this
     }
 
-    /** Build and execute a Livewire POST request with 419 retry */
-    private fun livewireCall(
-        method: String,
-        params: JsonArray = buildJsonArray {},
-        refererPath: String,
-    ): Document {
-        val referer = "$BASE$refererPath"
-
-        // Ensure we have valid state
-        if (csrfToken.isEmpty() || currentSnapshot.isEmpty()) {
-            refreshState(refererPath)
+    private fun createLivewireReq(calls: List<LivewireCall>, initialSlug: String): okhttp3.Request {
+        if (snapShots["video_snapshot_key"].isNullOrEmpty() || token.isEmpty()) {
+            client.newCall(GET(baseUrl + initialSlug, headers)).execute().use { res ->
+                Jsoup.parse(res.body.string(), BASE).updateState()
+            }
         }
 
-        val body = LivewireRequestDto(
-            token = csrfToken,
+        val requestHeaders = headers.newBuilder()
+            .add("Accept", "*/*")
+            .add("Content-Type", "application/json")
+            .add("X-Livewire", "")
+            .add("Origin", baseUrl)
+            .add("Referer", "$baseUrl$initialSlug")
+            .build()
+
+        val payload = LivewirePayload(
+            token = token,
             components = listOf(
-                LivewireComponentRequestDto(
-                    calls = buildJsonArray {
-                        addJsonObject {
-                            put("path", "")
-                            put("method", method)
-                            put("params", params)
-                        }
-                    },
-                    snapshot = currentSnapshot,
-                    updates = buildJsonObject {},
+                LivewireComponentPayload(
+                    snapshot = snapShots["video_snapshot_key"] ?: "",
+                    updates = buildJsonObject { },
+                    calls = calls,
                 ),
             ),
-        ).toJsonRequestBody()
-
-        var response = client.newCall(
-            POST("$BASE/livewire/update", livewireHeaders(referer), body),
-        ).execute()
-
-        // 419 = CSRF token expired → refresh and retry once
-        if (response.code == 419) {
-            response.close()
-            csrfToken = ""
-            currentSnapshot = ""
-            refreshState(refererPath)
-
-            val retryBody = LivewireRequestDto(
-                token = csrfToken,
-                components = listOf(
-                    LivewireComponentRequestDto(
-                        calls = buildJsonArray {
-                            addJsonObject {
-                                put("path", "")
-                                put("method", method)
-                                put("params", params)
-                            }
-                        },
-                        snapshot = currentSnapshot,
-                        updates = buildJsonObject {},
-                    ),
-                ),
-            ).toJsonRequestBody()
-
-            response = client.newCall(
-                POST("$BASE/livewire/update", livewireHeaders(referer), retryBody),
-            ).execute()
-        }
-
-        return parseLivewireResponse(response)
-    }
-
-    /** Parse Livewire JSON response → Jsoup Document of the HTML fragment */
-    private fun parseLivewireResponse(response: Response): Document {
-        val dto = response.use { it.body.string() }.parseAs<LivewireResponseDto>()
-        val comp = dto.components.firstOrNull() ?: return parseBodyFragment("", BASE)
-
-        currentSnapshot = comp.snapshot.replace("\\\"", "\"")
-
-        val html = comp.effects?.html
-            ?.replace("\\\"", "\"")
-            ?.replace("\\n", "")
-            ?: ""
-
-        return parseBodyFragment(html, BASE)
-    }
-
-    /** Reload a page to get fresh CSRF token + snapshot */
-    private fun refreshState(path: String) {
-        val doc = client.newCall(
-            GET("$BASE$path", siteHeaders("$BASE$path")),
-        ).execute().use { parseBodyFragment(it.body.string(), BASE) }
-
-        // For full pages, use Jsoup parse
-        val fullDoc = org.jsoup.Jsoup.parse(
-            client.newCall(GET("$BASE$path", siteHeaders("$BASE$path")))
-                .execute().use { it.body.string() },
-            BASE,
         )
-        fullDoc.extractState()
+
+        return POST(
+            url = "$baseUrl/livewire/update",
+            headers = requestHeaders,
+            body = payload.toJsonRequestBody(),
+        )
     }
 
     // =================================================================
-    // STEP 1: Search for anime by title
+    // SEARCH & EPISODE FINDING
     // =================================================================
 
     private fun searchAnime(title: String): String? {
         val encodedTitle = URLEncoder.encode(title, "UTF-8")
         val url = "$BASE/anime?search=$encodedTitle&sort=title-asc"
 
-        val doc = client.newCall(GET(url, siteHeaders()))
-            .execute().use { org.jsoup.Jsoup.parse(it.body.string(), BASE) }
+        val doc = client.newCall(GET(url, headers)).execute().use { Jsoup.parse(it.body.string(), BASE) }
 
-        doc.extractState()
-
-        // Find matching anime link
         val links = doc.select("a[href*=/anime/]")
             .filter { link ->
                 val href = link.attr("href")
@@ -255,7 +154,6 @@ class AniZoneProvider(
                 path.isNotEmpty() && !path.contains("/")
             }
 
-        // Try exact/contains match first
         val match = links.firstOrNull { link ->
             val text = link.text().trim()
             text.equals(title, ignoreCase = true) ||
@@ -267,103 +165,114 @@ class AniZoneProvider(
         return href.removePrefix(BASE).substringBefore("?")
     }
 
-    // =================================================================
-    // STEP 2: Find episode URL on anime page
-    // =================================================================
-
     private fun findEpisodeUrl(animeSlug: String, epNum: Int): String? {
-        val doc = client.newCall(GET("$BASE$animeSlug", siteHeaders("$BASE$animeSlug")))
-            .execute().use { org.jsoup.Jsoup.parse(it.body.string(), BASE) }
+        val doc = client.newCall(GET("$BASE$animeSlug", headers)).execute().use { Jsoup.parse(it.body.string(), BASE) }
 
-        doc.extractState()
-
-        val episodes = doc.select("ul > li").filter { li ->
-            li.selectFirst("a[href*=/anime/]") != null
+        val episodes = doc.select("ul > li, div.grid > div").filter { el ->
+            el.selectFirst("a[href]") != null
         }
 
-        // Match by episode number
-        val match = episodes.firstOrNull { li ->
-            val h3Text = li.selectFirst("h3")?.text() ?: ""
-            val nums = EP_NUM_REGEX.findAll(h3Text).map { it.value }.toList()
+        val match = episodes.firstOrNull { el ->
+            val text = el.text()
+            val nums = EP_NUM_REGEX.findAll(text).map { it.value }.toList()
             nums.any { it.toFloatOrNull()?.toInt() == epNum }
         }
 
-        // Fallback: try index-based (episodes may be in order)
-        val episodeLink = match?.selectFirst("a[href*=/anime/]")
-            ?: episodes.getOrNull(epNum - 1)?.selectFirst("a[href*=/anime/]")
+        val episodeLink = match?.selectFirst("a[href]")
+            ?: episodes.getOrNull(epNum - 1)?.selectFirst("a[href]")
 
         val href = episodeLink?.attr("abs:href") ?: episodeLink?.attr("href") ?: return null
         return href.removePrefix(BASE).substringBefore("?")
     }
 
     // =================================================================
-    // STEP 3: Extract videos from episode page
+    // VIDEO EXTRACTION (VIDSTACK & LIVEWIRE)
     // =================================================================
 
     private fun extractVideosFromEpisodePage(episodePath: String): List<Video> {
-        val doc = client.newCall(GET("$BASE$episodePath", siteHeaders("$BASE$episodePath")))
-            .execute().use { org.jsoup.Jsoup.parse(it.body.string(), BASE) }
+        val response = client.newCall(GET("$BASE$episodePath", headers)).execute()
+        val initialDocument = Jsoup.parse(response.body.string(), BASE).updateState()
+        
+        val serverButtons = initialDocument.select("button[wire:click]")
+            .filter { it.attr("wire:click").contains("setVideo") }
 
-        doc.extractState()
+        if (serverButtons.isEmpty()) {
+            return extractVideosFromDocument(initialDocument, "Default")
+        }
 
         val videos = mutableListOf<Video>()
 
-        // Get server buttons
-        val serverButtons = doc.select("button[wire:click]")
-            .filter { it.attr("wire:click").contains("setVideo") }
+        serverButtons.forEach { btn ->
+            val wireClick = btn.attr("wire:click")
+            val matchResult = SET_VIDEO_REGEX.find(wireClick)
+            val videoId = matchResult?.groupValues?.getOrNull(1) ?: "0"
+            val isDefault = btn.hasAttr("disabled")
+            val hosterName = btn.selectFirst("div.text-lg")?.text()?.takeIf { it.isNotEmpty() } ?: btn.text().ifBlank { "Server $videoId" }
 
-        // Default server (first one, already in the page)
-        val defaultM3u8 = doc.selectFirst("media-player")?.attr("src")
-        val defaultSubs = doc.select("track[kind=subtitles]").map {
-            Track(it.attr("src"), it.attr("label"))
-        }
-        val defaultName = serverButtons.firstOrNull()?.text()?.trim() ?: "Default"
-
-        if (!defaultM3u8.isNullOrBlank()) {
-            videos.addAll(
-                playlistUtils.extractFromHls(
-                    playlistUrl = defaultM3u8,
-                    referer = "$BASE/",
-                    videoNameGen = { quality -> "$name $defaultName $quality" },
-                    subtitleList = defaultSubs,
-                ),
-            )
-        }
-
-        // Alternate servers via Livewire setVideo calls
-        val videoSnapshot = currentSnapshot
-        serverButtons.drop(1).forEach { button ->
             try {
-                val matchResult = SET_VIDEO_REGEX.find(button.attr("wire:click"))
-                val videoId = matchResult?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return@forEach
-
-                currentSnapshot = videoSnapshot
-
-                val params = buildJsonArray { add(videoId) }
-                val fragment = livewireCall("setVideo", params, episodePath)
-
-                val m3u8 = fragment.selectFirst("media-player")?.attr("src")
-                val subs = fragment.select("track[kind=subtitles]").map {
-                    Track(it.attr("src"), it.attr("label"))
-                }
-                val serverName = button.text().trim().ifBlank { "Server $videoId" }
-
-                if (!m3u8.isNullOrBlank()) {
-                    videos.addAll(
-                        playlistUtils.extractFromHls(
-                            playlistUrl = m3u8,
-                            referer = "$BASE/",
-                            videoNameGen = { quality -> "$name $serverName $quality" },
-                            subtitleList = subs,
-                        ),
+                val document = if (isDefault) {
+                    initialDocument
+                } else {
+                    val calls = listOf(
+                        LivewireCall(method = "setVideo", params = listOf(JsonPrimitive(videoId.toIntOrNull() ?: 0))),
                     )
+                    val req = createLivewireReq(calls, episodePath)
+                    val resp = client.newCall(req).execute()
+                    
+                    if (resp.code == 419) {
+                        resp.close()
+                        token = ""
+                        snapShots["video_snapshot_key"] = ""
+                        val retryReq = createLivewireReq(calls, episodePath)
+                        val retryResp = client.newCall(retryReq).execute()
+                        parseLivewireHtml(retryResp)
+                    } else {
+                        parseLivewireHtml(resp)
+                    }
                 }
+                
+                videos.addAll(extractVideosFromDocument(document, hosterName))
             } catch (_: Exception) {
                 // Skip failed servers
             }
         }
 
         return videos
+    }
+
+    private fun parseLivewireHtml(response: Response): Document {
+        val dto = response.use { it.body.string() }.parseAs<LivewireDto>()
+        val comp = dto.components.firstOrNull() ?: return Jsoup.parse("", BASE)
+        snapShots["video_snapshot_key"] = comp.snapshot.replace("\\\"", "\"")
+        val html = comp.effects.html.replace("\\\"", "\"").replace("\\n", "")
+        return Jsoup.parseBodyFragment(html, BASE)
+    }
+
+    private fun Document.vidstackData(): VidstackConfig? {
+        val xData = selectFirst("[x-data*=vidstackPlayer]")?.attr("x-data") ?: return null
+        val jsonString = VIDSTACK_REGEX.find(xData)?.groupValues?.get(1) ?: return null
+        val normalizedJson = jsonString
+            .replace("""\u0022""", "\"")
+            .replace("""\u0026""", "&")
+            .replace("""\'""", "'")
+            .replace("""\/""", "/")
+        return runCatching { normalizedJson.parseAs<VidstackConfig>() }.getOrNull()
+    }
+
+    private fun extractVideosFromDocument(document: Document, hosterName: String): List<Video> {
+        val vidstack = document.vidstackData()
+        
+        val subtitles = vidstack?.subtitles?.map { Track(it.file.replace("\\/", "/"), it.title) }
+            ?: document.select("track[kind=subtitles]").map { Track(it.attr("src").replace("\\/", "/"), it.attr("label")) }
+            
+        val videoUrl = vidstack?.src ?: document.selectFirst("media-player")?.attr("src") ?: return emptyList()
+        
+        return playlistUtils.extractFromHls(
+            playlistUrl = videoUrl,
+            referer = "$BASE/",
+            videoNameGen = { q -> "$name $hosterName - $q" },
+            subtitleList = subtitles,
+        )
     }
 
     // =================================================================
@@ -378,17 +287,11 @@ class AniZoneProvider(
         return withContext(Dispatchers.IO) {
             try {
                 // Reset Livewire state for each fetch
-                csrfToken = ""
-                currentSnapshot = ""
+                token = ""
+                snapShots["video_snapshot_key"] = ""
 
-                // Step 1: Search
                 val animeSlug = searchAnime(title) ?: return@withContext emptyList<Video>()
-
-                // Step 2: Find episode
-                val episodePath = findEpisodeUrl(animeSlug, meta.epNum)
-                    ?: return@withContext emptyList<Video>()
-
-                // Step 3: Extract videos
+                val episodePath = findEpisodeUrl(animeSlug, meta.epNum) ?: return@withContext emptyList<Video>()
                 extractVideosFromEpisodePage(episodePath)
             } catch (_: Exception) {
                 emptyList()
