@@ -4,6 +4,7 @@ import androidx.preference.ListPreference
 import androidx.preference.MultiSelectListPreference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
+import androidx.preference.EditTextPreference
 import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
@@ -19,16 +20,17 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.TextNode
+import java.net.InetAddress
 import java.net.URLEncoder
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
-import androidx.preference.EditTextPreference
 
 class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
 
@@ -61,11 +63,22 @@ class MasterExtension : ConfigurableAnimeSource, AnimeHttpSource() {
         .set("Referer", "$baseUrl/")
 
     // =================================================================
-    // CLIENT — CloudflareInterceptor wired as network interceptor
+    // DNS FIX — Force IPv4 to bypass broken IPv6 routing on some WiFi networks
+    // =================================================================
+    private val forceIPv4Dns = object : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+            // IPv4 addresses are exactly 4 bytes. This strips out broken IPv6 Cloudflare routes.
+            return Dns.SYSTEM.lookup(hostname).filter { it.address.size == 4 }
+        }
+    }
+
+    // =================================================================
+    // CLIENT — CloudflareInterceptor wired as network interceptor + IPv4 DNS
     // =================================================================
 
     override val client: OkHttpClient by lazy {
         network.client.newBuilder()
+            .dns(forceIPv4Dns) // <--- Forces IPv4 to prevent IPv6 blackhole errors
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .addNetworkInterceptor(
