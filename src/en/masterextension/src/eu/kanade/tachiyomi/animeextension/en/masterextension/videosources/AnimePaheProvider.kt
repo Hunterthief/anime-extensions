@@ -5,29 +5,28 @@ import eu.kanade.tachiyomi.animeextension.en.masterextension.EpisodeMeta
 import eu.kanade.tachiyomi.animeextension.en.masterextension.VideoProvider
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe.ANIMEPAHE_UA
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe.AnimePaheHlsServer
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe.DdosGuardInterceptor
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe.CloudflareInterceptor
 import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe.KwikExtractor
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe.PaheEpisodeDto
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe.PaheResponseDto
-import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe.PaheSearchResultDto
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe.EpisodeDto
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe.ResponseDto
+import eu.kanade.tachiyomi.animeextension.en.masterextension.videosources.animepahe.SearchResultDto
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
-import keiyoushi.utils.graphQLPost
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.parseGraphQLAs
 import keiyoushi.utils.useAsJsoup
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
+import kotlinx.coroutines.delay
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import java.util.concurrent.ConcurrentHashMap
-import kotlin.math.abs
+import okhttp3.Response
+import java.io.IOException
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.time.Duration.Companion.milliseconds
 
 class AnimePaheProvider(
     private val client: OkHttpClient,
@@ -49,48 +48,256 @@ class AnimePaheProvider(
         }
 
     private val cfBypassUserAgent: String
-        get() = preferences.getString(PREF_CF_UA_KEY, ANIMEPAHE_UA)?.takeIf { it.isNotBlank() } ?: ANIMEPAHE_UA
+        get() {
+            val stored = preferences.getString(PREF_CF_UA_KEY, ANIMEPAHE_UA)
+            return if (stored.isNullOrBlank()) ANIMEPAHE_UA else stored.trim()
+        }
 
-    private val cleanClient: OkHttpClient by lazy {
-        client.newBuilder().apply { networkInterceptors().clear() }.build()
-    }
-
+    private val interceptor = CloudflareInterceptor(client) { cfBypassUserAgent }
+    
     private val paheClient: OkHttpClient by lazy {
-        cleanClient.newBuilder()
-            .addInterceptor(DdosGuardInterceptor(cleanClient) { cfBypassUserAgent })
+        client.newBuilder()
+            .addInterceptor(interceptor)
             .build()
     }
 
-    private val kwikClient: OkHttpClient by lazy {
-        paheClient.newBuilder().apply { interceptors().removeAll { it is DdosGuardInterceptor } }.build()
+    private val extractorClient by lazy {
+        paheClient.newBuilder().apply {
+            interceptors().removeAll { it is CloudflareInterceptor }
+        }.build()
     }
 
     private val paheHeaders: Headers by lazy {
         headers.newBuilder().set("Referer", "$baseUrl/").build()
     }
 
-    private val sessionCache = ConcurrentHashMap<Int, String>()
+    override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
+        return try {
+            val meta = EpisodeMeta.from(episode)
+            val title = anime.title.takeIf { it.isNotBlank() } ?: meta.title
+            
+            if (title.isBlank()) return dbg("title blank")
+            
+            val session = fetchSessionAndId(null, title)?.second 
+                ?: return dbg("0 results for '${title.take(30)}' on $baseUrl")
 
-    // ==================== Search & Matching Logic ====================
+            val episodes = fetchEpisodes(session)
+            val epNum = meta.epNum
+            
+            val matchedEpisode = episodes.firstOrNull { 
+                it.episode_number.toInt() == epNum 
+            } ?: episodes.getOrNull(epNum - 1) ?: return dbg("ep$epNum not in ${episodes.size}")
 
-    // FIX: Changed to camelCase to satisfy ktlint
-    private val seasonNumberRegex = Regex(
-        """(?:season|part)\s*(\d+)|(\d+)(?:st|nd|rd|th)\s*(?:season|part)""",
-        RegexOption.IGNORE_CASE
-    )
+            val urlPath = matchedEpisode.url.substringBefore("?")
+            val request = GET("$baseUrl$urlPath", paheHeaders)
+            val response = paheClient.newCall(request).awaitSuccess()
+            val document = response.useAsJsoup()
 
-    private fun extractSeasonNumber(text: String): Int? {
-        val match = seasonNumberRegex.find(text) ?: return null
-        val numStr = match.groupValues[1].ifEmpty { match.groupValues[2] }
-        return numStr.toIntOrNull()
+            val downloadLinks = document.select("div#pickDownload > a")
+            val buttons = document.select("div#resolutionMenu > button").withIndex().toList()
+
+            val useHLS = preferences.getBoolean(PREF_LINK_TYPE_KEY, PREF_LINK_TYPE_DEFAULT)
+            val cfUA = cfBypassUserAgent
+            val videoList = mutableListOf<Video>()
+
+            buttons.forEach { (index, btn) ->
+                val kwikLink = btn.attr("data-src")
+                val fullText = btn.text()
+                
+                var qualityText = if (fullText.contains(" · ")) fullText.substringAfter(" · ") else fullText
+                qualityText = qualityText.replace("eng", "", ignoreCase = true)
+                    .replace("kor", "", ignoreCase = true)
+                    .replace("chi", "", ignoreCase = true)
+                    .replace(Regex("\\s+"), " ").trim()
+                
+                val lang = when {
+                    fullText.contains("eng", ignoreCase = true) -> "English"
+                    fullText.contains("kor", ignoreCase = true) -> "Korean"
+                    fullText.contains("chi", ignoreCase = true) -> "Chinese"
+                    else -> "Sub"
+                }
+                
+                val finalQuality = "$qualityText ($lang)"
+                val paheWinLink = downloadLinks.getOrNull(index)?.attr("href") ?: ""
+
+                if (!useHLS && paheWinLink.isNotBlank()) {
+                    try {
+                        val resolvedVideo = KwikExtractor(extractorClient, paheHeaders, cfUA).getStreamVideo(paheWinLink, finalQuality)
+                        val proxiedVideo = AnimePaheHlsServer.processMp4VideoList(extractorClient, listOf(resolvedVideo)).firstOrNull()
+                        if (proxiedVideo != null) videoList.add(proxiedVideo)
+                    } catch (_: Exception) {}
+                } else {
+                    try {
+                        val hlsVideo = KwikExtractor(extractorClient, paheHeaders, cfUA).getHlsVideo(kwikLink, referer = "$baseUrl/", quality = "$finalQuality (HLS)")
+                        val proxiedHlsVideos = AnimePaheHlsServer.processVideoList(extractorClient, listOf(hlsVideo))
+                        videoList.addAll(proxiedHlsVideos)
+                    } catch (_: Exception) {}
+                }
+            }
+
+            if (videoList.isEmpty()) return dbg("Extractor returned 0 videos")
+
+            val preferredQuality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!.lowercase()
+            val shouldBeAv1 = preferences.getBoolean(PREF_AV1_KEY, PREF_AV1_DEFAULT)
+            val preferredLang = preferences.getString(PREF_LANG_KEY, PREF_LANG_DEFAULT) ?: PREF_LANG_DEFAULT
+            val preferredLangDisplay = when (preferredLang) {
+                "sub" -> "Sub"
+                "eng" -> "English"
+                "kor" -> "Korean"
+                "chi" -> "Chinese"
+                else -> "Sub"
+            }
+
+            return videoList.sortedWith(
+                compareByDescending<Video> { video ->
+                    video.quality.lowercase().contains(preferredQuality)
+                }.thenByDescending { video ->
+                    val title = video.quality.lowercase()
+                    title.contains("av1") == shouldBeAv1
+                }.thenByDescending { video ->
+                    val title = video.quality.lowercase()
+                    QUALITY_REGEX_P.find(title)?.groupValues?.get(1)?.toIntOrNull()
+                        ?: QUALITY_REGEX.find(title)?.groupValues?.get(1)?.toIntOrNull()
+                        ?: 0
+                }.thenByDescending { video ->
+                    video.quality.contains("($preferredLangDisplay)", ignoreCase = true)
+                }
+            )
+        } catch (e: Throwable) {
+            dbg("FATAL: ${e::class.simpleName}: ${e.message?.take(60)}")
+        }
     }
 
-    private fun stripSeasonInfo(title: String): String {
-        return title
-            .replace(Regex("""\s*[-:]\s*(?:season|part)\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*(?:season|part)\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\d+(?:st|nd|rd|th)\s*(?:season|part).*$""", RegexOption.IGNORE_CASE), "")
-            .trim()
+    private suspend fun fetchEpisodes(session: String): List<SEpisode> {
+        val episodeList = mutableListOf<SEpisode>()
+        var page = 1
+        
+        while (true) {
+            val url = baseUrl.toHttpUrl().newBuilder().apply {
+                addPathSegment("api")
+                addQueryParameter("m", "release")
+                addQueryParameter("id", session)
+                addQueryParameter("sort", "episode_asc")
+                addQueryParameter("page", page.toString())
+            }.build()
+
+            val response = safeApiCall(GET(url, paheHeaders))
+            if (!response.isSuccessful) {
+                response.close()
+                throw IOException("HTTP ${response.code} fetching episodes")
+            }
+            
+            val currentData = response.use { it.parseAs<ResponseDto<EpisodeDto>>() }
+            if (currentData.items.isNotEmpty()) {
+                episodeList.addAll(parseEpisodePage(currentData.items, session))
+            }
+            
+            if (currentData.currentPage >= currentData.lastPage) break
+            page++
+            delay(1000.milliseconds)
+        }
+        
+        val showSiteEpisodeNumber = preferences.getBoolean(PREF_SHOW_SITE_NUMBER_KEY, PREF_SHOW_SITE_NUMBER_DEFAULT)
+
+        return episodeList.mapIndexed { index, episode ->
+            val siteEpisodeNumber = episode.name.removePrefix("Episode ")
+            episode.apply {
+                episode_number = (index + 1).toFloat()
+                name = if (showSiteEpisodeNumber && siteEpisodeNumber != (index + 1).toString()) {
+                    "Episode ${index + 1} ($siteEpisodeNumber)"
+                } else {
+                    "Episode ${index + 1}"
+                }
+            }
+        }.reversed()
+    }
+
+    private fun parseEpisodePage(episodes: List<EpisodeDto>, animeSession: String): List<SEpisode> = episodes.map { episode ->
+        SEpisode.create().apply {
+            val session = episode.session
+            url = "/play/$animeSession/$session?anime_id=${episode.animeId}"
+            val epNum = episode.episodeNumber
+            episode_number = epNum
+            val epName = if (floor(epNum) == ceil(epNum)) {
+                epNum.toInt().toString()
+            } else {
+                epNum.toString()
+            }
+            name = "Episode $epName"
+        }
+    }
+
+    private suspend fun fetchSessionAndId(animeId: String?, title: String?): Pair<String, String>? {
+        if (title.isNullOrBlank()) return null
+        val searchQuery = normalizeSearchQuery(title)
+        val words = searchQuery.split(" ").filter { it.isNotBlank() }
+        val normalizedTitle = normalizeTitle(title)
+
+        var result = searchApiForId(animeId, normalizedTitle, searchQuery)
+        if (result != null) return result
+
+        val trailingLengths = listOf(4, 3)
+        for (len in trailingLengths) {
+            if (words.size > len) {
+                val shortQuery = words.takeLast(len).joinToString(" ")
+                result = searchApiForId(animeId, normalizedTitle, shortQuery)
+                if (result != null) return result
+            }
+        }
+        return null
+    }
+
+    private suspend fun searchApiForId(animeId: String?, normalizedTitle: String?, originalQuery: String): Pair<String, String>? {
+        var page = 1
+        var hasNextPage = true
+
+        while (hasNextPage && page <= 10) {
+            val timeSuffix = (System.currentTimeMillis() / 1000) + (page * 3)
+            val fullQuery = "$originalQuery $timeSuffix"
+
+            val searchUrl = baseUrl.toHttpUrl().newBuilder().apply {
+                addPathSegment("api")
+                addQueryParameter("m", "search")
+                addQueryParameter("q", fullQuery)
+                addQueryParameter("page", page.toString())
+            }.build()
+
+            val result = try {
+                val response = safeApiCall(GET(searchUrl, paheHeaders))
+                response.use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val searchData = resp.parseAs<ResponseDto<SearchResultDto>>()
+                    hasNextPage = searchData.currentPage < searchData.lastPage
+
+                    val matchedAnime = if (animeId != null) {
+                        searchData.items.firstOrNull { it.id.toString() == animeId }
+                    } else if (normalizedTitle != null) {
+                        searchData.items.firstOrNull {
+                            val apiTitle = normalizeTitle(it.title)
+                            apiTitle.contains(normalizedTitle) || normalizedTitle.contains(apiTitle)
+                        }
+                    } else {
+                        null
+                    }
+                    matchedAnime?.let { it.id.toString() to it.session }
+                }
+            } catch (_: Exception) { null }
+
+            if (result != null) return result
+            if (hasNextPage && page < 10) delay(1000.milliseconds)
+            page++
+        }
+        return null
+    }
+
+    private suspend fun safeApiCall(request: okhttp3.Request): Response {
+        var response = paheClient.newCall(request).await()
+        if (response.code == 429) {
+            response.close()
+            delay(12000.milliseconds)
+            response = paheClient.newCall(request).await()
+        }
+        return response
     }
 
     private fun normalizeSearchQuery(raw: String): String = raw
@@ -103,220 +310,31 @@ class AnimePaheProvider(
         .replace(Regex("[^a-z0-9]+"), "")
         .trim()
 
-    private suspend fun findAnimeSession(anilistId: Int, title: String): String? {
-        sessionCache[anilistId]?.let { return it }
-
-        val cleanTitle = title.trim().lowercase()
-        val querySeasonNumber = extractSeasonNumber(cleanTitle)
-        val baseTitle = stripSeasonInfo(title)
-
-        // Strategy 1: Full title
-        var result = searchApiForSession(normalizeTitle(title), querySeasonNumber, title)
-        if (result != null) {
-            sessionCache[anilistId] = result
-            return result
-        }
-
-        // Strategy 2: Base title (strips "Season 2" to get all entries, then matches season number)
-        if (querySeasonNumber != null && baseTitle != title) {
-            result = searchApiForSession(normalizeTitle(baseTitle), querySeasonNumber, baseTitle)
-            if (result != null) {
-                sessionCache[anilistId] = result
-                return result
-            }
-        }
-
-        // Strategy 3: Romaji fallback
-        val romajiTitle = fetchTitleFromAniList(anilistId, preferRomaji = true)
-        if (romajiTitle != null && romajiTitle.lowercase() != cleanTitle) {
-            val romajiSeason = extractSeasonNumber(romajiTitle.lowercase())
-            result = searchApiForSession(normalizeTitle(romajiTitle), romajiSeason, romajiTitle)
-            if (result != null) {
-                sessionCache[anilistId] = result
-                return result
-            }
-        }
-
-        return null
-    }
-
-    private suspend fun searchApiForSession(normalizedTitle: String, querySeasonNumber: Int?, originalTitle: String): String? {
-        val searchUrl = baseUrl.toHttpUrl().newBuilder().apply {
-            addPathSegment("api")
-            addQueryParameter("m", "search")
-            addQueryParameter("q", normalizeSearchQuery(originalTitle))
-        }.build()
-
-        val response = paheClient.newCall(GET(searchUrl, paheHeaders)).await()
-        if (!response.isSuccessful) {
-            response.close()
-            throw Exception("HTTP ${response.code} from search API")
-        }
-
-        val result = response.parseAs<PaheResponseDto<PaheSearchResultDto>>()
-        if (result.items.isEmpty()) return null
-
-        // 1. Exact match
-        var matched = result.items.firstOrNull { normalizeTitle(it.title) == normalizedTitle }
-
-        // 2. Season match
-        if (matched == null && querySeasonNumber != null) {
-            matched = result.items.firstOrNull {
-                extractSeasonNumber(normalizeTitle(it.title)) == querySeasonNumber
-            }
-        }
-
-        // 3. Base show match (no season number)
-        if (matched == null && querySeasonNumber == null) {
-            matched = result.items.firstOrNull {
-                extractSeasonNumber(normalizeTitle(it.title)) == null
-            }
-        }
-
-        return matched?.session ?: result.items.firstOrNull()?.session
-    }
-
-    // ==================== Core Flow ====================
-
-    override suspend fun fetchVideos(anime: SAnime, episode: SEpisode): List<Video> {
-        return try {
-            val meta = EpisodeMeta.from(episode)
-            val title = anime.title.takeIf { it.isNotBlank() } ?: meta.title
-            
-            if (title.isBlank()) {
-                val anilistTitle = fetchTitleFromAniList(meta.anilistId, preferRomaji = false)
-                if (anilistTitle.isNullOrBlank()) return dbg("title blank (AL: ${meta.anilistId})")
-                return fetchVideosWithTitle(anilistTitle, meta)
-            }
-            return fetchVideosWithTitle(title, meta)
-        } catch (e: Throwable) {
-            dbg("FATAL: ${e::class.simpleName}: ${e.message?.take(60)}")
-        }
-    }
-
-    private suspend fun fetchVideosWithTitle(title: String, meta: EpisodeMeta): List<Video> {
-        val animeSession = findAnimeSession(meta.anilistId, title)
-            ?: return dbg("0 results for '${title.take(30)}' on $baseUrl")
-
-        val episodeSession = fetchEpisodeSession(animeSession, meta.epNum)
-            ?: return dbg("0 episodes found for ep ${meta.epNum}")
-
-        val videos = extractVideos(animeSession, episodeSession)
-        if (videos.isEmpty()) return dbg("Extractor returned 0 videos")
-        return videos
-    }
-
-    private suspend fun fetchEpisodeSession(animeSession: String, epNum: Int): String? {
-        var page = 1
-        val allEpisodes = mutableListOf<PaheEpisodeDto>()
-        
-        while (true) {
-            val url = baseUrl.toHttpUrl().newBuilder().apply {
-                addPathSegment("api")
-                addQueryParameter("m", "release")
-                addQueryParameter("id", animeSession)
-                addQueryParameter("sort", "episode_asc")
-                addQueryParameter("page", page.toString())
-            }.build()
-
-            val response = paheClient.newCall(GET(url, paheHeaders)).await()
-            if (!response.isSuccessful) {
-                response.close()
-                throw Exception("HTTP ${response.code} from episode API")
-            }
-
-            val episodesData = response.parseAs<PaheResponseDto<PaheEpisodeDto>>()
-            allEpisodes.addAll(episodesData.items)
-
-            // 1. Try exact match first
-            val exactMatch = episodesData.items.firstOrNull { abs(it.episodeNumber - epNum.toFloat()) < 0.001f }
-            if (exactMatch != null) return exactMatch.session
-
-            if (page >= episodesData.lastPage) break
-            page++
-        }
-        
-        // 2. FALLBACK: Absolute vs Relative numbering mismatch
-        // If AniList says "Episode 1" but the site lists it as "Episode 29" (continuing from S1),
-        // we just grab the Nth episode from the sorted list.
-        if (epNum > 0 && epNum <= allEpisodes.size) {
-            val sorted = allEpisodes.sortedBy { it.episodeNumber }
-            return sorted[epNum - 1].session
-        }
-        
-        return null
-    }
-
-    private suspend fun extractVideos(animeSession: String, episodeSession: String): List<Video> {
-        val response = paheClient.newCall(
-            GET("$baseUrl/play/$animeSession/$episodeSession", paheHeaders),
-        ).awaitSuccess()
-
-        val document = response.useAsJsoup()
-
-        val downloadLinks = document.select("div#pickDownload > a")
-        val links = document.select("div#resolutionMenu > button").withIndex().map { (index, btn) ->
-            Triple(btn.attr("data-src"), downloadLinks.getOrNull(index)?.attr("href"), btn.text())
-        }
-
-        if (links.isEmpty()) return emptyList()
-
-        val useHLS = preferences.getBoolean(PREF_LINK_TYPE_KEY, PREF_LINK_TYPE_DEFAULT)
-
-        val videos = if (!useHLS) {
-            val mp4Videos = links.mapNotNull { (_, paheWinLink, quality) ->
-                if (paheWinLink.isNullOrBlank()) return@mapNotNull null
-                try {
-                    KwikExtractor(paheClient, paheHeaders, cfBypassUserAgent).getStreamVideo(paheWinLink, quality)
-                } catch (e: Throwable) { null }
-            }
-            AnimePaheHlsServer.processMp4VideoList(paheClient, mp4Videos)
-        } else { emptyList() }
-
-        return videos.ifEmpty {
-            val hlsVideos = links.mapNotNull { (kwikLink, _, quality) ->
-                try {
-                    KwikExtractor(kwikClient, paheHeaders, cfBypassUserAgent).getHlsVideo(kwikLink, referer = "$baseUrl/", quality = "$quality (HLS)")
-                } catch (e: Throwable) { null }
-            }
-            AnimePaheHlsServer.processVideoList(kwikClient, hlsVideos)
-        }
-    }
-
-    // ==================== AniList Fallback ====================
-
-    @Serializable private data class AniListMediaResponse(val Media: AniListMediaFull? = null)
-    @Serializable private data class AniListMediaFull(val title: AniListTitlesFull? = null)
-    @Serializable private data class AniListTitlesFull(val english: String? = null, val romaji: String? = null)
-
-    private suspend fun fetchTitleFromAniList(anilistId: Int, preferRomaji: Boolean): String? {
-        val query = """
-            query(${'$'}id: Int) {
-                Media(id: ${'$'}id, type: ANIME) {
-                    title { english romaji }
-                }
-            }
-        """.trimIndent()
-
-        val variables = buildJsonObject { put("id", anilistId) }
-
-        return try {
-            val request = graphQLPost("https://graphql.anilist.co", paheHeaders, query, variables = variables)
-            val response = client.newCall(request).awaitSuccess()
-            val data = response.parseGraphQLAs<AniListMediaResponse>()
-            if (preferRomaji) data.Media?.title?.romaji ?: data.Media?.title?.english
-            else data.Media?.title?.english ?: data.Media?.title?.romaji
-        } catch (_: Exception) { null }
-    }
-
     private fun dbg(msg: String): List<Video> = listOf(Video("debug://x", msg.take(120), "debug://x"))
 
     companion object {
+        private val QUALITY_REGEX_P by lazy { Regex("""(\d+)p""") }
+        private val QUALITY_REGEX by lazy { Regex("""(\d+)""") }
+
         private const val PREF_DOMAIN_KEY = "animepahe_preferred_domain"
         private val PREF_DOMAIN_VALUES = arrayOf("https://animepahe.pw", "https://animepahe.com", "https://animepahe.org")
         private const val PREF_DOMAIN_DEFAULT = "https://animepahe.pw"
+        
+        private const val PREF_QUALITY_KEY = "animepahe_preferred_quality"
+        private const val PREF_QUALITY_DEFAULT = "1080p"
+        
+        private const val PREF_LANG_KEY = "animepahe_preferred_lang"
+        private const val PREF_LANG_DEFAULT = "sub"
+        
         private const val PREF_LINK_TYPE_KEY = "animepahe_preferred_link_type"
         private const val PREF_LINK_TYPE_DEFAULT = true
+        
+        private const val PREF_AV1_KEY = "animepahe_preferred_av1"
+        private const val PREF_AV1_DEFAULT = false
+        
+        private const val PREF_SHOW_SITE_NUMBER_KEY = "animepahe_show_site_number"
+        private const val PREF_SHOW_SITE_NUMBER_DEFAULT = false
+        
         private const val PREF_CF_UA_KEY = "animepahe_cf_bypass_ua"
     }
 }
